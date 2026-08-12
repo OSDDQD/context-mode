@@ -1337,9 +1337,11 @@ WHEN:
   - You want repeat lookups against the same URL to be cheap (TTL cache hits return only a hint, no re-fetch)
   - You want a long-lived cache window (override \`ttl\` upward for stable specs) or a guaranteed-fresh fetch (\`ttl: 0\` or \`force: true\`)
 
+SPA pages: fetch them the same way. There is no headless browser, and measurement says none is needed \u2014 over 36 documentation pages, 4 had the article absent from the HTTP response and 4 of 4 were recovered without executing JavaScript. The fetch climbs a ladder in cost order and tells you which rung answered: (1) \`Accept: text/markdown\` on the request it was already making, (2a) the page's \`.md\` sibling, (2b) the host's llms.txt, (4) block classification against other pages of the same host, (5) a refusal naming the urls it already tried. Rungs past 1 cost a request only when the cheaper rung returned a JavaScript shell.
+
 WHEN NOT:
   - You already have the content locally \u2014 store it via the inline index tool
-  - The page is SPA-rendered (JavaScript-required to materialize content) \u2014 this is a plain HTTP fetch, no headless browser
+  - The page is an application rather than a document (a whiteboard, a diagram editor, a dashboard) \u2014 there is no article to fetch, and the fetch will say so rather than index the shell
 
 RETURNS:
   Per-source preview windows extracted around indexable headings plus indexing metadata (chunk counts, source labels, cache state). Raw content is NOT echoed back \u2014 retrieve any section on-demand via ctx_search(source: "<label>"). Concurrency parallelizes the fetch phase up to your chosen value (capped by the host's logical CPU count); the FTS5 write phase always runs serially because SQLite is a single-writer store. Net latency = max(fetch latency across the pool) + sum(per-source index write time). Cache hits skip both phases and return a small freshness hint instead of re-fetching. Use 4-8 for stable I/O-bound batches; lower the value when the target host enforces a per-IP rate limit you cannot raise.
