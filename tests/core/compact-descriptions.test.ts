@@ -1,9 +1,10 @@
 /**
  * Compact tool descriptions (#1031).
  *
- * The verbose descriptions are ~6K tokens of steering prose shipped on every
- * request. These tests pin the compact default and the escape hatch, and
- * assert the compact text still carries the signals a cold model needs.
+ * The verbose descriptions are ~4.7K tokens of steering prose shipped on every
+ * request; the compact set measures ~1.2K. These tests pin the compact default
+ * and the escape hatch, and assert the compact text still carries the signals
+ * a cold model needs.
  */
 
 import { describe, expect, test, afterEach } from "vitest";

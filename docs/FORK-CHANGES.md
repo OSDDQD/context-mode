@@ -86,15 +86,22 @@ first, as it always did.
 
 `src/server.ts`
 
-The authored descriptions are ~24K characters of steering prose shipped in the
-tool definitions of every request — roughly 6K tokens per call, in a plugin
-whose entire purpose is not spending tokens on bytes the model does not need.
-Once the SessionStart routing block and the project rules have said "think in
-code", most of it is a second copy.
+The authored descriptions are steering prose shipped in the tool definitions of
+every request, in a plugin whose entire purpose is not spending tokens on bytes
+the model does not need. Once the SessionStart routing block and the project
+rules have said "think in code", most of it is a second copy.
 
 The long form stays in the source as the reference; a compact table is what
 ships. `CONTEXT_MODE_TOOL_DESCRIPTIONS=full` restores the original text for
 hosts that inject no routing block of their own.
+
+Measured over a live `tools/list` (12 tools, this fork):
+
+| | description chars | ≈ tokens |
+|---|---|---|
+| `full` | 18 739 | 4 685 |
+| compact (default) | 4 971 | 1 243 |
+| **saved per request** | **13 768** | **≈3 442 (73%)** |
 
 ## 5. Incremental code indexing
 
