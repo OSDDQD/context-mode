@@ -1,5 +1,11 @@
 # Context Mode
 
+> **This is a fork** of [mksglu/context-mode](https://github.com/mksglu/context-mode) (v1.0.169) with seven additions:
+> a user-extensible bounded-command allowlist, missed-redirect telemetry in `ctx_stats`, a read-only `ctx_gather`
+> tool that survives plan mode, compact tool descriptions (~6K tokens/request reclaimed), incremental indexing of
+> edited files, optional hybrid semantic search, and an opt-in proxy for `ctx_fetch_and_index`.
+> See **[docs/FORK-CHANGES.md](docs/FORK-CHANGES.md)** for the full rationale, env vars, and trade-offs.
+
 **The other half of the context problem.**
 
 [![users](https://img.shields.io/badge/dynamic/json?url=https%3A%2F%2Fcdn.jsdelivr.net%2Fgh%2Fmksglu%2Fcontext-mode%40main%2Fstats.json&query=%24.message&label=users&color=brightgreen)](https://www.npmjs.com/package/context-mode) [![npm](https://img.shields.io/badge/dynamic/json?url=https%3A%2F%2Fcdn.jsdelivr.net%2Fgh%2Fmksglu%2Fcontext-mode%40main%2Fstats.json&query=%24.npm&label=npm&color=blue)](https://www.npmjs.com/package/context-mode) [![marketplace](https://img.shields.io/badge/dynamic/json?url=https%3A%2F%2Fcdn.jsdelivr.net%2Fgh%2Fmksglu%2Fcontext-mode%40main%2Fstats.json&query=%24.marketplace&label=marketplace&color=blue)](https://github.com/mksglu/context-mode) [![GitHub stars](https://img.shields.io/github/stars/mksglu/context-mode?style=flat&color=yellow)](https://github.com/mksglu/context-mode/stargazers) [![GitHub forks](https://img.shields.io/github/forks/mksglu/context-mode?style=flat&color=blue)](https://github.com/mksglu/context-mode/network/members) [![Last commit](https://img.shields.io/github/last-commit/mksglu/context-mode?color=green)](https://github.com/mksglu/context-mode/commits) [![License: ELv2](https://img.shields.io/badge/License-ELv2-blue.svg)](LICENSE)

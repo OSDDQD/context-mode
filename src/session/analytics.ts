@@ -122,6 +122,19 @@ export interface ConversationStats {
    * when no events recorded yet.
    */
   byDay?: Array<{ ms: number; count: number; rescueBytes?: number }>;
+  /**
+   * The other half of the savings picture: native tool calls whose output
+   * entered the context window whole because nothing redirected them.
+   * Written by the PostToolUse hook (category `missed-redirect`). Undefined
+   * when the session recorded none — the renderer then skips the block
+   * rather than printing a triumphant zero.
+   */
+  missedRedirect?: {
+    count: number;
+    bytes: number;
+    /** Heaviest offenders, descending by bytes. */
+    top: Array<{ tool: string; bytes: number; summary: string }>;
+  };
 }
 
 // ─────────────────────────────────────────────────────────
@@ -254,6 +267,7 @@ export const categoryLabels: Record<string, string> = {
   "user-prompt": "Your messages remembered",
   plan: "Plans drafted",
   "blocked-on": "Blockers logged",
+  "missed-redirect": "Payloads that slipped through",
 };
 
 /** Explains why each category matters for continuity. */
@@ -918,6 +932,9 @@ export function getConversationStats(opts: {
   // overlays the ◆ /compact glyph in the section-1 horizontal timeline).
   const byDayMap = new Map<number, { count: number; rescueBytes: number }>();
   const dayKey = (ms: number): number => Math.floor(ms / 86_400_000) * 86_400_000;
+  let missedCount = 0;
+  let missedBytes = 0;
+  const missedTop: Array<{ tool: string; bytes: number; summary: string }> = [];
 
   for (const file of dbFiles) {
     const dbPath = join(sessionsDir, file);
@@ -979,6 +996,23 @@ export function getConversationStats(opts: {
             }
           }
         } catch { /* old schema */ }
+        // Missed-redirect rows: the PostToolUse hook encodes the payload size
+        // in `data` (`Bash: 15600 bytes unrouted — git log …`) because
+        // session_events has no column for "bytes that got through".
+        try {
+          const missedRows = sdb.prepare(
+            "SELECT data FROM session_events WHERE session_id = ? AND category = 'missed-redirect'",
+          ).all(sessionId) as Array<{ data: string | null }>;
+          for (const row of missedRows) {
+            const m = /^(\S+):\s+(\d+)\s+bytes unrouted(?:\s+—\s+(.*))?$/.exec(row.data ?? "");
+            if (!m) continue;
+            const bytes = parseInt(m[2], 10);
+            if (!Number.isFinite(bytes) || bytes <= 0) continue;
+            missedCount++;
+            missedBytes += bytes;
+            missedTop.push({ tool: m[1], bytes, summary: (m[3] ?? "").trim() });
+          }
+        } catch { /* old schema */ }
       } finally {
         sdb.close();
       }
@@ -1015,6 +1049,15 @@ export function getConversationStats(opts: {
     lastEventMs:  lastMs > 0 ? lastMs : 0,
     lastRescueMs: lastRescueMs > 0 ? lastRescueMs : undefined,
     byDay,
+    ...(missedCount > 0
+      ? {
+          missedRedirect: {
+            count: missedCount,
+            bytes: missedBytes,
+            top: missedTop.sort((a, b) => b.bytes - a.bytes).slice(0, 3),
+          },
+        }
+      : {}),
   };
 }
 
@@ -2270,6 +2313,21 @@ function renderNarrative5Section(args: {
   out.push(
     `  All your work: ${kb(lifetimeBytes)} kept out · ${allCaps.toLocaleString(locale)} captures across ${distinctProj} project${distinctProj === 1 ? "" : "s"}${lifeStartedYMD ? ` · since ${lifeStartedYMD}` : ""}.`,
   );
+  // The honest counterweight: what routing did NOT catch. Printed only when
+  // there is something to report, so a clean session stays clean.
+  const missed = conversation.missedRedirect;
+  if (missed && missed.count > 0) {
+    out.push("");
+    out.push(
+      `  Slipped through unrouted: ${kb(missed.bytes)} across ${missed.count} call${missed.count === 1 ? "" : "s"} — these landed in context whole.`,
+    );
+    for (const m of missed.top) {
+      const summary = m.summary.length > 58 ? m.summary.slice(0, 57) + "…" : m.summary;
+      out.push(`    ${m.tool.padEnd(8)} ${kb(m.bytes).padStart(9)}  ${summary}`);
+    }
+    out.push("    Route these through ctx_execute / ctx_batch_execute, or add them to");
+    out.push("    safe-commands.txt if their output really is small.");
+  }
   out.push("");
   out.push("");
 

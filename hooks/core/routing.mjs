@@ -321,7 +321,118 @@ const SAFE_COMMAND_PATTERNS = [
   // Version probes (--version anywhere, or `cmd -V`)
   /(?:^|\s)--version(?:\s|$)/,
   /^\S+\s+-V(?:\s|$)/,
+  // Mutating git plumbing whose stdout is a fixed handful of lines.
+  // Same "silent or near-silent on success" invariant as cp/mv/rm above:
+  // these report what they did, not the data they touched.
+  /^git\s+add(?:\s+[^\r\n]+)?$/,
+  /^git\s+commit(?:\s+[^\r\n]+)?$/,
+  /^git\s+push(?:\s+[^\r\n]+)?$/,
+  /^git\s+pull(?:\s+[^\r\n]+)?$/,
+  /^git\s+fetch(?:\s+[^\r\n]+)?$/,
+  /^git\s+switch(?:\s+[^\r\n]+)?$/,
+  /^git\s+checkout(?:\s+[^\r\n]+)?$/,
+  /^git\s+stash(?:\s+(?:push|pop|apply|drop)(?:\s+[^\r\n]+)?)?$/,
+  /^git\s+init(?:\s+[^\r\n]+)?$/,
+  // Silent-on-success filesystem/process ops. `-v` / `-c` (chmod's
+  // --changes) print one line per file, so they are carved out exactly
+  // like the cp/mv/rm patterns above.
+  /^chmod(?!\s+-[a-zA-Z]*[vc][a-zA-Z]*)(?!\s+--verbose\b)(?!\s+--changes\b)\s+[^\r\n]+$/,
+  /^chown(?!\s+-[a-zA-Z]*[vc][a-zA-Z]*)(?!\s+--verbose\b)(?!\s+--changes\b)\s+[^\r\n]+$/,
+  /^kill(?:\s+[^\r\n]+)?$/,
+  /^pkill(?:\s+[^\r\n]+)?$/,
+  /^sleep\s+\S+$/,
+  /^mktemp(?:\s+[^\r\n]+)?$/,
 ];
+
+// ─── User-extensible allowlist (#463 follow-up) ───
+//
+// Every project has bounded commands the built-in list cannot know about
+// (`ssh prod-web systemctl is-active nginx`, `docker compose ps`, an
+// in-house CLI that prints one status line). Without an extension point the
+// only options are "eat the nudge on every call" or "widen the built-in
+// list for everyone" — the first trains the agent to ignore warnings, the
+// second weakens the default for people who never asked for it.
+//
+// Two sources, both optional:
+//   CONTEXT_MODE_SAFE_COMMANDS       — patterns separated by `|||`
+//   CONTEXT_MODE_SAFE_COMMANDS_FILE  — file with one pattern per line
+//                                      (`#` comments and blanks ignored)
+//   default file: <configDir>/context-mode/safe-commands.txt
+//
+// Each line is a JS regex source compiled with `new RegExp(line)`. User
+// patterns are consulted AFTER SHELL_CONTROL_OPERATORS has already rejected
+// pipes, redirects, substitutions and separators, so a sloppy user pattern
+// widens the nudge carve-out — it cannot widen what the shell may run, and
+// it never touches the CASE B security deny gate.
+const USER_PATTERN_LIMIT = 200;
+const USER_PATTERN_MAX_LENGTH = 500;
+
+// Inlined config-dir resolution — same contract as
+// session-helpers.mjs::resolveConfigDir, kept local so the allowlist lookup
+// adds no import to a module that runs on every Bash call.
+function resolveConfigDirSafe() {
+  const envVal = process.env.CLAUDE_CONFIG_DIR;
+  if (envVal) {
+    if (envVal.startsWith("~")) return resolve(homedir(), envVal.replace(/^~[/\\]?/, ""));
+    return envVal;
+  }
+  return resolve(homedir(), ".claude");
+}
+
+/** @type {RegExp[] | null} */
+let _userSafePatterns = null;
+
+/** Reset the memoized user allowlist. Test seam. */
+export function resetUserSafePatterns() {
+  _userSafePatterns = null;
+}
+
+/**
+ * @param {string[]} lines Raw pattern sources.
+ * @returns {RegExp[]} Compiled patterns; unparseable ones are skipped.
+ */
+function compileUserPatterns(lines) {
+  const out = [];
+  for (const raw of lines) {
+    const line = raw.trim();
+    if (!line || line.startsWith("#")) continue;
+    if (line.length > USER_PATTERN_MAX_LENGTH) continue;
+    if (out.length >= USER_PATTERN_LIMIT) break;
+    try {
+      out.push(new RegExp(line));
+    } catch {
+      // Malformed pattern — skip it rather than take the whole hook down.
+      // The hook runs on every Bash call; a throw here would be a hard stop.
+    }
+  }
+  return out;
+}
+
+/**
+ * @returns {RegExp[]} User-supplied bounded-command patterns (possibly empty).
+ */
+function getUserSafePatterns() {
+  if (_userSafePatterns) return _userSafePatterns;
+
+  const lines = [];
+
+  const inline = process.env.CONTEXT_MODE_SAFE_COMMANDS;
+  if (inline) lines.push(...inline.split("|||"));
+
+  try {
+    const filePath =
+      process.env.CONTEXT_MODE_SAFE_COMMANDS_FILE ||
+      resolve(resolveConfigDirSafe(), "context-mode", "safe-commands.txt");
+    if (existsSync(filePath)) {
+      lines.push(...readFileSync(filePath, "utf-8").split(/\r?\n/));
+    }
+  } catch {
+    // No file access / no config dir — inline patterns still apply.
+  }
+
+  _userSafePatterns = compileUserPatterns(lines);
+  return _userSafePatterns;
+}
 
 // Bash shell control operators that can compose a safe command with an
 // unbounded sink. Any match disqualifies the command from the allowlist.
@@ -348,7 +459,8 @@ export function isStructurallyBounded(command) {
   if (!command) return false;
   const trimmed = command.trim();
   if (SHELL_CONTROL_OPERATORS.test(trimmed)) return false;
-  return SAFE_COMMAND_PATTERNS.some(rx => rx.test(trimmed));
+  if (SAFE_COMMAND_PATTERNS.some(rx => rx.test(trimmed))) return true;
+  return getUserSafePatterns().some(rx => rx.test(trimmed));
 }
 
 // Try to import security module — may not exist

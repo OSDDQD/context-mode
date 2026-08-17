@@ -222,6 +222,14 @@ interface ExecuteOptions {
    * a non-project cwd (e.g. $HOME).
    */
   cwd?: string;
+  /**
+   * Extra environment variables layered on top of the sandbox env, applied
+   * last so they win over the sandbox defaults. Server-internal only — no
+   * MCP tool input reaches this, which is why it may override forced values
+   * (the proxy path needs `NODE_USE_ENV_PROXY` set before Node bootstraps,
+   * so setting it from inside the script would be too late).
+   */
+  env?: Record<string, string>;
 }
 
 interface ExecuteFileOptions extends ExecuteOptions {
@@ -280,7 +288,7 @@ export class PolyglotExecutor {
   }
 
   async execute(opts: ExecuteOptions): Promise<ExecResult> {
-    const { language, code, timeout, background = false, cwd: cwdOverride } = opts;
+    const { language, code, timeout, background = false, cwd: cwdOverride, env: envOverride } = opts;
     const tmpDir = mkdtempSync(join(OS_TMPDIR, ".ctx-mode-"));
 
     try {
@@ -304,7 +312,7 @@ export class PolyglotExecutor {
       // Issue #45 — `cwdOverride` lets per-call sites (Codex MCP handlers) pin
       // cwd without mutating process-wide state.
       const cwd = cwdOverride ?? this.#projectRoot;
-      const result = await this.#spawn(cmd, cwd, tmpDir, timeout, background);
+      const result = await this.#spawn(cmd, cwd, tmpDir, timeout, background, envOverride);
 
       // Skip tmpDir cleanup if process was backgrounded — it may still need files
       if (!result.backgrounded) {
@@ -412,6 +420,7 @@ export class PolyglotExecutor {
     sandboxTmpDir: string,
     timeout: number | undefined,
     background = false,
+    envOverride?: Record<string, string>,
   ): Promise<ExecResult> {
     return new Promise((res) => {
       // Only .cmd/.bat shims need shell on Windows; real executables don't.
@@ -440,7 +449,7 @@ export class PolyglotExecutor {
       const commonOpts = {
         cwd,
         stdio: ["ignore", "pipe", "pipe"] as ["ignore", "pipe", "pipe"],
-        env: this.#buildSafeEnv(sandboxTmpDir),
+        env: { ...this.#buildSafeEnv(sandboxTmpDir), ...(envOverride ?? {}) },
         // On Unix, create a new process group so killTree can kill all children
         detached: !isWin,
         // Hide the spawned-process console window on Windows. Without this,

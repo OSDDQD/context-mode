@@ -95,6 +95,7 @@ await runHook(async () => {
     // PreToolUse wrote `context-mode-redirect-${sessionId}.txt` for tools whose
     // output we kept out of the model's context window (curl/wget, WebFetch,
     // large Read). Format: `tool:type:bytesAvoided:commandSummary` (Override C).
+    let redirectEmitted = false;
     try {
       const redirectPath = resolve(tmpdir(), `context-mode-redirect-${sessionId}.txt`);
       let redirectData;
@@ -138,10 +139,72 @@ await runHook(async () => {
               "PreToolUse",
               resolveProjectAttributions,
             );
+            redirectEmitted = true;
           }
         }
       }
     } catch { /* best-effort — never block hook */ }
+
+    // ─── Missed-redirect telemetry: what got through unrouted ───
+    // ctx_stats can show what routing SAVED; it has never shown what routing
+    // MISSED. Without that half, the allowlist and the nudge thresholds can
+    // only be tuned by guesswork. Any native data-fetching tool that returned
+    // more than the threshold WITHOUT a redirect marker is, by definition, a
+    // payload that entered the context window whole — record it so the
+    // allowlist and thresholds have evidence behind them.
+    try {
+      const toolName = input.tool_name ?? "";
+      const FLOODY_TOOLS = new Set(["Bash", "Read", "Grep", "Glob", "WebFetch", "Shell"]);
+      if (!redirectEmitted && FLOODY_TOOLS.has(toolName)) {
+        const rawMin = Number.parseInt(process.env.CONTEXT_MODE_MISSED_REDIRECT_MIN_BYTES ?? "", 10);
+        // 2000 bytes ≈ the "> 20 lines of output" line the routing block draws.
+        const minBytes = Number.isFinite(rawMin) && rawMin > 0 ? rawMin : 2000;
+        const response = typeof input.tool_response === "string"
+          ? input.tool_response
+          : JSON.stringify(input.tool_response ?? "");
+        const bytes = Buffer.byteLength(response, "utf-8");
+        if (bytes >= minBytes) {
+          const ti = input.tool_input ?? {};
+          const summary = String(
+            ti.command ?? ti.file_path ?? ti.pattern ?? ti.url ?? ti.path ?? "",
+          ).replace(/\s+/g, " ").slice(0, 120);
+          attributeAndInsertEvents(
+            db,
+            sessionId,
+            [{
+              type: "missed_redirect",
+              category: "missed-redirect",
+              // Machine-parseable prefix (analytics reads the byte count back
+              // out of it), human-readable tail.
+              data: `${toolName}: ${bytes} bytes unrouted — ${summary}`,
+              priority: 3,
+            }],
+            input,
+            projectDir,
+            "PostToolUse",
+            resolveProjectAttributions,
+          );
+        }
+      }
+    } catch { /* telemetry is best-effort — never block the hook */ }
+
+    // ─── Code index queue: record files the agent just wrote or edited ───
+    // One append, no SQLite: the MCP server drains this queue the next time
+    // it opens the content store (src/session/code-index.ts). Keeps the hook
+    // inside its <20ms budget while making the source tree searchable.
+    try {
+      if (process.env.CONTEXT_MODE_CODE_INDEX !== "0") {
+        const toolName = input.tool_name ?? "";
+        if (toolName === "Write" || toolName === "Edit" || toolName === "MultiEdit" || toolName === "NotebookEdit") {
+          const ti = input.tool_input ?? {};
+          const filePath = ti.file_path ?? ti.notebook_path ?? ti.path;
+          if (typeof filePath === "string" && filePath) {
+            const { appendFileSync } = await import("node:fs");
+            appendFileSync(resolve(dirname(dbPath), "code-index-queue.txt"), filePath + "\n", "utf-8");
+          }
+        }
+      }
+    } catch { /* queueing is best-effort */ }
 
     // ─── Category 27: Latency — read cross-hook marker and emit event if slow ───
     try {

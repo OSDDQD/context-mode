@@ -94,6 +94,7 @@ describe("ContextModePlugin", () => {
         "ctx_execute",
         "ctx_execute_file",
         "ctx_fetch_and_index",
+        "ctx_gather",
         "ctx_index",
         "ctx_insight",
         "ctx_purge",

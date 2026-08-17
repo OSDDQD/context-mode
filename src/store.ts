@@ -448,6 +448,18 @@ export class ContentStore {
     this.#prepareStatements();
   }
 
+  /**
+   * Raw handle for the optional semantic layer (src/search/hybrid.ts).
+   *
+   * The vector table lives in this same DB so it is cleaned up, migrated,
+   * and purged with the chunks it describes. Exposing the handle beats
+   * threading a dozen vector-specific methods through this class for a
+   * feature that is off by default.
+   */
+  rawDb(): DatabaseInstance {
+    return this.#db;
+  }
+
   /** Delete this session's DB files. Call on process exit. */
   cleanup(): void {
     try {

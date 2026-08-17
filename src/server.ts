@@ -30,6 +30,9 @@ import {
   hasBunRuntime,
 } from "./runtime.js";
 import { classifyNonZeroExit } from "./exit-classify.js";
+import { findWriteCommands } from "./read-only.js";
+import { drainCodeIndexQueue } from "./session/code-index.js";
+import { hybridSearch, type HybridDb, type LexicalResult } from "./search/hybrid.js";
 import { startLifecycleGuard, noteMcpActivity, noteRequestStart, noteRequestEnd, attachMcpActivityTap } from "./lifecycle.js";
 import { charSafePrefix } from "./truncate.js";
 import {
@@ -274,6 +277,61 @@ export function registerEmptyToolsListHandler(target: McpServer = server): void 
   target.server.setRequestHandler(ListToolsRequestSchema, async () => ({ tools: [] }));
 }
 
+/**
+ * Compact tool descriptions (#1031).
+ *
+ * The verbose descriptions below are steering prose: they teach a cold model
+ * when to reach for the sandbox instead of Bash. That teaching is not free —
+ * the full set costs ~6K tokens of tool definitions on EVERY request, in a
+ * project whose entire purpose is to not spend tokens on bytes the model does
+ * not need. Once the routing block (SessionStart) and the project rules have
+ * already said "think in code", most of that prose is a second copy.
+ *
+ * So the long form stays in the source as the reference, and this table is
+ * what actually ships. `CONTEXT_MODE_TOOL_DESCRIPTIONS=full` restores the
+ * verbose text for hosts that inject no routing block of their own.
+ */
+const COMPACT_TOOL_DESCRIPTIONS: Record<string, string> = {
+  ctx_execute:
+    "Run code in a sandboxed subprocess (javascript, typescript, python, shell, ruby, go, rust, php, perl, r, elixir, csharp). " +
+    "Only what you print enters the conversation — the data your code reads stays in the sandbox. " +
+    "Use it to derive an answer FROM data (filter, count, parse, aggregate) instead of reading the raw bytes. " +
+    "`background: true` keeps servers/daemons alive; `intent` auto-indexes large output for ctx_search instead of returning it. " +
+    "File writes do NOT persist — use Write/Edit for those.",
+  ctx_execute_file:
+    "Read a file into a sandboxed FILE_CONTENT variable and run code over it; only what you print enters the conversation. " +
+    "Use when you need to KNOW something about a file (counts, matches, parsed structure) rather than SEE all of it. " +
+    "Use the native Read tool instead when you intend to edit the file.",
+  ctx_batch_execute:
+    "Run multiple shell commands in one call; each output is auto-indexed, and `queries` returns the matching sections in the same round trip. " +
+    "Use for 3+ related commands, or when the combined output is too large to read. " +
+    "`concurrency` 2-8 parallelizes I/O-bound work; keep it at 1 for CPU-bound or stateful commands. " +
+    "Raw output is never echoed in full — only matched windows. See ctx_gather for a read-only variant.",
+  ctx_search:
+    "Search the knowledge base (indexed content + auto-captured session memory) with stemming + trigram matching, fused and reranked. " +
+    "Batch every question into one `queries` array. `source` scopes to one label, `sort: \"timeline\"` gives chronological recall across sessions, " +
+    "`project: \"global\"` spans all projects. Returns window-extracted snippets, not whole documents.",
+  ctx_index:
+    "Store content in the searchable knowledge base (FTS5/BM25). Markdown splits by heading, code keeps its blocks. " +
+    "Use for content you want to recall later without re-reading the source; `file_path` enables staleness detection.",
+  ctx_fetch_and_index:
+    "Fetch URL(s), convert to markdown, index them, and return only the section list — raw page bytes never enter the conversation. " +
+    "Follow with ctx_search to read what matters. Accepts `url` or `requests: [{url, source}]` with `concurrency` 1-8. " +
+    "Full network access; retry once on transient DNS errors (EAI_AGAIN, ETIMEDOUT, ENETUNREACH).",
+  ctx_gather:
+    "Read-only ctx_batch_execute: inspection commands only (cat/ls/grep/find/jq, git log|show|diff|status, docker ps, kubectl get, npm ls). " +
+    "Refuses redirections, command substitution, sudo, and unknown binaries. Use it to gather context in plan mode.",
+};
+
+/**
+ * @returns The description that should ship for `name` — compact by default,
+ *   the author-written verbose text when the operator asks for it.
+ */
+export function resolveToolDescription(name: string, full: unknown): unknown {
+  if (process.env.CONTEXT_MODE_TOOL_DESCRIPTIONS === "full") return full;
+  return COMPACT_TOOL_DESCRIPTIONS[name] ?? full;
+}
+
 const originalRegisterTool = server.registerTool.bind(server);
 (server as unknown as { registerTool: (...args: unknown[]) => unknown }).registerTool = (...args: unknown[]) => {
   const [name, config, handler] = args as [
@@ -284,6 +342,9 @@ const originalRegisterTool = server.registerTool.bind(server);
   if (suppressMcpToolsForNativePluginHost) {
     emitSuppressionDiagnostic();
     return undefined;
+  }
+  if (config && typeof config === "object" && "description" in config) {
+    config.description = resolveToolDescription(name, config.description);
   }
   const wrappedHandler = wrapToolHandler(name, handler);
   REGISTERED_CTX_TOOLS.push({ name, config, handler: wrappedHandler });
@@ -737,7 +798,24 @@ function getStore(): ContentStore {
     cleanupStaleDBs();
   }
   maybeIndexSessionEvents(_store);
+  maybeIndexEditedFiles(_store);
   return _store;
+}
+
+/**
+ * Drain the PostToolUse code-index queue into the store (see
+ * src/session/code-index.ts). Opt out with CONTEXT_MODE_CODE_INDEX=0.
+ */
+function maybeIndexEditedFiles(store: ContentStore): void {
+  if (process.env.CONTEXT_MODE_CODE_INDEX === "0") return;
+  try {
+    drainCodeIndexQueue({
+      store,
+      sessionsDir: getSessionDir(),
+      projectDir: getProjectDir(),
+      attribution: currentAttribution(),
+    });
+  } catch { /* best-effort — indexing never blocks a tool call */ }
 }
 
 // ─────────────────────────────────────────────────────────
@@ -2734,6 +2812,17 @@ EXAMPLE: ctx_search(queries: ["last user prompt", "active skills", "open blocker
             "like",
             relevanceAllowSet,
           );
+          // Semantic re-fusion (no-op unless CONTEXT_MODE_EMBEDDINGS_URL is
+          // configured). Lexical results pass through untouched on any
+          // failure, so an unreachable embedding endpoint degrades ranking
+          // rather than breaking search.
+          results = await hybridSearch({
+            db: store.rawDb() as unknown as HybridDb,
+            query: q,
+            lexical: results as unknown as LexicalResult[],
+            limit: effectiveLimit,
+            sourceFilter: source,
+          }) as unknown as typeof results;
         }
 
         if (results.length === 0) {
@@ -2835,6 +2924,33 @@ function resolveGfmPluginPath(): string {
 // Subprocess code that fetches a URL, detects Content-Type, and outputs a
 // __CM_CT__:<type> marker on the first line so the handler can route to the
 // appropriate indexing strategy.  HTML is converted to markdown via Turndown.
+/**
+ * Opt-in outbound proxy for the fetch subprocess (#1039).
+ *
+ * Behind a corporate proxy the sandbox fetch is unreachable without one, but
+ * honouring the ambient proxy silently would weaken the SSRF guard for
+ * everyone. So it stays off unless the operator opts in explicitly, and it
+ * only reports "on" when a proxy is actually configured.
+ */
+export function isProxyAllowed(): boolean {
+  if (process.env.CONTEXT_MODE_ALLOW_PROXY !== "1") return false;
+  return Boolean(
+    process.env.HTTPS_PROXY || process.env.https_proxy ||
+    process.env.HTTP_PROXY || process.env.http_proxy ||
+    process.env.ALL_PROXY || process.env.all_proxy,
+  );
+}
+
+/**
+ * Env layered onto the fetch subprocess. `NODE_USE_ENV_PROXY` must be set
+ * before Node bootstraps its global HTTP agent — setting it from inside the
+ * script would be a no-op, which is why this goes through the executor's
+ * `env` override rather than the script template.
+ */
+export function buildFetchEnv(): Record<string, string> | undefined {
+  return isProxyAllowed() ? { NODE_USE_ENV_PROXY: "1" } : undefined;
+}
+
 export function buildFetchCode(url: string, outputPath: string): string {
   const turndownPath = JSON.stringify(resolveTurndownPath());
   const gfmPath = JSON.stringify(resolveGfmPluginPath());
@@ -2864,6 +2980,7 @@ export function buildFetchCode(url: string, outputPath: string): string {
       ? `var classifyIp = ${classifyIpInner};`
       : `var ${classifyIpFnName} = ${classifyIpInner};\nvar classifyIp = ${classifyIpFnName};`;
   const strictMode = process.env.CTX_FETCH_STRICT === "1";
+  const proxyAllowed = isProxyAllowed();
   return `
 const TurndownService = require(${turndownPath});
 const { gfm } = require(${gfmPath});
@@ -2876,16 +2993,25 @@ const outputPath = ${escapedOutputPath};
 // Strip proxy env vars from this subprocess only. A configured outbound
 // proxy (HTTP_PROXY / HTTPS_PROXY / ALL_PROXY) would route fetch through
 // an arbitrary target — DNS resolution happens at the proxy and the
-// in-subprocess DNS rebinding guard never sees the rebound IP. The
-// sandbox fetch path has no legitimate need for an upstream proxy.
-delete process.env.HTTP_PROXY;
-delete process.env.HTTPS_PROXY;
-delete process.env.ALL_PROXY;
-delete process.env.http_proxy;
-delete process.env.https_proxy;
-delete process.env.all_proxy;
-delete process.env.npm_config_proxy;
-delete process.env.npm_config_https_proxy;
+// in-subprocess DNS rebinding guard never sees the rebound IP.
+//
+// #1039: on a corporate network the proxy is the ONLY route out, so the
+// unconditional strip turned every ctx_fetch_and_index call into a
+// connection timeout with no explanation. Stripping is still the default;
+// PROXY_ALLOWED flips it, and the operator who sets CONTEXT_MODE_ALLOW_PROXY
+// accepts that DNS now resolves at the proxy (the rebinding guard below
+// still runs, but it can only see what this process resolves itself).
+const PROXY_ALLOWED = ${JSON.stringify(proxyAllowed)};
+if (!PROXY_ALLOWED) {
+  delete process.env.HTTP_PROXY;
+  delete process.env.HTTPS_PROXY;
+  delete process.env.ALL_PROXY;
+  delete process.env.http_proxy;
+  delete process.env.https_proxy;
+  delete process.env.all_proxy;
+  delete process.env.npm_config_proxy;
+  delete process.env.npm_config_https_proxy;
+}
 
 ${classifyIpSrc}
 
@@ -3321,6 +3447,7 @@ async function fetchOneUrl(url: string, source: string | undefined, force: boole
       language: "javascript",
       code: fetchCode,
       timeout: 30_000,
+      env: buildFetchEnv(),
     });
     if (result.exitCode !== 0) {
       // Subprocess fetch failure — undici / fetch can surface EAI_AGAIN /
@@ -3775,7 +3902,23 @@ EXAMPLE: ctx_batch_execute(
         ),
     }),
   },
-  async ({ commands, queries, timeout, concurrency, cwd, query_scope }) => {
+  runBatchExecute,
+);
+
+/** Arguments accepted by both ctx_batch_execute and its read-only sibling. */
+interface BatchExecuteArgs {
+  commands: Array<{ label: string; command: string }>;
+  queries: string[];
+  timeout?: number;
+  concurrency?: number;
+  cwd?: string;
+  query_scope?: "batch" | "global";
+}
+
+async function runBatchExecute(
+  { commands, queries, timeout, concurrency, cwd, query_scope }: BatchExecuteArgs,
+) {
+  {
     // Security: check each command against deny patterns
     for (const cmd of commands) {
       const denied = checkDenyPolicy(cmd.command, "batch_execute");
@@ -3795,7 +3938,7 @@ EXAMPLE: ctx_batch_execute(
         commands,
         {
           timeout: effTimeout,
-          concurrency,
+          concurrency: concurrency ?? 1,
           nodeOptsPrefix,
           cwd,
           onFsBytes: (bytes) => { sessionStats.bytesSandboxed += bytes; },
@@ -3889,6 +4032,96 @@ EXAMPLE: ctx_batch_execute(
         isError: true,
       });
     }
+  }
+}
+
+// ─────────────────────────────────────────────────────────
+// Tool: gather — read-only sibling of batch_execute (#1048)
+// ─────────────────────────────────────────────────────────
+
+server.registerTool(
+  "ctx_gather",
+  {
+    title: "Gather (read-only)",
+    annotations: {
+      readOnlyHint: true,
+      destructiveHint: false,
+      idempotentHint: true,
+      openWorldHint: false,
+    },
+    description: `Read-only ctx_batch_execute: runs inspection commands, auto-indexes their output, and returns the sections matching \`queries\` — with a hard guarantee that nothing on the machine changed.
+
+Every command must be provably read-only. Accepted: file inspection (cat, ls, head, tail, grep, find, wc, jq, stat), read subcommands of the common multiplexers (git log|show|diff|status|branch, docker ps|logs|inspect, kubectl get|describe|logs, npm ls|view|outdated), and system probes. Refused: output redirection, command substitution, sudo, and any binary not on the allowlist.
+
+WHEN:
+  - The host is in plan mode, where tools that may write are refused outright — this is the read-only gather path that survives that gate
+  - You must be able to promise the caller that a gather step mutated nothing
+  - You want ctx_batch_execute's index-and-query round trip for a set of pure inspection commands
+
+WHEN NOT:
+  - Any command in the batch writes, installs, builds, or deploys — use ctx_batch_execute
+  - A single command whose short output you will read verbatim — Bash is simpler
+  - You are deriving an answer from data rather than collecting it — use ctx_execute
+
+RETURNS:
+  Auto-indexed section list per command label, plus the top matches per query. Raw output is NOT echoed in full — only the matched windows. When a command cannot be proven read-only, the call fails with that command named and nothing is executed.
+
+EXAMPLE: ctx_gather(
+  commands: [
+    {label: "recent commits", command: "git log -20 --oneline"},
+    {label: "failing service", command: "kubectl get pods -n prod"}
+  ],
+  queries: ["what changed recently", "which pods are unhealthy"]
+)`,
+    inputSchema: z.object({
+      commands: z.preprocess(coerceCommandsArray, z
+        .array(
+          z.object({
+            label: z.string().describe("Section header for this command's output"),
+            command: z.string().describe("Read-only shell command to execute"),
+          }),
+        )
+        .min(1))
+        .describe("Read-only commands to run. Output is labeled with the section header."),
+      queries: z
+        .array(z.string())
+        .min(1)
+        .describe("Search queries run against the indexed output. Batch every question here."),
+      concurrency: z
+        .number()
+        .int()
+        .min(1)
+        .max(8)
+        .optional()
+        .default(1)
+        .describe("Max commands to run in parallel (1-8). Use 4-8 for network-bound reads."),
+      cwd: z.string().optional().describe("Optional working directory for all commands."),
+      timeout: z.number().optional().describe("Max execution time in ms."),
+      query_scope: z
+        .enum(["batch", "global"])
+        .optional()
+        .default("batch")
+        .describe("`batch` (default) searches only this call's output; `global` searches the whole index."),
+    }),
+  },
+  async ({ commands, queries, timeout, concurrency, cwd, query_scope }) => {
+    const writes = findWriteCommands(commands);
+    if (writes.length > 0) {
+      const listed = writes.map(c => `  • ${c.label}: ${c.command}`).join("\n");
+      return trackResponse("ctx_gather", {
+        content: [
+          {
+            type: "text" as const,
+            text:
+              `ctx_gather accepts read-only commands only. These could not be proven read-only:\n${listed}\n\n` +
+              "Either rewrite them as pure inspection commands, or call ctx_batch_execute " +
+              "(outside plan mode) if the write is intended.",
+          },
+        ],
+        isError: true,
+      });
+    }
+    return runBatchExecute({ commands, queries, timeout, concurrency, cwd, query_scope });
   },
 );
 
