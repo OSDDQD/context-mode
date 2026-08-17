@@ -91,6 +91,35 @@ describe("extractUserPromptFeatures — §11 Layer 1 (10 features)", () => {
     expect(extractUserPromptFeatures("/abs/path").prompt_path_ref_count).toBeGreaterThanOrEqual(1);
   });
 
+  test("path counting still sees every reference across lines and tokens", () => {
+    // The counts are produced token-by-token now; this pins the equivalence to
+    // the previous whole-string scan for the shapes that actually occur.
+    const prompt = "see src/a.ts and\thooks/core/routing.mjs\nplus ./rel/x.md, /abs/y.tsx";
+    const f = extractUserPromptFeatures(prompt);
+    expect(f.prompt_file_ref_count).toBe(4);
+    expect(f.prompt_path_ref_count).toBe(4);
+    // Two references inside a single token are both counted.
+    expect(extractUserPromptFeatures("a/b.ts,c/d.ts").prompt_file_ref_count).toBe(2);
+  });
+
+  test("a pasted blob does not stall the hook", () => {
+    // Regression: `(\w+\/)+\w+\.\w+` scanned over a long slash-free run of word
+    // characters made the engine restart at every position — 5.1s for a 100 KB
+    // paste, measured inside UserPromptSubmit, which blocks the user's turn.
+    // Anything token-scoped is linear, so this must finish in milliseconds.
+    const blob = "x".repeat(100 * 1024);
+    const started = Date.now();
+    const f = extractUserPromptFeatures(`review this dump: ${blob}`);
+    expect(Date.now() - started).toBeLessThan(1000);
+    expect(f.prompt_file_ref_count).toBe(0);
+    expect(f.prompt_length).toBe(blob.length + 18);
+  });
+
+  test("an implausibly long path-like token is not treated as a path", () => {
+    const absurd = "a/" + "b".repeat(600) + ".ts";
+    expect(extractUserPromptFeatures(absurd).prompt_file_ref_count).toBe(0);
+  });
+
   test("code_block_count = floor(fence_count / 2)", () => {
     expect(extractUserPromptFeatures("```code```").prompt_code_block_count).toBe(1);
     expect(extractUserPromptFeatures("```a``` ```b```").prompt_code_block_count).toBe(2);
