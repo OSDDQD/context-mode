@@ -10,6 +10,7 @@ import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
 import { join, isAbsolute } from "node:path";
 import { resolveClaudeConfigDir } from "../util/claude-config.js";
 import { hashProjectDirCanonical } from "../session/db.js";
+import { listHostMemoryFiles } from "../session/host-memory.js";
 
 const DEBUG = process.env.DEBUG?.includes("context-mode");
 
@@ -109,7 +110,7 @@ export function searchAutoMemory(
     }
   }
 
-  // 3. Memory directory
+  // 3. Memory directory (context-mode's own namespace)
   if (memoryDir && existsSync(memoryDir)) {
     try {
       const files = readdirSync(memoryDir).filter(f => f.endsWith(".md"));
@@ -122,6 +123,22 @@ export function searchAutoMemory(
     } catch (e) {
       if (DEBUG) process.stderr.write(`[ctx] auto-memory dir scan failed: ${e}\n`);
     }
+  }
+
+  // 4. The HOST's own memory — the files Claude Code curates and reloads each
+  //    session (`<configDir>/projects/<slug>/memory/*.md`). Step 3 looks in
+  //    context-mode's hash-keyed namespace, which the host has never written
+  //    to; without this step every memory the user saved is unreachable from
+  //    ctx_search even though ctx_stats counts it. See src/session/host-memory.ts.
+  try {
+    for (const file of listHostMemoryFiles(effectiveConfigDir, projectDir)) {
+      candidates.push({
+        path: file,
+        label: `memory/${file.split(/[\\/]/).pop()}`,
+      });
+    }
+  } catch (e) {
+    if (DEBUG) process.stderr.write(`[ctx] host-memory scan failed: ${e}\n`);
   }
 
   // Search each candidate file for matching queries

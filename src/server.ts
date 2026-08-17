@@ -32,6 +32,8 @@ import {
 import { classifyNonZeroExit } from "./exit-classify.js";
 import { findWriteCommands } from "./read-only.js";
 import { drainCodeIndexQueue } from "./session/code-index.js";
+import { indexHostMemory } from "./session/host-memory.js";
+import { searchAutoMemory } from "./search/auto-memory.js";
 import { hybridSearch, type HybridDb, type LexicalResult } from "./search/hybrid.js";
 import { isFetchPassthroughUrl, passthroughFetchError } from "./fetch-passthrough.js";
 import { startLifecycleGuard, noteMcpActivity, noteRequestStart, noteRequestEnd, attachMcpActivityTap } from "./lifecycle.js";
@@ -800,7 +802,26 @@ function getStore(): ContentStore {
   }
   maybeIndexSessionEvents(_store);
   maybeIndexEditedFiles(_store);
+  maybeIndexHostMemory(_store);
   return _store;
+}
+
+/**
+ * Index the host's curated memory files into the store (see
+ * src/session/host-memory.ts). Runs once per server process — `_store` is
+ * memoized, so this fires on first tool call and not again.
+ * Opt out with CONTEXT_MODE_INDEX_HOST_MEMORY=0.
+ */
+function maybeIndexHostMemory(store: ContentStore): void {
+  if (process.env.CONTEXT_MODE_INDEX_HOST_MEMORY === "0") return;
+  try {
+    indexHostMemory({
+      store,
+      configDir: _detectedAdapter?.getConfigDir() ?? resolveClaudeConfigDir(),
+      projectDir: getProjectDir(),
+      attribution: currentAttribution(),
+    });
+  } catch { /* best-effort — memory indexing never blocks a tool call */ }
 }
 
 /**
@@ -2840,6 +2861,35 @@ EXAMPLE: ctx_search(queries: ["last user prompt", "active skills", "open blocker
             limit: effectiveLimit,
             sourceFilter: source,
           }) as unknown as typeof results;
+
+          // Auto-memory in relevance mode. The FTS5 store holds captured
+          // output; the user's curated memory files and CLAUDE.md hold the
+          // decisions. Those were reachable only via sort:"timeline", so the
+          // default mode could not answer "what did we decide about X" from
+          // the very files written to answer it.
+          //
+          // Appended after the ranked results rather than fused into them:
+          // memory is a different KIND of hit (a curated fact, not a captured
+          // chunk), and it must not silently evict search results the caller
+          // asked for. Capped at 2 so it stays an addition, not a takeover.
+          // A `source` filter means the caller scoped the query to one label —
+          // memory is out of that scope by definition, so it is skipped.
+          if (!source) {
+            try {
+              const memHits = searchAutoMemory(
+                [q],
+                2,
+                getProjectDir(),
+                configDir,
+                _detectedAdapter ?? undefined,
+              );
+              const seen = new Set(results.map(r => `${r.source}::${r.title}`));
+              for (const hit of memHits) {
+                if (seen.has(`${hit.source}::${hit.title}`)) continue;
+                results = [...results, hit as unknown as (typeof results)[number]];
+              }
+            } catch { /* memory is additive — never fail the search for it */ }
+          }
         }
 
         if (results.length === 0) {

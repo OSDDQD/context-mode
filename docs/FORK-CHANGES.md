@@ -2,7 +2,7 @@
 
 Fork of [mksglu/context-mode](https://github.com/mksglu/context-mode) at v1.0.169.
 
-Eight changes, each addressing a gap observed while running the plugin daily in
+Nine changes, each addressing a gap observed while running the plugin daily in
 Claude Code. Every one is off-by-default or backwards compatible except the
 compact tool descriptions, which change what ships on every request (and carry
 an env switch back to the original text).
@@ -206,6 +206,55 @@ Covered patterns: `claude.ai/code/artifact/*`, `claude.ai/public/artifacts/*`,
 regex when it starts with `^`. A shared test asserts the hook and server
 implementations agree on the same URL set, so the two halves cannot drift.
 
+## 9. The host's own memory becomes searchable
+
+`src/session/host-memory.ts`, `src/search/auto-memory.ts`, `src/server.ts`
+
+Two different stores both call themselves "memory", and they were never
+talking to each other:
+
+| | Path | Reality |
+|---|---|---|
+| `adapter.getMemoryDir()` — what `searchAutoMemory` read | `<config>/memory/<sha256(projectDir)[:16]>` | **does not exist on a normal install** |
+| `getLifetimeStats()` — what `ctx_stats` counts | `<config>/projects/<slug>/memory/` | correct |
+| Claude Code — where memory is actually written | `<config>/projects/<slug>/memory/` | 62 files here |
+
+So `ctx_stats` reported "52 preferences picked up across 7 projects" while
+`ctx_search` could not retrieve a single word of them. The system claimed a
+memory it could not read.
+
+Three fixes:
+
+1. **Resolve the real path.** `resolveHostMemoryDirs()` finds
+   `<config>/projects/<slug>/memory`. Slugging is not just `/` → `-`: the host
+   also rewrites dots and underscores, so `/home/u/projects/casino_front` is
+   stored as `-home-u-projects-casino-front`. Three strategies are tried in
+   order — plain slug, folded slug, then a normalised scan of `projects/` that
+   matches whatever naming rule the installed host version used. Verified
+   against every real project directory on the author's machine.
+2. **Search it in relevance mode.** Auto-memory was wired only to
+   `sort: "timeline"`, so the default mode could not answer "what did we decide
+   about X" from the very files written to answer it. Memory hits are now
+   appended (capped at 2, skipped when the caller passed a `source` filter)
+   rather than fused into the ranking — a curated fact is a different kind of
+   hit than a captured chunk, and it must not evict results the caller asked
+   for.
+3. **Index it into FTS5.** Memory files are indexed under `memory:<name>` on
+   first store open, which buys what plain scanning cannot: `query_scope:
+   "global"` reaches them, the semantic layer can match a paraphrase (or a
+   Russian query against an English memory file), and the content hash flags a
+   memory as stale after an edit. Scoped to the current project (#663).
+   Disable with `CONTEXT_MODE_INDEX_HOST_MEMORY=0`.
+
+**Indexing only — never injection.** The host already loads `MEMORY.md` into
+every session; re-injecting those bytes would spend context to duplicate what
+is already there. And nothing writes *into* host memory: that store stays
+curated by its owner.
+
+Scope note: the path fix targets Claude Code. Codex, Kimi and OpenClaw have
+their own `getMemoryDir` implementations whose correct host paths were not
+verified here, so they are left untouched.
+
 ---
 
 ## New environment variables
@@ -223,10 +272,13 @@ implementations agree on the same URL set, so the two halves cannot drift.
 | `CONTEXT_MODE_EMBEDDINGS_TIMEOUT_MS` | `5000` | Per-request embedding timeout |
 | `CONTEXT_MODE_ALLOW_PROXY` | off | `1` lets the fetch subprocess use the ambient proxy |
 | `CONTEXT_MODE_FETCH_PASSTHROUGH` | claude.ai artifacts | Extra hosts/regexes the WebFetch redirect must skip |
+| `CONTEXT_MODE_INDEX_HOST_MEMORY` | on | `0` stops indexing the host's memory files into FTS5 |
 
 ## Tests
 
-`npm test` — 4777 passing, 38 skipped. New suites:
+`npm test` — 4790 passing, 38 skipped. New suites:
+
+- `tests/core/host-memory.test.ts` — host memory path resolution, scoping, indexing
 
 - `tests/core/fetch-passthrough.test.ts` — artifact-URL passthrough, hook/server parity
 - `tests/core/batch-hybrid-scope.test.ts` — hybrid on `global` scope, lexical on `batch`
