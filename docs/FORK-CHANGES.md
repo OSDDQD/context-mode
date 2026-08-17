@@ -2,7 +2,7 @@
 
 Fork of [mksglu/context-mode](https://github.com/mksglu/context-mode) at v1.0.169.
 
-Fifteen changes, each addressing a gap observed while running the plugin daily in
+Twenty-two changes, each addressing a gap observed while running the plugin daily in
 Claude Code. Every one is backwards compatible, and every behavioural default
 carries an env switch back. Two defaults differ from upstream on purpose: the
 compact tool descriptions (what ships on every request) and the semantic layer,
@@ -528,6 +528,171 @@ skill files live on in `platform-skills/` for the non-Claude-Code packagers
 system prompt bakes in the routing rules — heavy exploration in a disposable
 context that reports conclusions, not file dumps.
 
+## 16. Cross-query deduplication in search results
+
+`src/server.ts`, `src/search/hybrid.ts`
+
+A multi-query search ranks every query independently, so a chunk that answers
+several of them is rendered several times. Measured over five live `batch:`
+sources with `scripts/measure-search-dedup.mjs`: 144,617 bytes of response held
+57 verbatim repeats — **33.5% of what the model was handed was text it had read
+a few lines earlier** (`docs/research/search-dedup-2026-08-18.md`).
+
+`CrossQueryDeduper` suppresses only text that is **byte-identical to something
+already printed above in the same response**, and replaces it with a pointer to
+where it was printed:
+
+```
+### Deploy failures
+(identical to the section shown under "exits 137" — not repeated)
+…
+> Deduplicated 1 repeated section(s) (~1.2 KB not repeated).
+```
+
+Nothing is lost. Headings and provenance always survive, so a query whose every
+hit is a repeat shows what it matched instead of claiming it found nothing; a
+*different* snippet window over the same chunk is new information and is
+rendered in full, marked `— further match` (12 such renders in the same
+measurement — a plain "seen this chunk" rule would have destroyed them). One
+instance per response covers `ctx_batch_execute`, `ctx_gather` and `ctx_search`.
+
+Identity comes from `chunkIdentity` (the renamed, now exported `fusionKey`):
+`source + title + first 120 chars`. `source::title` is not enough — a live index
+carries `Untitled (1)`, `Untitled (2)`.
+
+`CONTEXT_MODE_SEARCH_DEDUP=0` restores the previous output byte for byte.
+
+## 17. The hourly WAL reaper no longer deletes fresh knowledge bases
+
+`src/store.ts`
+
+`cleanupStaleContentDBs` set its delete flag from a WAL check that ran
+*outside* the age rule: a non-empty WAL untouched for an hour deleted the store
+regardless of how new it was. Any session that ended without a checkpoint could
+wipe a knowledge base minutes old, and the 14-day retention promise with it.
+The comment claimed a PID check; there was none.
+
+Age is now the only reason to delete. The WAL acts inside the age rule and only
+protectively: past the cutoff, a recently written WAL means a live owner (in WAL
+mode the `.db` mtime only moves on checkpoint), so the store is kept.
+
+| Variable | Default | Effect |
+|---|---|---|
+| `CONTEXT_MODE_CONTENT_RETENTION_DAYS` | `14` | Retention window for content stores |
+| `CONTEXT_MODE_CONTENT_WAL_REAP` | on | `0` drops the WAL guard and goes by `.db` mtime alone |
+
+## 18. Semantic coverage: honest status, and a drain that can fix it
+
+`src/server.ts`, `src/search/hybrid.ts`, `src/cli.ts`
+
+`ctx_stats` claimed "backfill runs in the background on every search" at every
+coverage level, including zero — where it is false twice over. With no embedder
+configured there is no backfill at all, and even with one, waiting for the
+per-search batch is not a plan: a 1,320-chunk index needs roughly 83 searches.
+
+- The claim splits into the three states it was flattening: inactive (with the
+  two ways out, depending on whether an embedder is configured), warming, done.
+- `backfillVectorsUntil()` is the bulk pass the per-search warm-up cannot be,
+  bounded by both a wall clock and a chunk cap so a detached drain can neither
+  run forever nor monopolise a local endpoint. Wired into `context-mode drain`,
+  which the SessionEnd hook already runs detached. Measured on this repository:
+  **1,104 vectors in a single drain**.
+- One line appears in the response itself when the layer is not answering —
+  once per process, only above 200 chunks, and only where it changes the result
+  (`ctx_search`, global-scope batch queries).
+
+## 19. Disk accounting, budget and compaction
+
+`src/store.ts`, `src/cli.ts`
+
+Nothing measured what the content stores cost. `getDBSizeBytes()` reads the
+`.db` file alone, which in WAL mode can be a single page while megabytes sit in
+the WAL — measured across 328 stores: **216.5 MB total, 14.3 MB of it WAL**.
+
+- `contentStoreUsage()` walks the directory with `statSync` (no SQLite: opening
+  328 databases to ask their size costs more than the answer) and reports bytes
+  including sidecars, plus a last-use timestamp.
+- `enforceContentBudget()` evicts least-recently-used stores when the directory
+  is over budget, down to 90% of it. It refuses to touch the caller's own store,
+  any store with a live non-empty WAL, and anything used inside 48 hours. Called
+  only from `context-mode drain` — deleting another project's data on the hot
+  path of a tool call is not a thing to do quietly. The default budget sits
+  above the measured footprint, so the first revision only prints the number.
+- `ContentStore.compact()` checkpoints the WAL and VACUUMs, but only when the
+  freelist is worth a full rewrite (>1 MB and >20% of the file). Called from
+  `drain`, never from `close()`: a session ending should not pay seconds of I/O.
+  Measured on this repository's store: **10.7 MB reclaimed**.
+
+## 20. One project's files stop landing in another project's index
+
+`src/session/code-index.ts`, `src/session/subagent-capture.ts`, `hooks/subagentstop.mjs`
+
+The code-index queue is a single file in a sessions directory shared by every
+project on the machine, and the drain indexed whatever it found — whichever
+server opened first swallowed the lot. Measured in this repository's own store:
+**78 `code:` sources pointing at other repositories**, now evicted.
+
+- The drain indexes only paths inside its `projectDir` and hands the rest back
+  to the shared inbox, the way it already handles overflow, so the owning
+  project's server can claim them.
+- Overflow parks in a per-project backlog (`code-index-queue-<hash>.txt`) so two
+  projects draining at once cannot steal each other's backlog. Hooks keep
+  appending to the inbox — they run wherever the agent is and have no store to
+  key off.
+- Subagent digests carry the same problem with no path to filter on, so the
+  SubagentStop hook stamps `projectDir` on the queue entry and the drain defers
+  entries belonging to elsewhere. Unstamped legacy entries stay first-come.
+- `pruneForeignCodeSources()` cleans up what already leaked.
+
+`CONTEXT_MODE_CODE_INDEX_PROJECT_SCOPE=0` restores the shared behaviour.
+
+## 21. Stats that do not contradict themselves
+
+`src/session/analytics.ts`, `src/server.ts`, `docs/adr/0005-stats-scope-labels-and-containment.md`
+
+`ctx_stats` could print "This chat: 6.9 MB kept out" directly above "All your
+work: 6.7 MB kept out". Two causes, both in Sections 3-4 — Section 1's
+compression formula (ADR-0004) is untouched and now has a regression test.
+
+The narrow number was not narrow: `getConversationWindowStats` pools the whole
+worktree on purpose, so the sub-agents a conversation spawns (own `session_id`,
+same cwd hash) are credited to it. That is right; "This chat" is the wrong name
+for it. And the wide number counted less: `scanOneAdapter` still reports
+`contentBytes: 0`.
+
+- Three labelled rows: **This session** (new), **This project** (the same
+  worktree pool, renamed), **All your work**.
+- Containment by raising the wider scope, never lowering the narrower one — the
+  same direction as the monotonic-growth invariant these counters obey.
+- The disk footprint gets its own row, worded so it cannot be read as more bytes
+  saved.
+- The cost block names its basis ("own byte counters at list rates — not an A/B
+  measurement"). The 10-developer projection moves behind
+  `CONTEXT_MODE_STATS_TEAM_EXTRAPOLATION=1`; `CONTEXT_MODE_STATS_COST=0` drops
+  the section.
+
+## 22. Storage hygiene
+
+`src/server.ts`, `vitest.config.ts`, `tests/setup-storage.ts`
+
+Every session wrote its own `stats-<id>.json` and nothing ever removed them —
+**735 files on this machine**, all read on every `ctx_stats` call. Plain
+deletion is not an option (the lifetime counters are summed from these files,
+and a metric that goes down is worse than a directory that grows), so
+`rollUpStaleStatsFiles()` folds the bytes of files untouched for the retention
+window into `stats-rollup.json` and then deletes them. The age rule is what
+keeps a live session's own file from being counted twice.
+
+`npm test` also wrote into the real `~/.claude/context-mode` — **297 stray
+content DBs** and hundreds of stats files, which the plugin's own disk
+accounting then counted as the user's data. Fake HOME was opt-in per suite; it
+is now global, but narrowly: `tests/setup-storage.ts` redirects `homedir()` only.
+The two wider options both break real suites — a global HOME breaks every test
+that shells out through an asdf/nvm shim, and a global `CONTEXT_MODE_DIR` leaks
+into spawned hooks whose tests then look under their own HOME. Measured per run:
+13 stray content DBs before, 1 after; the remainder comes from suites that spawn
+children with a HOME of their own, which already isolate their own writes.
+
 ## Merged ahead of upstream: the fetch extraction ladder
 
 `src/fetch/blocks.ts`, `src/fetch/extract.ts`, `src/fetch/page-store.ts`, `src/server.ts`
@@ -595,6 +760,20 @@ memory and the code index.
 | `CONTEXT_MODE_ALLOW_PROXY` | off | `1` lets the fetch subprocess use the ambient proxy |
 | `CONTEXT_MODE_FETCH_PASSTHROUGH` | claude.ai artifacts | Extra hosts/regexes the WebFetch redirect must skip |
 | `CONTEXT_MODE_INDEX_HOST_MEMORY` | on | `0` stops indexing the host's memory files into FTS5 |
+| `CONTEXT_MODE_SEARCH_DEDUP` | on | `0` restores repeated sections in multi-query responses |
+| `CONTEXT_MODE_CONTENT_RETENTION_DAYS` | `14` | Retention window for per-project content stores |
+| `CONTEXT_MODE_CONTENT_WAL_REAP` | on | `0` drops the live-WAL guard in the retention sweep |
+| `CONTEXT_MODE_SEMANTIC_HINT` | on | `0` silences the in-response semantic-coverage line |
+| `CONTEXT_MODE_DRAIN_BACKFILL` | on | `0` stops `drain` from bulk-embedding |
+| `CONTEXT_MODE_DRAIN_BACKFILL_MS` | `60000` | Wall clock for the drain's backfill pass |
+| `CONTEXT_MODE_DRAIN_BACKFILL_MAX` | `2000` | Chunk cap for the drain's backfill pass |
+| `CONTEXT_MODE_CONTENT_BUDGET_MB` | `512` | Disk budget for all content stores; `0` disables eviction |
+| `CONTEXT_MODE_CONTENT_BUDGET_DRY_RUN` | off | `1` reports evictions without deleting |
+| `CONTEXT_MODE_VACUUM_MAX_BYTES` | `268435456` | Largest store `compact()` will VACUUM |
+| `CONTEXT_MODE_CODE_INDEX_PROJECT_SCOPE` | on | `0` restores the machine-wide, first-come queue drain |
+| `CONTEXT_MODE_STATS_FILE_RETENTION_DAYS` | `14` | Age at which `stats-*.json` files are rolled up |
+| `CONTEXT_MODE_STATS_COST` | on | `0` drops the dollar section of `ctx_stats` |
+| `CONTEXT_MODE_STATS_TEAM_EXTRAPOLATION` | off | `1` adds the 10-developer projection |
 
 ## Tests
 
@@ -619,6 +798,10 @@ upstream's three new fetch suites). New suites:
 - `tests/core/compact-descriptions.test.ts` — compact default + `full` escape hatch
 - `tests/hooks/user-safe-commands.test.ts` — user allowlist, malformed patterns, operator gate
 - `tests/analytics/missed-redirect.test.ts` — the unrouted-payload block
+- `tests/core/search-dedup.test.ts` — suppression rule, further-match window, opt-out
+- `tests/core/semantic-visibility.test.ts` — the three coverage states, hint latch
+- `tests/core/content-budget.test.ts` — usage accounting, eviction guards, compaction
+- `tests/session/stats-scope-containment.test.ts` — ADR-0005 scope labels and nesting
 
 ## Installing this fork in Claude Code
 
