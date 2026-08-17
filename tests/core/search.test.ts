@@ -707,7 +707,7 @@ describe("Multi-source isolation (batch_execute path)", () => {
     store.close();
   });
 
-  test("batch_execute formatter never inlines previous indexed content", () => {
+  test("batch_execute formatter never inlines previous indexed content", async () => {
     const store = createStore();
 
     store.index({
@@ -719,7 +719,7 @@ describe("Multi-source isolation (batch_execute path)", () => {
       source: "docs: auth",
     });
 
-    const output = formatBatchQueryResults(store, ["JWT tokens"], "batch: current").join("\n");
+    const output = (await formatBatchQueryResults(store, ["JWT tokens"], "batch: current")).join("\n");
     assert.ok(output.includes("No matching sections found."), "Expected scoped batch result to stay empty");
     assert.ok(!output.includes("previously indexed content"), "Should not mention cross-source fallback");
     assert.ok(!output.includes("JWT tokens expire after 24 hours"), "Should not inline stale cross-source text");
@@ -727,7 +727,7 @@ describe("Multi-source isolation (batch_execute path)", () => {
     store.close();
   });
 
-  test("batch_execute formatter does not leak overlapping batch labels", () => {
+  test("batch_execute formatter does not leak overlapping batch labels", async () => {
     const store = createStore();
 
     store.index({
@@ -739,14 +739,14 @@ describe("Multi-source isolation (batch_execute path)", () => {
       source: "batch:Build,Test",
     });
 
-    const output = formatBatchQueryResults(store, ["JWT tokens"], "batch:Build").join("\n");
+    const output = (await formatBatchQueryResults(store, ["JWT tokens"], "batch:Build")).join("\n");
     assert.ok(output.includes("No matching sections found."), "Expected exact batch label filtering");
     assert.ok(!output.includes("JWT tokens expire after 24 hours"), "Should not leak overlapping older batch label content");
 
     store.close();
   });
 
-  test("batch_execute formatter returns matches from the current batch", () => {
+  test("batch_execute formatter returns matches from the current batch", async () => {
     const store = createStore();
 
     store.index({
@@ -758,7 +758,7 @@ describe("Multi-source isolation (batch_execute path)", () => {
       source: "docs: auth",
     });
 
-    const output = formatBatchQueryResults(store, ["JWT tokens"], "batch: current").join("\n");
+    const output = (await formatBatchQueryResults(store, ["JWT tokens"], "batch: current")).join("\n");
     assert.ok(output.includes("Current Batch"), "Expected current batch heading in formatter output");
     assert.ok(output.includes("12 hours for the current batch"), "Expected current batch content in formatter output");
     assert.ok(!output.includes("24 hours"), "Should not leak older source content when current batch matches");

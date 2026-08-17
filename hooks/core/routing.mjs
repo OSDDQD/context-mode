@@ -753,6 +753,78 @@ function getWebFetchUrl(toolInput) {
   return "";
 }
 
+/**
+ * URLs the WebFetch redirect must NOT touch (upstream #938 / #984 / #1006).
+ *
+ * An Artifact page is a client-rendered SPA behind the caller's claude.ai
+ * login. Claude Code's native WebFetch has a documented exception for these
+ * URLs and fetches them with that authenticated session; `ctx_fetch_and_index`
+ * does a plain anonymous GET and can only ever retrieve the empty shell
+ * (~0.1 KB of "Content is user-generated and unverified").
+ *
+ * So the blanket redirect is not merely overhead here — it hands the model a
+ * plausible-looking empty page with no way to tell it apart from a real one.
+ * The only correct routing decision for these URLs is to get out of the way.
+ *
+ * `CONTEXT_MODE_FETCH_PASSTHROUGH` extends the list (#908): entries separated
+ * by `|||`, each either a host suffix (`intranet.corp`) or a regex when it
+ * starts with `^`. Host suffixes match the hostname; regexes match the full URL.
+ */
+const BUILTIN_FETCH_PASSTHROUGH = [
+  /^https?:\/\/(?:[\w-]+\.)*claude\.ai\/code\/artifact\//i,
+  /^https?:\/\/(?:[\w-]+\.)*claude\.ai\/public\/artifacts\//i,
+  /^https?:\/\/(?:[\w-]+\.)*claude\.site\/artifacts\//i,
+];
+
+/** @type {{patterns: RegExp[], hosts: string[]} | null} */
+let _userPassthrough = null;
+
+/** Reset the memoized passthrough list. Test seam. */
+export function resetFetchPassthrough() {
+  _userPassthrough = null;
+}
+
+function getUserPassthrough() {
+  if (_userPassthrough) return _userPassthrough;
+  const patterns = [];
+  const hosts = [];
+  const raw = process.env.CONTEXT_MODE_FETCH_PASSTHROUGH;
+  if (raw) {
+    for (const entryRaw of raw.split("|||")) {
+      const entry = entryRaw.trim();
+      if (!entry) continue;
+      if (entry.startsWith("^")) {
+        try { patterns.push(new RegExp(entry, "i")); } catch { /* skip malformed */ }
+      } else {
+        hosts.push(entry.toLowerCase().replace(/^\.+/, ""));
+      }
+    }
+  }
+  _userPassthrough = { patterns, hosts };
+  return _userPassthrough;
+}
+
+/**
+ * @param {string} url URL from the WebFetch tool input.
+ * @returns {boolean} true when the native tool should handle this URL itself.
+ */
+export function isFetchPassthroughUrl(url) {
+  if (!url || typeof url !== "string") return false;
+  if (BUILTIN_FETCH_PASSTHROUGH.some(rx => rx.test(url))) return true;
+
+  const { patterns, hosts } = getUserPassthrough();
+  if (patterns.some(rx => rx.test(url))) return true;
+  if (hosts.length === 0) return false;
+
+  let hostname;
+  try {
+    hostname = new URL(url).hostname.toLowerCase();
+  } catch {
+    return false;
+  }
+  return hosts.some(h => hostname === h || hostname.endsWith(`.${h}`));
+}
+
 function getCodexConfigDir(env = process.env) {
   const codexHome = env.CODEX_HOME;
   if (codexHome && codexHome.trim() !== "") return resolve(codexHome);
@@ -986,6 +1058,10 @@ export function routePreToolUse(toolName, toolInput, projectDir, platform, sessi
   // ─── WebFetch: deny + redirect to sandbox ───
   if (canonical === "WebFetch") {
     const url = getWebFetchUrl(toolInput);
+    // Auth-gated SPA targets (claude.ai Artifacts) and operator-listed hosts
+    // pass straight through: the native tool is the only thing that can read
+    // them, and redirecting yields an empty shell that looks like content.
+    if (isFetchPassthroughUrl(url)) return null;
     return mcpRedirect({
       action: "deny",
       reason: `context-mode: WebFetch redirected. Call ${t("ctx_fetch_and_index")}(url: "${url}", source: "...") to fetch + index the page, then ${t("ctx_search")}(queries: [...]) to query the indexed content — the raw page bytes stay in storage instead of entering your conversation. Or call ${t("ctx_execute")}(language, code) when you want to derive your answer in one round trip (parse, extract, count) without persisting the response. Both have full network access. Retry the same call on a transient DNS error (EAI_AGAIN, ETIMEDOUT, ENETUNREACH).`,

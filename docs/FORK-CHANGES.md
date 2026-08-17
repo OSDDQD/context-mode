@@ -2,7 +2,7 @@
 
 Fork of [mksglu/context-mode](https://github.com/mksglu/context-mode) at v1.0.169.
 
-Seven changes, each addressing a gap observed while running the plugin daily in
+Eight changes, each addressing a gap observed while running the plugin daily in
 Claude Code. Every one is off-by-default or backwards compatible except the
 compact tool descriptions, which change what ships on every request (and carry
 an env switch back to the original text).
@@ -144,6 +144,22 @@ behaves exactly like the lexical one and improves as it warms. If the endpoint
 is unreachable or slow, search silently degrades to lexical-only; it never
 fails because an optional side-car is down.
 
+**Where it is wired.** Two call sites, both the ones that reach *cold* prior
+knowledge:
+
+- `ctx_search` in relevance mode (timeline mode is chronological — ranking does
+  not apply)
+- `ctx_batch_execute` / `ctx_gather` with `query_scope: "global"`
+
+Deliberately NOT wired to the default `query_scope: "batch"`: those queries run
+against output the same call just produced, where the caller already knows the
+terms and an embedding round trip would only add latency to the hot path.
+
+Usage measured on this machine before wiring the batch path: 70
+`ctx_batch_execute` calls against **1** `ctx_search` call across 16 sessions —
+i.e. attaching only to `ctx_search` would have left the feature effectively
+unreachable.
+
 ## 7. Opt-in proxy for `ctx_fetch_and_index` (upstream #1039)
 
 `src/server.ts`, `src/executor.ts`
@@ -162,6 +178,34 @@ late.
 so the in-subprocess rebinding guard can only see what this process resolves
 itself. The operator who sets the flag is accepting that.
 
+## 8. Artifact URLs reach the tool that can actually read them (upstream #938, #984, #1006)
+
+`hooks/core/routing.mjs`, `src/fetch-passthrough.ts`, `src/server.ts`
+
+The WebFetch redirect was unconditional, including for `claude.ai` Artifact
+URLs. Those pages are client-rendered SPAs behind the caller's claude.ai login:
+Claude Code's native WebFetch has a documented exception and fetches them with
+that authenticated session, while `ctx_fetch_and_index` does a plain anonymous
+GET and can only ever retrieve the empty shell — ~100 bytes of "Content is
+user-generated and unverified".
+
+That is worse than a failure. The model gets a well-formed page, indexes it,
+searches it, finds nothing, and has no signal that the content was never there.
+
+Both halves are fixed:
+
+- **The hook gets out of the way.** `WebFetch` on an artifact URL passes through
+  untouched, so the native tool handles it.
+- **The sandbox fetch refuses loudly.** A direct `ctx_fetch_and_index` call on
+  such a URL returns an error that names the working path, instead of an empty
+  success.
+
+Covered patterns: `claude.ai/code/artifact/*`, `claude.ai/public/artifacts/*`,
+`claude.site/artifacts/*`. `CONTEXT_MODE_FETCH_PASSTHROUGH` extends the list
+(#908) — entries separated by `|||`, each a host suffix (`intranet.corp`) or a
+regex when it starts with `^`. A shared test asserts the hook and server
+implementations agree on the same URL set, so the two halves cannot drift.
+
 ---
 
 ## New environment variables
@@ -178,10 +222,14 @@ itself. The operator who sets the flag is accepting that.
 | `CONTEXT_MODE_EMBEDDINGS_API_KEY` | — | Bearer token for the endpoint |
 | `CONTEXT_MODE_EMBEDDINGS_TIMEOUT_MS` | `5000` | Per-request embedding timeout |
 | `CONTEXT_MODE_ALLOW_PROXY` | off | `1` lets the fetch subprocess use the ambient proxy |
+| `CONTEXT_MODE_FETCH_PASSTHROUGH` | claude.ai artifacts | Extra hosts/regexes the WebFetch redirect must skip |
 
 ## Tests
 
-`npm test` — 4765 passing, 38 skipped. New suites:
+`npm test` — 4777 passing, 38 skipped. New suites:
+
+- `tests/core/fetch-passthrough.test.ts` — artifact-URL passthrough, hook/server parity
+- `tests/core/batch-hybrid-scope.test.ts` — hybrid on `global` scope, lexical on `batch`
 
 - `tests/core/read-only.test.ts` — read-only classification
 - `tests/core/code-index.test.ts` — queue draining, overflow, failure isolation

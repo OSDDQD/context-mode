@@ -33,6 +33,7 @@ import { classifyNonZeroExit } from "./exit-classify.js";
 import { findWriteCommands } from "./read-only.js";
 import { drainCodeIndexQueue } from "./session/code-index.js";
 import { hybridSearch, type HybridDb, type LexicalResult } from "./search/hybrid.js";
+import { isFetchPassthroughUrl, passthroughFetchError } from "./fetch-passthrough.js";
 import { startLifecycleGuard, noteMcpActivity, noteRequestStart, noteRequestEnd, attachMcpActivityTap } from "./lifecycle.js";
 import { charSafePrefix } from "./truncate.js";
 import {
@@ -1446,13 +1447,13 @@ export function extractSnippet(
 
 export type BatchQueryScope = "batch" | "global";
 
-export function formatBatchQueryResults(
+export async function formatBatchQueryResults(
   store: ContentStore,
   queries: string[],
   source: string,
   maxOutput = 80 * 1024,
   scope: BatchQueryScope = "batch",
-): string[] {
+): Promise<string[]> {
   const sections: string[] = [];
   let outputSize = 0;
 
@@ -1468,7 +1469,23 @@ export function formatBatchQueryResults(
       continue;
     }
 
-    const results = store.searchWithFallback(query, 3, searchSource, undefined, "exact");
+    let results = store.searchWithFallback(query, 3, searchSource, undefined, "exact");
+
+    // Semantic re-fusion, global scope only. Batch scope searches the output
+    // this very call just produced — the caller already knows those terms, so
+    // the embedding round trip would buy nothing and cost latency on the hot
+    // path. Global scope is the one that reaches cold prior knowledge, where a
+    // paraphrased query is exactly what lexical matching misses.
+    // No-op unless CONTEXT_MODE_EMBEDDINGS_URL is configured.
+    if (scope === "global") {
+      results = await hybridSearch({
+        db: store.rawDb() as unknown as HybridDb,
+        query,
+        lexical: results as unknown as LexicalResult[],
+        limit: 3,
+      }) as unknown as typeof results;
+    }
+
     sections.push(`## ${query}`);
     sections.push("");
     if (results.length > 0) {
@@ -3299,6 +3316,18 @@ async function ssrfGuard(rawUrl: string): Promise<FetchOneResult | null> {
     return { kind: "fetch_error", url: rawUrl, error: "invalid URL", reason: "exit" };
   }
 
+  // Auth-gated SPA targets (claude.ai Artifacts, #938/#984/#1006). An anonymous
+  // fetch "succeeds" here and returns an empty shell, which the model cannot
+  // distinguish from real content. Fail loudly and name the tool that works.
+  if (isFetchPassthroughUrl(rawUrl)) {
+    return {
+      kind: "fetch_error",
+      url: rawUrl,
+      error: passthroughFetchError(rawUrl),
+      reason: "exit",
+    };
+  }
+
   // 1. Scheme allowlist — http and https only
   if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
     return {
@@ -3996,7 +4025,7 @@ async function runBatchExecute(
       // When the caller passes query_scope: "global", searches reach the entire
       // persistent index in the same round trip. Cross-source search remains
       // available via explicit ctx_search() as well.
-      const queryResults = formatBatchQueryResults(store, queries, source, undefined, query_scope);
+      const queryResults = await formatBatchQueryResults(store, queries, source, undefined, query_scope);
 
       // Get searchable terms for edge cases where follow-up is needed
       const distinctiveTerms = store.getDistinctiveTerms

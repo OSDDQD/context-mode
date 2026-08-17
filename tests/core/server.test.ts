@@ -6399,7 +6399,7 @@ describe("ctx_batch_execute query_scope (issue #696)", () => {
     const { formatBatchQueryResults } = await import("../../src/server.js");
     const store = new ContentStore(":memory:");
     store.index({ content: "# Section A\n\nValidation of frontmatter is critical.\n", source: "batch:cmd1" });
-    const lines = formatBatchQueryResults(store, ["validation"], "batch:cmd1");
+    const lines = await formatBatchQueryResults(store, ["validation"], "batch:cmd1");
     const text = lines.join("\n");
     expect(text).toMatch(/Results are scoped to this batch only/);
     expect(text).toMatch(/query_scope:\s*"global"/);
@@ -6409,7 +6409,7 @@ describe("ctx_batch_execute query_scope (issue #696)", () => {
     const { formatBatchQueryResults } = await import("../../src/server.js");
     const store = new ContentStore(":memory:");
     store.index({ content: "# Section A\n\nValidation of frontmatter is critical.\n", source: "other:source" });
-    const lines = formatBatchQueryResults(store, ["validation"], "batch:cmd1", undefined, "global");
+    const lines = await formatBatchQueryResults(store, ["validation"], "batch:cmd1", undefined, "global");
     const text = lines.join("\n");
     expect(text).toMatch(/query_scope:\s*"global"/);
     expect(text).not.toMatch(/Results are scoped to this batch only/);

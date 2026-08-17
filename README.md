@@ -1,9 +1,10 @@
 # Context Mode
 
-> **This is a fork** of [mksglu/context-mode](https://github.com/mksglu/context-mode) (v1.0.169) with seven additions:
+> **This is a fork** of [mksglu/context-mode](https://github.com/mksglu/context-mode) (v1.0.169) with eight additions:
 > a user-extensible bounded-command allowlist, missed-redirect telemetry in `ctx_stats`, a read-only `ctx_gather`
 > tool that survives plan mode, compact tool descriptions (~3.4K tokens/request reclaimed), incremental indexing
-> of edited files, optional hybrid semantic search, and an opt-in proxy for `ctx_fetch_and_index`.
+> of edited files, optional hybrid semantic search, an opt-in proxy for `ctx_fetch_and_index`, and a WebFetch
+> passthrough so claude.ai Artifact URLs reach the tool that can actually read them (upstream #938/#984/#1006).
 > See **[docs/FORK-CHANGES.md](docs/FORK-CHANGES.md)** for the full rationale, env vars, and trade-offs.
 
 **The other half of the context problem.**
