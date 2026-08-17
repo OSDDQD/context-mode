@@ -7,12 +7,12 @@
 
 import { describe, test, expect } from "vitest";
 import { strict as assert } from "node:assert";
-import { readFileSync, writeFileSync, existsSync, unlinkSync } from "node:fs";
+import { readFileSync, writeFileSync, existsSync, unlinkSync, mkdtempSync, utimesSync, rmSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { createRequire } from "node:module";
-import { ContentStore, cleanupStaleDBs } from "../src/store.js";
+import { ContentStore, cleanupStaleDBs, cleanupStaleContentDBs, contentRetentionDays } from "../src/store.js";
 import {
   withRetry,
   closeDB,
@@ -1188,6 +1188,100 @@ describe("DB Cleanup", () => {
     store.cleanup();
     // Second call should not throw
     assert.doesNotThrow(() => store.cleanup());
+  });
+});
+
+describe("Content DB retention", () => {
+  const HOUR = 3600_000;
+  const DAY = 24 * HOUR;
+
+  /** Content dir with one `name.db` (+ optional WAL), each aged as requested. */
+  function makeContentDir(opts: {
+    dbAgeMs: number;
+    walAgeMs?: number;
+    walBytes?: number;
+  }): { dir: string; db: string } {
+    const dir = mkdtempSync(join(tmpdir(), "context-mode-retention-"));
+    const db = join(dir, "project.db");
+    writeFileSync(db, "sqlite-ish");
+    const dbTime = (Date.now() - opts.dbAgeMs) / 1000;
+    utimesSync(db, dbTime, dbTime);
+    if (opts.walAgeMs !== undefined) {
+      writeFileSync(db + "-wal", "w".repeat(opts.walBytes ?? 64));
+      const walTime = (Date.now() - opts.walAgeMs) / 1000;
+      utimesSync(db + "-wal", walTime, walTime);
+    }
+    return { dir, db };
+  }
+
+  test("fresh DB with a stale non-empty WAL survives (14-day rule holds)", () => {
+    // Regression: the WAL branch used to set the same flag as the age rule,
+    // so a knowledge base minutes old was deleted whenever a session ended
+    // without a checkpoint.
+    const { dir, db } = makeContentDir({ dbAgeMs: 5 * 60_000, walAgeMs: 2 * HOUR });
+    const cleaned = cleanupStaleContentDBs(dir, 14);
+    assert.equal(cleaned, 0, "fresh DB must not be reaped for a stale WAL");
+    assert.ok(existsSync(db), "DB should survive");
+    assert.ok(existsSync(db + "-wal"), "WAL should survive");
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  test("DB past the cutoff is removed with its sidecars", () => {
+    const { dir, db } = makeContentDir({ dbAgeMs: 20 * DAY });
+    writeFileSync(db + "-shm", "s");
+    const cleaned = cleanupStaleContentDBs(dir, 14);
+    assert.equal(cleaned, 1);
+    assert.ok(!existsSync(db), "DB should be removed");
+    assert.ok(!existsSync(db + "-shm"), "SHM should be removed");
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  test("old DB with a hot WAL is protected — a live writer still owns it", () => {
+    // In WAL mode the .db mtime only moves on checkpoint, so an active store
+    // can look ancient while its WAL is seconds old.
+    const { dir, db } = makeContentDir({ dbAgeMs: 20 * DAY, walAgeMs: 30_000 });
+    const cleaned = cleanupStaleContentDBs(dir, 14);
+    assert.equal(cleaned, 0, "hot WAL must veto the age rule");
+    assert.ok(existsSync(db), "DB should survive");
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  test("CONTEXT_MODE_CONTENT_WAL_REAP=0 drops the WAL guard", () => {
+    const { dir, db } = makeContentDir({ dbAgeMs: 20 * DAY, walAgeMs: 30_000 });
+    const prev = process.env.CONTEXT_MODE_CONTENT_WAL_REAP;
+    process.env.CONTEXT_MODE_CONTENT_WAL_REAP = "0";
+    try {
+      assert.equal(cleanupStaleContentDBs(dir, 14), 1);
+      assert.ok(!existsSync(db));
+    } finally {
+      if (prev === undefined) delete process.env.CONTEXT_MODE_CONTENT_WAL_REAP;
+      else process.env.CONTEXT_MODE_CONTENT_WAL_REAP = prev;
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("maxAgeDays=0 forces a purge even with a hot WAL (legacy dir migration)", () => {
+    const { dir, db } = makeContentDir({ dbAgeMs: 60_000, walAgeMs: 1_000 });
+    assert.equal(cleanupStaleContentDBs(dir, 0), 1);
+    assert.ok(!existsSync(db));
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  test("contentRetentionDays honours the env override and rejects junk", () => {
+    const prev = process.env.CONTEXT_MODE_CONTENT_RETENTION_DAYS;
+    try {
+      delete process.env.CONTEXT_MODE_CONTENT_RETENTION_DAYS;
+      assert.equal(contentRetentionDays(), 14);
+      process.env.CONTEXT_MODE_CONTENT_RETENTION_DAYS = "30";
+      assert.equal(contentRetentionDays(), 30);
+      process.env.CONTEXT_MODE_CONTENT_RETENTION_DAYS = "not-a-number";
+      assert.equal(contentRetentionDays(), 14);
+      process.env.CONTEXT_MODE_CONTENT_RETENTION_DAYS = "-3";
+      assert.equal(contentRetentionDays(), 14);
+    } finally {
+      if (prev === undefined) delete process.env.CONTEXT_MODE_CONTENT_RETENTION_DAYS;
+      else process.env.CONTEXT_MODE_CONTENT_RETENTION_DAYS = prev;
+    }
   });
 });
 

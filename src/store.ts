@@ -213,47 +213,74 @@ function isProcessAlive(pid: number): boolean {
   }
 }
 
+/** Default retention window for per-project content store DBs. */
+export const CONTENT_RETENTION_DAYS_DEFAULT = 14;
+
+/**
+ * A WAL that has not been touched for this long is assumed to have no live
+ * writer behind it. Used only as a *guard* against deleting a store whose
+ * `.db` mtime looks old because every recent write landed in the WAL.
+ */
+const CONTENT_WAL_STALE_MS = 3600_000;
+
+/** Retention window in days, overridable via CONTEXT_MODE_CONTENT_RETENTION_DAYS. */
+export function contentRetentionDays(): number {
+  const raw = Number.parseInt(process.env.CONTEXT_MODE_CONTENT_RETENTION_DAYS ?? "", 10);
+  return Number.isFinite(raw) && raw >= 0 ? raw : CONTENT_RETENTION_DAYS_DEFAULT;
+}
+
+/**
+ * True when nothing suggests a live writer is still attached to this DB:
+ * no WAL, an empty WAL, or a WAL untouched for CONTENT_WAL_STALE_MS.
+ */
+function contentWalIsStale(dbPath: string): boolean {
+  const walPath = dbPath + "-wal";
+  try {
+    if (!existsSync(walPath)) return true;
+    const walStat = statSync(walPath);
+    if (walStat.size === 0) return true;
+    return (Date.now() - walStat.mtimeMs) > CONTENT_WAL_STALE_MS;
+  } catch {
+    // Can't tell — assume a writer may still be there and keep the DB.
+    return false;
+  }
+}
+
 /**
  * Clean up stale per-project content store DBs older than maxAgeDays.
  * Scans the given directory for *.db files and checks mtime.
- * Also detects zombie processes holding WAL locks — if a WAL file exists
- * but the owning PID is dead, the DB files are cleaned up regardless of age.
+ *
+ * Age is the ONLY reason a store is deleted. A non-empty, hour-old WAL used to
+ * set the same flag as the age rule, which deleted knowledge bases minutes old
+ * whenever a session ended without a checkpoint — the 14-day promise was
+ * bypassed. The WAL now acts only *inside* the age rule, and only in the
+ * protective direction: a DB past the cutoff whose WAL was written recently
+ * still has a live owner (in WAL mode the `.db` mtime only moves on
+ * checkpoint), so it is left alone.
+ *
+ * `maxAgeDays <= 0` means a forced purge (legacy directory migration) and skips
+ * the WAL guard. Set CONTEXT_MODE_CONTENT_WAL_REAP=0 to drop the guard entirely
+ * and go by `.db` mtime alone.
  */
 export function cleanupStaleContentDBs(contentDir: string, maxAgeDays: number): number {
   let cleaned = 0;
+  const walGuardEnabled = process.env.CONTEXT_MODE_CONTENT_WAL_REAP !== "0";
   try {
     if (!existsSync(contentDir)) return 0;
     const cutoff = Date.now() - maxAgeDays * 24 * 60 * 60 * 1000;
+    const forcedPurge = maxAgeDays <= 0;
     const files = readdirSync(contentDir).filter(f => f.endsWith(".db"));
     for (const file of files) {
       try {
         const filePath = join(contentDir, file);
         const mtime = statSync(filePath).mtimeMs;
-        let shouldClean = mtime < cutoff;
+        if (mtime >= cutoff) continue;
+        if (!forcedPurge && walGuardEnabled && !contentWalIsStale(filePath)) continue;
 
-        // Detect zombie processes holding WAL locks:
-        // If a WAL file exists, try to read the WAL header to extract the PID.
-        // WAL files from dead processes can block new connections.
-        if (!shouldClean) {
-          const walPath = filePath + "-wal";
-          if (existsSync(walPath)) {
-            try {
-              const walStat = statSync(walPath);
-              // If WAL file is non-empty and DB hasn't been modified in >1 hour,
-              // the owning process may be dead — check via mtime staleness
-              if (walStat.size > 0 && (Date.now() - walStat.mtimeMs) > 3600_000) {
-                shouldClean = true;
-              }
-            } catch { /* ignore WAL check errors */ }
-          }
+        for (const suffix of ["", "-wal", "-shm"]) {
+          try { unlinkSync(filePath + suffix); } catch { /* ignore */ }
         }
-
-        if (shouldClean) {
-          for (const suffix of ["", "-wal", "-shm"]) {
-            try { unlinkSync(filePath + suffix); } catch { /* ignore */ }
-          }
-          cleaned++;
-        }
+        cleaned++;
       } catch { /* ignore per-file errors */ }
     }
   } catch { /* ignore readdir errors */ }

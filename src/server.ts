@@ -12,7 +12,7 @@ import { AsyncLocalStorage } from "node:async_hooks";
 import { z } from "zod";
 import { PolyglotExecutor } from "./executor.js";
 import { runPool, type PoolJob } from "./runPool.js";
-import { ContentStore, cleanupStaleDBs, cleanupStaleContentDBs, type SearchResult, type IndexResult } from "./store.js";
+import { ContentStore, cleanupStaleDBs, cleanupStaleContentDBs, contentRetentionDays, type SearchResult, type IndexResult } from "./store.js";
 import { composeFetchCacheKey } from "./fetch-cache.js";
 import { PageStore } from "./fetch/page-store.js";
 import { extractAndStore, routeSkipsExtraction, type FetchRoute, type Relabelled } from "./fetch/extract.js";
@@ -874,11 +874,13 @@ function getStore(): ContentStore {
       }
     });
 
-    // One-time startup cleanup: remove stale content DBs (>14 days)
+    // One-time startup cleanup: remove stale content DBs (>14 days by default,
+    // CONTEXT_MODE_CONTENT_RETENTION_DAYS overrides).
     try {
       const contentDir = dirname(getStorePath());
-      cleanupStaleContentDBs(contentDir, 14);
-      _store.cleanupStaleSources(14);
+      const retentionDays = contentRetentionDays();
+      cleanupStaleContentDBs(contentDir, retentionDays);
+      _store.cleanupStaleSources(retentionDays);
       // Also clean legacy shared dir from before platform isolation
       const legacyDir = join(homedir(), ".context-mode", "content");
       if (existsSync(legacyDir)) cleanupStaleContentDBs(legacyDir, 0);
