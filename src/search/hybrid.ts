@@ -69,6 +69,31 @@ export function ensureVectorTable(db: HybridDb): void {
 }
 
 /**
+ * Drop vectors whose chunk is gone.
+ *
+ * `chunks` is an FTS5 table: re-indexing a source deletes and re-inserts its
+ * rows, and the new rows get new rowids. Vectors keyed to the old ones are
+ * then dead weight that the brute-force scan still walks on every query —
+ * measured on a fresh store, a single re-index left twice as many vectors as
+ * chunks.
+ *
+ * @returns Number of orphaned vectors removed.
+ */
+export function pruneOrphanVectors(db: HybridDb): number {
+  ensureVectorTable(db);
+  try {
+    const before = (db.prepare("SELECT COUNT(*) c FROM chunk_vectors").get() as { c: number }).c;
+    db.prepare(
+      "DELETE FROM chunk_vectors WHERE chunk_rowid NOT IN (SELECT rowid FROM chunks)",
+    ).run();
+    const after = (db.prepare("SELECT COUNT(*) c FROM chunk_vectors").get() as { c: number }).c;
+    return before - after;
+  } catch {
+    return 0;
+  }
+}
+
+/**
  * Embed up to `limit` chunks that have no vector yet.
  *
  * @returns Number of chunks embedded.
@@ -76,9 +101,10 @@ export function ensureVectorTable(db: HybridDb): void {
 export async function backfillVectors(
   db: HybridDb,
   config: EmbeddingConfig,
-  limit = 32,
+  limit = config.backfillBatch,
 ): Promise<number> {
   ensureVectorTable(db);
+  pruneOrphanVectors(db);
   let rows: Array<{ rowid: number; title: string; content: string }>;
   try {
     rows = db.prepare(`
@@ -96,7 +122,7 @@ export async function backfillVectors(
   // Title carries the section heading — prepending it gives the model the
   // context a bare content slice would lack.
   const texts = rows.map(r => `${r.title ?? ""}\n${(r.content ?? "").slice(0, 4000)}`.trim());
-  const vectors = await embedTexts(texts, config);
+  const vectors = await embedTexts(texts, config, { background: true });
   if (!vectors) return 0;
 
   try {
@@ -230,7 +256,7 @@ export async function hybridSearch<T extends LexicalResult>(
 
     // Backfill AFTER answering — the user waits for the search, not for the
     // index to catch up. Errors are swallowed by backfillVectors itself.
-    const batch = opts.backfillBatch ?? 32;
+    const batch = opts.backfillBatch ?? config.backfillBatch;
     if (batch > 0) void backfillVectors(opts.db, config, batch);
 
     return fused;

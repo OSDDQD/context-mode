@@ -151,6 +151,27 @@ describe("indexHostMemory", () => {
     expect(seen).toBe(2);
   });
 
+  test("skips a file whose indexed content is unchanged", () => {
+    seedMemory("-home-dev-projects-app", { "a.md": "alpha" });
+    const hash = require("node:crypto").createHash("sha256").update("alpha").digest("hex");
+    const calls: string[] = [];
+    const store = {
+      index: (o: { source?: string }) => { calls.push(o.source ?? ""); return {}; },
+      getSourceMeta: () => ({ contentHash: hash }),
+    };
+    expect(indexHostMemory({ store, configDir, projectDir })).toBe(0);
+    expect(calls).toEqual([]);
+  });
+
+  test("re-indexes when the content hash moved on", () => {
+    seedMemory("-home-dev-projects-app", { "a.md": "alpha v2" });
+    const store = {
+      index: () => ({}),
+      getSourceMeta: () => ({ contentHash: "stale-hash" }),
+    };
+    expect(indexHostMemory({ store, configDir, projectDir })).toBe(1);
+  });
+
   test("no memory dir means no work and no error", () => {
     const store = { index: () => { throw new Error("should not be called"); } };
     expect(indexHostMemory({ store, configDir, projectDir })).toBe(0);

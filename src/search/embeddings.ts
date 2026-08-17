@@ -21,7 +21,19 @@ export interface EmbeddingConfig {
   url: string;
   model: string;
   apiKey?: string;
+  /** Budget for the query embedding — the caller is waiting on this one. */
   timeoutMs: number;
+  /**
+   * Budget for background backfill batches, which are an order of magnitude
+   * slower than a single query: measured against bge-m3 on CPU, one query is
+   * ~230ms while a batch of 32 real chunks takes ~14s. Sharing the query
+   * timeout would abort every backfill before it wrote a single vector, and
+   * the index would stay permanently cold while search silently degraded to
+   * lexical — the failure mode is invisible, which is what makes it bad.
+   */
+  backfillTimeoutMs: number;
+  /** Chunks embedded per background pass. */
+  backfillBatch: number;
 }
 
 /**
@@ -31,12 +43,17 @@ export function resolveEmbeddingConfig(env: NodeJS.ProcessEnv = process.env): Em
   const url = env.CONTEXT_MODE_EMBEDDINGS_URL?.trim();
   const model = env.CONTEXT_MODE_EMBEDDINGS_MODEL?.trim();
   if (!url || !model) return null;
-  const rawTimeout = Number.parseInt(env.CONTEXT_MODE_EMBEDDINGS_TIMEOUT_MS ?? "", 10);
+  const num = (raw: string | undefined, fallback: number): number => {
+    const parsed = Number.parseInt(raw ?? "", 10);
+    return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
+  };
   return {
     url,
     model,
     apiKey: env.CONTEXT_MODE_EMBEDDINGS_API_KEY?.trim() || undefined,
-    timeoutMs: Number.isFinite(rawTimeout) && rawTimeout > 0 ? rawTimeout : 5_000,
+    timeoutMs: num(env.CONTEXT_MODE_EMBEDDINGS_TIMEOUT_MS, 5_000),
+    backfillTimeoutMs: num(env.CONTEXT_MODE_EMBEDDINGS_BACKFILL_TIMEOUT_MS, 120_000),
+    backfillBatch: num(env.CONTEXT_MODE_EMBEDDINGS_BACKFILL, 16),
   };
 }
 
@@ -83,11 +100,13 @@ export function parseEmbeddingResponse(payload: unknown): number[][] | null {
 export async function embedTexts(
   texts: string[],
   config: EmbeddingConfig | null = resolveEmbeddingConfig(),
+  opts: { background?: boolean } = {},
 ): Promise<number[][] | null> {
   if (!config || texts.length === 0) return null;
 
+  const budget = opts.background ? config.backfillTimeoutMs : config.timeoutMs;
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), config.timeoutMs);
+  const timer = setTimeout(() => controller.abort(), budget);
   try {
     const res = await fetch(config.url, {
       method: "POST",

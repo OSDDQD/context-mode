@@ -19,7 +19,8 @@
  * This module resolves the host path so both halves finally agree.
  */
 
-import { existsSync, readdirSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync } from "node:fs";
+import { createHash } from "node:crypto";
 import { join } from "node:path";
 
 /**
@@ -97,6 +98,8 @@ export function listHostMemoryFiles(configDir: string, projectDir?: string): str
 /** Minimal store surface needed to index memory files. */
 export interface MemoryIndexTarget {
   index(options: { path?: string; source?: string; attribution?: { sessionId?: string; eventId?: string } }): unknown;
+  /** Optional: lets the pass skip files whose indexed content is unchanged. */
+  getSourceMeta?(label: string): { contentHash: string | null } | null;
 }
 
 /**
@@ -129,7 +132,20 @@ export function indexHostMemory(opts: {
   for (const file of files) {
     try {
       const name = file.split(/[\\/]/).pop() ?? file;
-      opts.store.index({ path: file, source: `memory:${name}`, attribution: opts.attribution });
+      const label = `memory:${name}`;
+
+      // Skip unchanged files. Re-indexing rewrites the chunk rows, which
+      // hands every chunk a new rowid — orphaning any embedding vector keyed
+      // to the old one and forcing the semantic layer to re-embed content it
+      // had already processed. On a server that restarts often that is a
+      // treadmill: the index never actually warms.
+      const priorHash = opts.store.getSourceMeta?.(label)?.contentHash ?? null;
+      if (priorHash) {
+        const currentHash = createHash("sha256").update(readFileSync(file)).digest("hex");
+        if (currentHash === priorHash) continue;
+      }
+
+      opts.store.index({ path: file, source: label, attribution: opts.attribution });
       indexed++;
     } catch { /* skip this file, keep going */ }
   }

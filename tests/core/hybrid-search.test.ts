@@ -3,7 +3,7 @@ import {
   resolveEmbeddingConfig, isEmbeddingsEnabled, parseEmbeddingResponse,
   encodeVector, decodeVector, cosineSimilarity, embedTexts,
 } from "../../src/search/embeddings.js";
-import { fuseRankings, hybridSearch } from "../../src/search/hybrid.js";
+import { fuseRankings, hybridSearch, pruneOrphanVectors } from "../../src/search/hybrid.js";
 
 describe("embedding config", () => {
   test("stays disabled until both url and model are set", () => {
@@ -22,6 +22,32 @@ describe("embedding config", () => {
       CONTEXT_MODE_EMBEDDINGS_TIMEOUT_MS: "not-a-number",
     } as NodeJS.ProcessEnv);
     expect(cfg?.timeoutMs).toBe(5_000);
+  });
+
+  test("background backfill gets its own, much larger budget", () => {
+    // A single query against bge-m3 on CPU is ~230ms; a batch of 32 real
+    // chunks is ~14s. One shared timeout would abort every backfill and the
+    // index would never warm — silently, since search just degrades.
+    const cfg = resolveEmbeddingConfig({
+      CONTEXT_MODE_EMBEDDINGS_URL: "http://x/v1/embeddings",
+      CONTEXT_MODE_EMBEDDINGS_MODEL: "m",
+    } as NodeJS.ProcessEnv);
+    expect(cfg?.timeoutMs).toBe(5_000);
+    expect(cfg?.backfillTimeoutMs).toBe(120_000);
+    expect(cfg?.backfillBatch).toBe(16);
+  });
+
+  test("both budgets and the batch size are overridable", () => {
+    const cfg = resolveEmbeddingConfig({
+      CONTEXT_MODE_EMBEDDINGS_URL: "http://x/v1/embeddings",
+      CONTEXT_MODE_EMBEDDINGS_MODEL: "m",
+      CONTEXT_MODE_EMBEDDINGS_TIMEOUT_MS: "800",
+      CONTEXT_MODE_EMBEDDINGS_BACKFILL_TIMEOUT_MS: "300000",
+      CONTEXT_MODE_EMBEDDINGS_BACKFILL: "64",
+    } as NodeJS.ProcessEnv);
+    expect(cfg?.timeoutMs).toBe(800);
+    expect(cfg?.backfillTimeoutMs).toBe(300_000);
+    expect(cfg?.backfillBatch).toBe(64);
   });
 });
 
@@ -86,6 +112,32 @@ describe("fuseRankings", () => {
   test("honours the limit", () => {
     const rows = Array.from({ length: 10 }, (_, i) => row("s", `t${i}`, `c${i}`));
     expect(fuseRankings(rows, [], { limit: 4 })).toHaveLength(4);
+  });
+});
+
+describe("pruneOrphanVectors", () => {
+  test("removes vectors whose chunk no longer exists", () => {
+    // Re-indexing an FTS5 source deletes and re-inserts its rows with fresh
+    // rowids; without pruning, the old vectors survive and the brute-force
+    // scan walks them on every query.
+    const rows = [{ chunk_rowid: 1 }, { chunk_rowid: 2 }, { chunk_rowid: 3 }];
+    const deleted: string[] = [];
+    let count = rows.length;
+    const db = {
+      exec: () => undefined,
+      prepare: (sql: string) => ({
+        get: () => ({ c: count }),
+        run: () => { deleted.push(sql); count = 1; return {}; },
+        all: () => [],
+      }),
+    };
+    expect(pruneOrphanVectors(db)).toBe(2);
+    expect(deleted[0]).toContain("DELETE FROM chunk_vectors");
+  });
+
+  test("a broken DB returns 0 instead of throwing", () => {
+    const db = { exec: () => undefined, prepare: () => { throw new Error("gone"); } };
+    expect(pruneOrphanVectors(db)).toBe(0);
   });
 });
 

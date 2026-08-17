@@ -133,9 +133,25 @@ an OpenAI-compatible embeddings endpoint you already run.
 | Variable | Meaning |
 |---|---|
 | `CONTEXT_MODE_EMBEDDINGS_URL` | e.g. `http://localhost:11434/v1/embeddings` |
-| `CONTEXT_MODE_EMBEDDINGS_MODEL` | e.g. `nomic-embed-text` |
+| `CONTEXT_MODE_EMBEDDINGS_MODEL` | e.g. `bge-m3` (multilingual) or `nomic-embed-text` |
 | `CONTEXT_MODE_EMBEDDINGS_API_KEY` | optional bearer token |
-| `CONTEXT_MODE_EMBEDDINGS_TIMEOUT_MS` | default 5000 |
+| `CONTEXT_MODE_EMBEDDINGS_TIMEOUT_MS` | query budget, default 5000 |
+| `CONTEXT_MODE_EMBEDDINGS_BACKFILL_TIMEOUT_MS` | background batch budget, default 120000 |
+| `CONTEXT_MODE_EMBEDDINGS_BACKFILL` | chunks embedded per pass, default 16 |
+
+**Two budgets, not one.** Measured against bge-m3 on CPU: a single query
+embedding is ~230 ms, a batch of 16-32 real chunks is 5-15 s. One shared
+timeout would abort every backfill before it wrote a vector, and the index
+would stay permanently cold — invisibly, since search just degrades to
+lexical. The query path keeps a short budget so a hung endpoint cannot stall
+an answer; the background path gets a long one.
+
+**Vectors are pruned, not accumulated.** `chunks` is an FTS5 table:
+re-indexing a source deletes and re-inserts its rows with new rowids, orphaning
+every vector keyed to the old ones. A fresh store measured 32 vectors against
+16 chunks after one restart. `pruneOrphanVectors()` runs before each backfill,
+and `indexHostMemory` now skips files whose content hash is unchanged, so a
+restart no longer re-indexes and re-embeds identical content.
 
 Vectors live in a `chunk_vectors` table inside the existing content DB (so they
 are purged and cleaned up with the chunks they describe) and are backfilled
@@ -269,14 +285,16 @@ verified here, so they are left untouched.
 | `CONTEXT_MODE_EMBEDDINGS_URL` | — | Enables hybrid search (with `_MODEL`) |
 | `CONTEXT_MODE_EMBEDDINGS_MODEL` | — | Embedding model name |
 | `CONTEXT_MODE_EMBEDDINGS_API_KEY` | — | Bearer token for the endpoint |
-| `CONTEXT_MODE_EMBEDDINGS_TIMEOUT_MS` | `5000` | Per-request embedding timeout |
+| `CONTEXT_MODE_EMBEDDINGS_TIMEOUT_MS` | `5000` | Query embedding timeout (on the answer path) |
+| `CONTEXT_MODE_EMBEDDINGS_BACKFILL_TIMEOUT_MS` | `120000` | Background backfill batch timeout |
+| `CONTEXT_MODE_EMBEDDINGS_BACKFILL` | `16` | Chunks embedded per background pass |
 | `CONTEXT_MODE_ALLOW_PROXY` | off | `1` lets the fetch subprocess use the ambient proxy |
 | `CONTEXT_MODE_FETCH_PASSTHROUGH` | claude.ai artifacts | Extra hosts/regexes the WebFetch redirect must skip |
 | `CONTEXT_MODE_INDEX_HOST_MEMORY` | on | `0` stops indexing the host's memory files into FTS5 |
 
 ## Tests
 
-`npm test` — 4790 passing, 38 skipped. New suites:
+`npm test` — 4796 passing, 38 skipped. New suites:
 
 - `tests/core/host-memory.test.ts` — host memory path resolution, scoping, indexing
 
