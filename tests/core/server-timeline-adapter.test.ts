@@ -37,8 +37,12 @@ describe("ctx_search timeline mode wiring (server.ts)", () => {
 
   it("passes the detected adapter through to searchAllSources", () => {
     // searchAllSources call site should include `adapter:` in its options.
+    // The handler moved to src/tools/search.ts, where the adapter arrives
+    // through ToolDeps as a getter (detection finishes after import), so the
+    // binding reads `detectedAdapter()` rather than the module-level
+    // `_detectedAdapter` it used to close over.
     expect(SERVER_SRC).toMatch(
-      /searchAllSources\(\{[\s\S]*?adapter:\s*_detectedAdapter[\s\S]*?\}\)/,
+      /searchAllSources\(\{[\s\S]*?adapter:\s*(?:_detectedAdapter|detectedAdapter\(\))[\s\S]*?\}\)/,
     );
   });
 });

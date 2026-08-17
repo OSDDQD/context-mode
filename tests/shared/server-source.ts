@@ -30,6 +30,9 @@ const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..");
  */
 export const SERVER_SOURCE_FILES: readonly string[] = [
   "src/server.ts",
+  // Extracted from src/server.ts — see docs/adr and the split commits.
+  "src/tools/search.ts",
+  "src/search/dedup.ts",
 ];
 
 /** Absolute path of the main server module. */
