@@ -16,6 +16,8 @@ import { createHash } from "node:crypto";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { walkDirectoryDetailed, type WalkOptions } from "./store-directory.js";
+import type { SearchCompleteness } from "./search/completeness.js";
+export type { SearchCompleteness } from "./search/completeness.js";
 
 // ─────────────────────────────────────────────────────────
 // Types
@@ -571,6 +573,14 @@ export class ContentStore {
   // search performance. SQLite's built-in 'optimize' merges b-tree segments.
   #insertCount = 0;
   static readonly OPTIMIZE_EVERY = 50;
+
+  /**
+   * Widest fusion an exact-total request will run
+   * (CONTEXT_MODE_SEARCH_EXACT_TOTALS=1). Past this the reported total stays a
+   * lower bound — "500+" answers the reader's question as well as "1,214" does,
+   * and costs a great deal less.
+   */
+  static readonly EXACT_TOTAL_CAP = 500;
 
   // Fuzzy correction cache (process-local LRU). fuzzyCorrect() hits the vocab
   // DB and runs levenshtein against every candidate within length tolerance,
@@ -1487,6 +1497,25 @@ export class ContentStore {
     contentType?: "code" | "prose",
     sourceMatchMode: SourceMatchMode = "like",
   ): SearchResult[] {
+    return this.#rrfSearchWithPool(query, limit, source, contentType, sourceMatchMode).results;
+  }
+
+  /**
+   * RRF fusion, plus what the fusion knew and used to throw away.
+   *
+   * `scoreMap.size` is the number of distinct chunks that matched before the
+   * limit was applied — the honest answer to "how many are there". It is a
+   * lower bound, not a count: when either layer returned exactly its fetch
+   * limit the pool was truncated by the fetch, so the real total is larger.
+   * `saturated` records that, and every caller must err towards it.
+   */
+  #rrfSearchWithPool(
+    query: string,
+    limit: number,
+    source?: string,
+    contentType?: "code" | "prose",
+    sourceMatchMode: SourceMatchMode = "like",
+  ): { results: SearchResult[]; poolSize: number; saturated: boolean } {
     const K = 60; // Standard RRF constant
     const fetchLimit = Math.max(limit * 2, 10);
 
@@ -1516,10 +1545,29 @@ export class ContentStore {
       }
     }
 
-    return Array.from(scoreMap.values())
+    const results = Array.from(scoreMap.values())
       .sort((a, b) => b.score - a.score)
       .slice(0, limit)
       .map(({ result, score }) => ({ ...result, rank: -score }));
+
+    let poolSize = scoreMap.size;
+    let saturated = porterResults.length >= fetchLimit || trigramResults.length >= fetchLimit;
+
+    // Exact totals, opt-in. The fused pool is fetch-limited by design — asking
+    // for the true count means a second, much wider fusion, which is real work
+    // on a large index and buys only a nicer number. Off by default, and still
+    // bounded: past EXACT_TOTAL_CAP the answer stays a lower bound.
+    if (saturated && process.env.CONTEXT_MODE_SEARCH_EXACT_TOTALS === "1" && limit < ContentStore.EXACT_TOTAL_CAP) {
+      try {
+        const wide = this.#rrfSearchWithPool(
+          query, ContentStore.EXACT_TOTAL_CAP, source, contentType, sourceMatchMode,
+        );
+        poolSize = Math.max(poolSize, wide.poolSize);
+        saturated = wide.saturated;
+      } catch { /* keep the lower bound */ }
+    }
+
+    return { results, poolSize, saturated };
   }
 
   // ── Proximity Reranking ──
@@ -1584,6 +1632,25 @@ export class ContentStore {
     sourceMatchMode: SourceMatchMode = "like",
     sessionIdAllowSet?: Set<string>,
   ): SearchResult[] {
+    return this.searchWithFallbackMeta(
+      query, limit, source, contentType, sourceMatchMode, sessionIdAllowSet,
+    ).results;
+  }
+
+  /**
+   * `searchWithFallback`, plus how much of the match set the caller is seeing.
+   *
+   * Split out rather than folded in so no existing call site or test has to
+   * change: the old signature delegates here and drops the metadata.
+   */
+  searchWithFallbackMeta(
+    query: string,
+    limit: number = 3,
+    source?: string,
+    contentType?: "code" | "prose",
+    sourceMatchMode: SourceMatchMode = "like",
+    sessionIdAllowSet?: Set<string>,
+  ): { results: SearchResult[]; completeness: SearchCompleteness } {
     // Step 0: Auto-refresh stale file-backed sources before searching
     this.#refreshStaleSources();
 
@@ -1595,12 +1662,24 @@ export class ContentStore {
     const fetchLimit = sessionIdAllowSet ? Math.max(limit * 8, 40) : limit;
     const sessionFilter = this.#makeSessionFilter(sessionIdAllowSet);
 
+    // A session filter drops candidates after the pool is counted, so the pool
+    // is no longer an honest total — report it as a lower bound.
+    const filtered = !!sessionFilter;
+
     // Step 1: RRF fusion (porter OR + trigram OR → merge)
-    const rrfResults = this.#rrfSearch(query, fetchLimit, source, contentType, sourceMatchMode);
-    const rrfFiltered = sessionFilter ? rrfResults.filter(sessionFilter) : rrfResults;
+    const rrf = this.#rrfSearchWithPool(query, fetchLimit, source, contentType, sourceMatchMode);
+    const rrfFiltered = sessionFilter ? rrf.results.filter(sessionFilter) : rrf.results;
     if (rrfFiltered.length > 0) {
+      const shown = Math.min(limit, rrfFiltered.length);
       const reranked = this.#applyProximityReranking(rrfFiltered.slice(0, limit), query);
-      return reranked.map((r) => ({ ...r, matchLayer: "rrf" as const }));
+      return {
+        results: reranked.map((r) => ({ ...r, matchLayer: "rrf" as const })),
+        completeness: {
+          shown,
+          poolSize: filtered ? rrfFiltered.length : rrf.poolSize,
+          saturated: rrf.saturated || filtered,
+        },
+      };
     }
 
     // Step 2: Fuzzy correction → RRF re-run
@@ -1616,15 +1695,23 @@ export class ContentStore {
     const correctedQuery = correctedWords.join(" ");
 
     if (correctedQuery !== original) {
-      const fuzzyResults = this.#rrfSearch(correctedQuery, fetchLimit, source, contentType, sourceMatchMode);
-      const fuzzyFiltered = sessionFilter ? fuzzyResults.filter(sessionFilter) : fuzzyResults;
+      const fuzzy = this.#rrfSearchWithPool(correctedQuery, fetchLimit, source, contentType, sourceMatchMode);
+      const fuzzyFiltered = sessionFilter ? fuzzy.results.filter(sessionFilter) : fuzzy.results;
       if (fuzzyFiltered.length > 0) {
+        const shown = Math.min(limit, fuzzyFiltered.length);
         const reranked = this.#applyProximityReranking(fuzzyFiltered.slice(0, limit), correctedQuery);
-        return reranked.map((r) => ({ ...r, matchLayer: "rrf-fuzzy" as const }));
+        return {
+          results: reranked.map((r) => ({ ...r, matchLayer: "rrf-fuzzy" as const })),
+          completeness: {
+            shown,
+            poolSize: filtered ? fuzzyFiltered.length : fuzzy.poolSize,
+            saturated: fuzzy.saturated || filtered,
+          },
+        };
       }
     }
 
-    return [];
+    return { results: [], completeness: { shown: 0, poolSize: 0, saturated: false } };
   }
 
   /**

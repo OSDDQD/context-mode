@@ -42,6 +42,9 @@ import {
   type HybridDb, type LexicalResult,
 } from "./search/hybrid.js";
 import { resolveEmbeddingConfig } from "./search/embeddings.js";
+import {
+  formatCompletenessLine, formatEscalationBlock, type SearchCompleteness,
+} from "./search/completeness.js";
 import { isFetchPassthroughUrl, passthroughFetchError } from "./fetch-passthrough.js";
 import { startLifecycleGuard, noteMcpActivity, noteRequestStart, noteRequestEnd, attachMcpActivityTap } from "./lifecycle.js";
 import { charSafePrefix } from "./truncate.js";
@@ -1885,6 +1888,8 @@ export async function formatBatchQueryResults(
   // One deduper for the whole response: the repeats we care about are the ones
   // across queries, so it must outlive the per-query loop.
   const deduper = new CrossQueryDeduper();
+  // Per-query completeness, collected for the one escalation block at the end.
+  const completeness: SearchCompleteness[] = [];
 
   // When scope is "global", searchWithFallback receives `undefined` for the
   // source filter, which makes it query the entire persistent index instead
@@ -1898,7 +1903,9 @@ export async function formatBatchQueryResults(
       continue;
     }
 
-    let results = store.searchWithFallback(query, 3, searchSource, undefined, "exact");
+    const found = store.searchWithFallbackMeta(query, 3, searchSource, undefined, "exact");
+    let results = found.results;
+    completeness.push(found.completeness);
 
     // Semantic re-fusion, global scope only. Batch scope searches the output
     // this very call just produced — the caller already knows those terms, so
@@ -1918,6 +1925,11 @@ export async function formatBatchQueryResults(
     sections.push(`## ${query}`);
     sections.push("");
     if (results.length > 0) {
+      // Semantic re-fusion can add rows the lexical pool never held, so the
+      // reported total must be at least what is on screen.
+      const info = completeness[completeness.length - 1]!;
+      info.shown = results.length;
+      info.poolSize = Math.max(info.poolSize, results.length);
       for (const result of results) {
         const snippet = extractSnippet(result.content, query, 3000, result.highlighted);
         const decision = deduper.consider(result, snippet, query);
@@ -1933,12 +1945,20 @@ export async function formatBatchQueryResults(
         sections.push("");
         outputSize += snippet.length + result.title.length;
       }
+      const line = formatCompletenessLine(query, completeness[completeness.length - 1]!);
+      if (line) {
+        sections.push(line);
+        sections.push("");
+      }
       continue;
     }
 
     sections.push("No matching sections found.");
     sections.push("");
   }
+
+  const escalation = formatEscalationBlock(completeness);
+  if (escalation) sections.push(`\n${escalation}`);
 
   const dedupFooter = deduper.footer();
   if (dedupFooter) sections.push(`\n${dedupFooter}`);
@@ -3214,6 +3234,10 @@ EXAMPLE: ctx_search(queries: ["last user prompt", "active skills", "open blocker
       // Lives across the whole query loop — the repeats worth cutting are the
       // ones between queries of the same response.
       const deduper = new CrossQueryDeduper();
+      // Relevance mode only. Timeline mode merges three heterogeneous sources
+      // (this session, prior sessions, auto-memory) into one list; there is no
+      // single pool to be complete with respect to, so it says nothing.
+      const queryCompleteness: SearchCompleteness[] = [];
 
       // Open SessionDB once before the loop (Blocker 4: avoid open/close per query).
       // Issue #737: also open in relevance mode when a string `projectScope`
@@ -3268,7 +3292,7 @@ EXAMPLE: ctx_search(queries: ["last user prompt", "active skills", "open blocker
             projectScope,
           });
         } else {
-          results = store.searchWithFallback(
+          const found = store.searchWithFallbackMeta(
             q,
             effectiveLimit,
             source,
@@ -3276,6 +3300,8 @@ EXAMPLE: ctx_search(queries: ["last user prompt", "active skills", "open blocker
             "like",
             relevanceAllowSet,
           );
+          results = found.results;
+          queryCompleteness.push(found.completeness);
           // Semantic re-fusion (no-op unless CONTEXT_MODE_EMBEDDINGS_URL is
           // configured). Lexical results pass through untouched on any
           // failure, so an unreachable embedding endpoint degrades ranking
@@ -3339,7 +3365,21 @@ EXAMPLE: ctx_search(queries: ["last user prompt", "active skills", "open blocker
           })
           .join("\n\n");
 
-        sections.push(`## ${q}\n\n${formatted}`);
+        const info = queryCompleteness[queryCompleteness.length - 1];
+        let tail = "";
+        if (sort !== "timeline" && info) {
+          // hybridSearch and auto-memory can add rows the lexical pool never
+          // held — count them, but never let them make the total look smaller.
+          const memoryExtras = Math.max(0, results.length - info.shown);
+          info.shown = results.length;
+          info.poolSize = Math.max(info.poolSize, results.length);
+          const line = formatCompletenessLine(q, info);
+          if (line) {
+            tail = `\n\n${line}`;
+            if (memoryExtras > 0) tail += ` (+${memoryExtras} from memory/semantic)`;
+          }
+        }
+        sections.push(`## ${q}\n\n${formatted}${tail}`);
         totalSize += formatted.length;
       }
       } finally {
@@ -3358,6 +3398,9 @@ EXAMPLE: ctx_search(queries: ["last user prompt", "active skills", "open blocker
 
       const semanticHint = semanticStatusHint(store);
       if (semanticHint) output += `\n\n${semanticHint}`;
+
+      const escalation = formatEscalationBlock(queryCompleteness);
+      if (escalation) output += `\n\n${escalation}`;
 
       // Throttle counter — always surfaced so agents can pace themselves
       // proactively instead of discovering the limit only after results are
