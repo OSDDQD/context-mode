@@ -30,8 +30,13 @@ const branch = args.find(a => !a.startsWith("--")) ?? "main";
 const remote = process.env.CONTEXT_MODE_UPSTREAM_REMOTE ?? "upstream";
 const ref = `${remote}/${branch}`;
 
+/** Run git and return its trimmed stdout. */
 const git = (argv, opts = {}) =>
-  execFileSync("git", argv, { encoding: "utf-8", stdio: ["ignore", "pipe", "pipe"], ...opts }).trim();
+  (execFileSync("git", argv, { encoding: "utf-8", stdio: ["ignore", "pipe", "pipe"], ...opts }) ?? "").trim();
+
+/** Run git for effect, streaming its output. Returns nothing to capture. */
+const gitRun = argv =>
+  execFileSync("git", argv, { encoding: "utf-8", stdio: "inherit" });
 
 const gitStatus = argv => spawnSync("git", argv, { encoding: "utf-8" });
 
@@ -63,7 +68,7 @@ console.log("✓ merge.ours driver registered (keeps our bundles during merges)"
 
 // ── 2. Fetch + merge ─────────────────────────────────────────────────────
 console.log(`→ fetching ${remote}…`);
-git(["fetch", remote, "--tags"], { stdio: "inherit" });
+gitRun(["fetch", remote, "--tags"]);
 
 const behind = git(["rev-list", "--count", `HEAD..${ref}`]);
 if (behind === "0") {
