@@ -884,6 +884,12 @@ function getStore(): ContentStore {
       // Also clean legacy shared dir from before platform isolation
       const legacyDir = join(homedir(), ".context-mode", "content");
       if (existsSync(legacyDir)) cleanupStaleContentDBs(legacyDir, 0);
+      // Retire per-session stats files nobody has written to in weeks. Every
+      // ctx_stats call reads all of them; on this machine that was 735 files.
+      if (!_statsRollupDone) {
+        _statsRollupDone = true;
+        rollUpStaleStatsFiles(dirname(getStatsFilePath()));
+      }
     } catch { /* best-effort */ }
 
     // Also clean old PID-based DBs from migration
@@ -1311,6 +1317,83 @@ function getStatsFilePath(): string {
   const sessionId = sanitizeSessionId(raw);
   const statsDir = ensureWritableStorageDir(resolveStatsStorageDir(getDefaultSessionDir));
   return join(statsDir, `stats-${sessionId}.json`);
+}
+
+/**
+ * Where the bytes of retired per-session stats files are kept.
+ *
+ * Named to be picked up by the same `stats-*.json` scan that reads the live
+ * files, so folding them in costs the reader nothing.
+ */
+const STATS_ROLLUP_FILE = "stats-rollup.json";
+
+/** Roll up + delete runs once per process; there is nothing to gain from more. */
+let _statsRollupDone = false;
+
+/**
+ * Fold long-dead per-session stats files into one rollup and delete them.
+ *
+ * Every session writes its own `stats-<id>.json` and nothing ever removed them:
+ * 735 files on this machine, all of them read on every ctx_stats call. Plain
+ * deletion is not an option — the lifetime byte counters are summed from these
+ * files, and a metric that goes down is worse than a directory that grows — so
+ * the bytes move into a rollup first.
+ *
+ * Only files untouched for the retention window are eligible, which is what
+ * keeps a live session's own file (rewritten on every persist, cumulative for
+ * the session) from being counted twice.
+ *
+ * @returns Number of files retired.
+ */
+export function rollUpStaleStatsFiles(sessionsDir: string, maxAgeDays?: number): number {
+  const rawDays = Number.parseInt(process.env.CONTEXT_MODE_STATS_FILE_RETENTION_DAYS ?? "", 10);
+  const days = maxAgeDays ?? (Number.isFinite(rawDays) && rawDays >= 0 ? rawDays : 14);
+  if (days <= 0) return 0;
+  if (!existsSync(sessionsDir)) return 0;
+
+  const cutoff = Date.now() - days * 24 * 60 * 60 * 1000;
+  const rollupPath = join(sessionsDir, STATS_ROLLUP_FILE);
+  let sandboxed = 0;
+  let indexed = 0;
+  const victims: string[] = [];
+
+  try {
+    for (const f of readdirSync(sessionsDir)) {
+      if (!f.startsWith("stats-") || !f.endsWith(".json") || f === STATS_ROLLUP_FILE) continue;
+      const path = join(sessionsDir, f);
+      try {
+        if (statSync(path).mtimeMs >= cutoff) continue;
+        const raw = JSON.parse(readFileSync(path, "utf-8"));
+        sandboxed += raw?.bytes_sandboxed ?? 0;
+        indexed += raw?.bytes_indexed ?? 0;
+        victims.push(path);
+      } catch { /* unreadable or corrupt — leave it alone rather than lose it */ }
+    }
+  } catch {
+    return 0;
+  }
+  if (victims.length === 0) return 0;
+
+  try {
+    let prev: { bytes_sandboxed?: number; bytes_indexed?: number; files_rolled_up?: number } = {};
+    try { prev = JSON.parse(readFileSync(rollupPath, "utf-8")); } catch { /* first rollup */ }
+    // Written before anything is deleted: a crash here re-reads the same files
+    // next time, which is recoverable; the reverse order loses the bytes.
+    writeFileSync(rollupPath, JSON.stringify({
+      bytes_sandboxed: (prev.bytes_sandboxed ?? 0) + sandboxed,
+      bytes_indexed: (prev.bytes_indexed ?? 0) + indexed,
+      files_rolled_up: (prev.files_rolled_up ?? 0) + victims.length,
+      updated_at: new Date().toISOString(),
+    }), "utf-8");
+  } catch {
+    return 0;
+  }
+
+  let removed = 0;
+  for (const path of victims) {
+    try { unlinkSync(path); removed++; } catch { /* next pass will retry */ }
+  }
+  return removed;
 }
 
 function persistStats(): void {
@@ -5047,6 +5130,10 @@ EXAMPLE: ctx_gather(
  */
 function patchPiLifetimeFromStatsFiles(lifetime: ReturnType<typeof getLifetimeStats>, sessionsDir: string): void {
   if (!existsSync(sessionsDir)) return;
+  if (!_statsRollupDone) {
+    _statsRollupDone = true;
+    try { rollUpStaleStatsFiles(sessionsDir); } catch { /* best-effort */ }
+  }
   let sandboxedBytes = 0;
   try {
     for (const f of readdirSync(sessionsDir)) {

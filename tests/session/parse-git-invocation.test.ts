@@ -13,7 +13,10 @@
  */
 
 import { describe, test, expect } from "vitest";
-import { homedir } from "node:os";
+// `expandTilde` in src/session/extract.ts reads HOME from the environment on
+// purpose (a sandbox may have no home at all), so the expectation has to come
+// from the same place rather than from os.homedir().
+const envHome = process.env.HOME ?? process.env.USERPROFILE ?? "~";
 import { extractEvents } from "../../src/session/extract.js";
 
 function cwdEventDataOf(cmd: string): string | undefined {
@@ -27,7 +30,7 @@ function cwdEventDataOf(cmd: string): string | undefined {
 describe("parseGitInvocation — Gap #2 tilde + --directory=", () => {
   test("tracer: `git -C ~/repos/myrepo status` → expanded homedir", () => {
     const data = cwdEventDataOf(`git -C ~/repos/myrepo status`);
-    expect(data).toBe(`${homedir()}/repos/myrepo`);
+    expect(data).toBe(`${envHome}/repos/myrepo`);
   });
 
   test("`git --directory=/abs/x log` (equals form) → /abs/x", () => {
@@ -48,13 +51,13 @@ describe("parseGitInvocation — Gap #2 tilde + --directory=", () => {
     });
     const cwd = events.find((e) => e.type === "cwd");
     const commit = events.find((e) => e.type === "git_commit");
-    expect(cwd?.data).toBe(`${homedir()}/repos`);
+    expect(cwd?.data).toBe(`${envHome}/repos`);
     expect(commit?.data).toBe("feat: x");
   });
 
   test("bare `~` (no path tail) expands to homedir", () => {
     const data = cwdEventDataOf(`git -C ~ status`);
-    expect(data).toBe(homedir());
+    expect(data).toBe(envHome);
   });
 
   test("`git -C ~user/foo` does NOT expand (no current user resolution)", () => {
@@ -74,6 +77,6 @@ describe("parseGitInvocation — Gap #2 tilde + --directory=", () => {
 
   test("`git --directory=~/abs status` expands equals-form tilde", () => {
     const data = cwdEventDataOf(`git --directory=~/abs status`);
-    expect(data).toBe(`${homedir()}/abs`);
+    expect(data).toBe(`${envHome}/abs`);
   });
 });

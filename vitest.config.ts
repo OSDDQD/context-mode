@@ -5,6 +5,11 @@ const isCI = !!process.env.CI;
 export default defineConfig({
   test: {
     include: ["tests/**/*.test.ts"],
+    // Redirect the plugin's storage root for every suite, so `npm test` stops
+    // writing into the user's real ~/.claude/context-mode. Fake HOME stays
+    // opt-in (tests/setup-home.ts): faking it globally breaks the subprocess
+    // suites that shell out through asdf/nvm shims rooted in the real home.
+    setupFiles: ["./tests/setup-storage.ts"],
     testTimeout: 30_000,
     // afterAll cleanup loops over many better-sqlite3 handles on Windows
     // and can exceed vitest's default 10s hookTimeout under fork contention

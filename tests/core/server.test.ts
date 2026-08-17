@@ -28,6 +28,15 @@ import { fileURLToPath } from "node:url";
 import { createRequire } from "node:module";
 import { describe, test, expect, beforeAll, afterAll, afterEach } from "vitest";
 
+import { testStorageRoot } from "../setup-storage.js";
+
+// This suite spawns MCP servers and CLI runs with the ambient environment, and
+// a child process cannot see the homedir() mock — without this they index into
+// the developer's own ~/.claude/context-mode. Suites that spawn hooks with a
+// HOME of their own must NOT do this: they look for the result under that HOME.
+// Individual tests that exercise storage resolution override it themselves.
+process.env.CONTEXT_MODE_DIR ??= testStorageRoot;
+
 import { classifyNonZeroExit } from "../../src/exit-classify.js";
 import { PolyglotExecutor } from "../../src/executor.js";
 import { detectRuntimes } from "../../src/runtime.js";
