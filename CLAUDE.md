@@ -68,24 +68,12 @@ Skills, roles, and decisions persist for the entire session. Do not abandon them
 
 Session history is persistent and searchable. On resume, search BEFORE asking the user:
 
-| Need | Command |
-|------|---------|
-| What were we working on? | `ctx_search(queries: ["summary"], source: "compaction", sort: "timeline")` |
-| What was the first request? | `ctx_search(queries: ["prompt"], source: "user-prompt", sort: "timeline")` |
-| What did we decide? | `ctx_search(queries: ["decision"], source: "decision", sort: "timeline")` |
-| What NOT to repeat? | `ctx_search(queries: ["rejected"], source: "rejected-approach")` |
-| What constraints exist? | `ctx_search(queries: ["constraint"], source: "constraint")` |
+Useful source labels: `compaction`, `user-prompt`, `decision`, `rejected-approach`, `constraint`.
 
 DO NOT ask "what were we working on?" — SEARCH FIRST.
 If search returns 0 results, proceed as a fresh session.
 
 ## ctx commands
 
-| Command | Action |
-|---------|--------|
-| `ctx stats` | Call `ctx_stats` MCP tool, display full output verbatim |
-| `ctx doctor` | Call `ctx_doctor` MCP tool, run returned shell command, display as checklist |
-| `ctx upgrade` | Call `ctx_upgrade` MCP tool, run returned shell command, display as checklist |
-| `ctx purge` | Call `ctx_purge` MCP tool with confirm: true. Warns before wiping knowledge base. |
-
-After /clear or /compact: knowledge base and session stats preserved. Use `ctx purge` to start fresh.
+`ctx stats` / `ctx doctor` / `ctx upgrade` / `ctx purge` — the SessionStart block spells out
+what each one calls and how to render the result.
