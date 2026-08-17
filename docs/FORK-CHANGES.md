@@ -388,8 +388,22 @@ reinstalling another tree's plugin metadata.
 `version`, so "which tree is running?" had no answer — the first thing that
 matters when a fork-only feature appears to be missing. `package.json` carries
 a `fork` block (`name`, `repo`, `upstream`, `version`), and `doctor` prints
-`context-mode v1.0.169 · fork OSDDQD/context-mode rev 1` plus the repo it would
+`context-mode v1.0.169 · fork OSDDQD/context-mode rev 2` plus the repo it would
 upgrade from.
+
+**The same shared `version` also made every fork release invisible to the
+upgrade itself.** `ctx upgrade` cloned the right repo, compared `1.0.169`
+against `1.0.169`, reported "already on latest" and installed nothing — caught
+running it against a tree four commits ahead. `isUpgradeAvailable()` now
+compares the pair `(version, fork.version)`, so an upstream bump and a fork
+release are both detected, and the version line reads
+`v1.0.169 (fork rev 1) → v1.0.169 (fork rev 2)`. An install predating the
+marker treats a missing revision as `0`, so it still sees the first marked
+release.
+
+**Releasing this fork therefore means bumping `fork.version`** in
+`package.json` — the same role `version` plays upstream. Skip it and installs
+will keep reporting themselves up to date while running older code.
 
 ## 11. Merging upstream without drowning in bundle conflicts
 

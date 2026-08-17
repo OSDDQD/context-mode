@@ -43,7 +43,10 @@ import { ContentStore } from "./store.js";
 import { readToolDenyPatterns, evaluateFilePath } from "./security.js";
 // v1.0.128 — Issue #559 sibling MCP kill helpers (see PR-559-560-FIX-DESIGN.md).
 import { discoverSiblingMcpPids, killSiblingMcpServers } from "./util/sibling-mcp.js";
-import { resolveUpgradeRepo, gitOriginUrl, sameGitRepo, describeInstall } from "./util/fork-info.js";
+import {
+  resolveUpgradeRepo, gitOriginUrl, sameGitRepo, describeInstall,
+  getForkInfo, readForkInfo, isUpgradeAvailable,
+} from "./util/fork-info.js";
 // v1.0.119 — Issue #523 Layer 5 heal: post-bump assertion on .claude-plugin/plugin.json
 // mcpServers args. Single source of truth shared with start.mjs HEAL block + postinstall.
 // @ts-expect-error — JS module, no TS declarations
@@ -1349,13 +1352,23 @@ async function upgrade(opts?: { platform?: string }) {
       readFileSync(resolve(srcDir, "package.json"), "utf-8"),
     );
     const newVersion = newPkg.version ?? "unknown";
-    
-    if (newVersion === localVersion) {
-      p.log.success(color.green("Already on latest") + ` — v${localVersion}`);
+
+    // A fork keeps upstream's `version`, so comparing it alone makes every
+    // fork release invisible: the clone lands, the check says "already on
+    // latest", and nothing is installed. See isUpgradeAvailable().
+    const upgrade = isUpgradeAvailable({
+      localVersion,
+      remoteVersion: newVersion,
+      localForkVersion: getForkInfo(pluginRoot)?.version,
+      remoteForkVersion: readForkInfo(newPkg)?.version,
+    });
+
+    if (!upgrade.available) {
+      p.log.success(color.green("Already on latest") + ` — ${upgrade.localLabel}`);
       rmSync(tmpDir, { recursive: true, force: true });
     } else {
       p.log.info(
-        `Update available: ${color.yellow("v" + localVersion)} → ${color.green("v" + newVersion)}`,
+        `Update available: ${color.yellow(upgrade.localLabel)} → ${color.green(upgrade.remoteLabel)}`,
       );
 
       // v1.0.128 — Issue #559: terminate sibling MCP servers BEFORE installing

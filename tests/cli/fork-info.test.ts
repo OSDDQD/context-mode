@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   readForkInfo, getForkInfo, resolveUpgradeRepo, sameGitRepo, describeInstall,
-  UPSTREAM_REPO,
+  isUpgradeAvailable, UPSTREAM_REPO,
 } from "../../src/util/fork-info.js";
 
 let dir: string;
@@ -107,6 +107,51 @@ describe("describeInstall", () => {
 
   test("a missing package.json does not throw", () => {
     expect(describeInstall(join(dir, "nope"), "1.0.169")).toContain("upstream");
+  });
+});
+
+describe("isUpgradeAvailable", () => {
+  test("a fork release is visible even though the version never moves", () => {
+    // The bug this exists to prevent: /ctx-upgrade cloned a tree 4 commits
+    // ahead, compared 1.0.169 against 1.0.169, said "already on latest" and
+    // installed nothing.
+    const r = isUpgradeAvailable({
+      localVersion: "1.0.169", remoteVersion: "1.0.169",
+      localForkVersion: "1", remoteForkVersion: "2",
+    });
+    expect(r.available).toBe(true);
+    expect(r.localLabel).toBe("v1.0.169 (fork rev 1)");
+    expect(r.remoteLabel).toBe("v1.0.169 (fork rev 2)");
+  });
+
+  test("identical version and revision is genuinely up to date", () => {
+    const r = isUpgradeAvailable({
+      localVersion: "1.0.169", remoteVersion: "1.0.169",
+      localForkVersion: "2", remoteForkVersion: "2",
+    });
+    expect(r.available).toBe(false);
+  });
+
+  test("an upstream version bump still counts, revision or not", () => {
+    expect(isUpgradeAvailable({ localVersion: "1.0.169", remoteVersion: "1.0.170" }).available).toBe(true);
+    expect(isUpgradeAvailable({
+      localVersion: "1.0.169", remoteVersion: "1.0.170",
+      localForkVersion: "2", remoteForkVersion: "2",
+    }).available).toBe(true);
+  });
+
+  test("an install predating the fork marker sees the first marked release", () => {
+    const r = isUpgradeAvailable({
+      localVersion: "1.0.169", remoteVersion: "1.0.169",
+      localForkVersion: null, remoteForkVersion: "1",
+    });
+    expect(r.available).toBe(true);
+    expect(r.localLabel).toBe("v1.0.169");
+  });
+
+  test("an unforked install compares versions exactly as before", () => {
+    expect(isUpgradeAvailable({ localVersion: "1.0.169", remoteVersion: "1.0.169" }).available).toBe(false);
+    expect(isUpgradeAvailable({ localVersion: "1.0.169", remoteVersion: "1.0.169" }).localLabel).toBe("v1.0.169");
   });
 });
 

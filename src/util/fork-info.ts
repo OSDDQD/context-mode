@@ -118,6 +118,36 @@ export function sameGitRepo(a: string | null | undefined, b: string | null | und
   return na.length > 0 && na === norm(b);
 }
 
+/**
+ * Decide whether a fetched tree is newer than the installed one.
+ *
+ * `version` alone cannot answer this for a fork: the fork keeps upstream's
+ * version so its own releases are invisible to a `newVersion === localVersion`
+ * check, and `ctx upgrade` reports "already on latest" while shipping nothing.
+ * Observed exactly that — an upgrade that pulled a tree 4 commits ahead and
+ * installed none of it. The fork revision breaks the tie.
+ *
+ * A missing revision on either side reads as "0", so an install predating the
+ * fork marker still sees the first marked release as an update.
+ */
+export function isUpgradeAvailable(opts: {
+  localVersion: string;
+  remoteVersion: string;
+  localForkVersion?: string | null;
+  remoteForkVersion?: string | null;
+}): { available: boolean; localLabel: string; remoteLabel: string } {
+  const rev = (v: string | null | undefined): string => (v ?? "0").trim() || "0";
+  const localRev = rev(opts.localForkVersion);
+  const remoteRev = rev(opts.remoteForkVersion);
+  const label = (version: string, r: string): string =>
+    r === "0" ? `v${version}` : `v${version} (fork rev ${r})`;
+  return {
+    available: opts.remoteVersion !== opts.localVersion || remoteRev !== localRev,
+    localLabel: label(opts.localVersion, localRev),
+    remoteLabel: label(opts.remoteVersion, remoteRev),
+  };
+}
+
 /** One-line install identity for doctor/stats output. */
 export function describeInstall(pluginRoot: string, version: string): string {
   const fork = getForkInfo(pluginRoot);

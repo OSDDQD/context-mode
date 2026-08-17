@@ -31,7 +31,13 @@ const upgradeIdx = cliSrc.indexOf("async function upgrade");
 // downstream `Plugin manifest drift` throw fell outside the per-test slice.
 // Window the SOURCE generously here; per-test slices already cap their own
 // inspection windows below.
-const upgradeBody = cliSrc.slice(upgradeIdx, upgradeIdx + 20000);
+//
+// Widened again 20000 → 26000 (this fork): the fork-revision comparison in the
+// version-check block added ~700 chars ahead of the heal call and the drift
+// throw fell off the end for the same reason. The window is a proxy for "still
+// inside upgrade()", not a size budget — every char added before the heal call
+// eats into it, so give it room rather than re-tuning on each edit.
+const upgradeBody = cliSrc.slice(upgradeIdx, upgradeIdx + 26000);
 
 describe("cli.ts upgrade() — Issue #523 plugin.json placeholder assertion", () => {
   test("post-bump block invokes healPluginJsonMcpServers from the shared module", () => {

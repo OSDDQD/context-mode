@@ -5,7 +5,7 @@
     "name": "OSDDQD/context-mode",
     "repo": "https://github.com/OSDDQD/context-mode.git",
     "upstream": "https://github.com/mksglu/context-mode.git",
-    "version": "1"
+    "version": "2"
   },
   "type": "module",
   "description": "MCP plugin that saves 98% of your context window. Works with Claude Code, Gemini CLI, VS Code Copilot, OpenCode, and Codex CLI. Sandboxed code execution, FTS5 knowledge base, and intent-driven search.",
