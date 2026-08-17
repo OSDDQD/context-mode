@@ -55,8 +55,16 @@ export interface HybridDb {
   exec(sql: string): unknown;
 }
 
-/** Identity used to fuse a chunk that surfaced through both strategies. */
-function fusionKey(r: { source: string; title: string; content: string }): string {
+/**
+ * Identity of a chunk, independent of which strategy or which query surfaced it.
+ *
+ * Used to fuse a chunk that came back through both lexical and semantic search,
+ * and to recognise the same chunk across the queries of one response
+ * (see `CrossQueryDeduper` in server.ts). `source::title` alone is not enough:
+ * a live index carries `Untitled (12)`, `… (1)`, `… (2)` — distinct chunks that
+ * share a label and collide on title.
+ */
+export function chunkIdentity(r: { source: string; title: string; content: string }): string {
   return `${r.source} ${r.title} ${(r.content ?? "").slice(0, 120)}`;
 }
 
@@ -288,7 +296,7 @@ export function fuseRankings<T extends LexicalResult>(
 
   const add = (rows: T[]) => {
     rows.forEach((row, i) => {
-      const key = fusionKey(row);
+      const key = chunkIdentity(row);
       const contribution = 1 / (k + i + 1);
       const prev = scores.get(key);
       if (prev) prev.score += contribution;
@@ -333,7 +341,7 @@ export function resetHybridTelemetry(): void {
 function rankingChanged<T extends LexicalResult>(before: T[], after: T[]): boolean {
   if (before.length !== after.length) return true;
   for (let i = 0; i < before.length; i++) {
-    if (fusionKey(before[i]) !== fusionKey(after[i])) return true;
+    if (chunkIdentity(before[i]) !== chunkIdentity(after[i])) return true;
   }
   return false;
 }

@@ -38,7 +38,7 @@ import { drainSubagentQueue } from "./session/subagent-capture.js";
 import { indexHostMemory } from "./session/host-memory.js";
 import { searchAutoMemory } from "./search/auto-memory.js";
 import {
-  hybridSearch, vectorCoverage, getHybridTelemetry,
+  hybridSearch, vectorCoverage, getHybridTelemetry, chunkIdentity,
   type HybridDb, type LexicalResult,
 } from "./search/hybrid.js";
 import { resolveEmbeddingConfig } from "./search/embeddings.js";
@@ -1628,6 +1628,88 @@ export function extractSnippet(
   return parts.join("\n\n");
 }
 
+// ─────────────────────────────────────────────────────────
+// Cross-query deduplication
+// ─────────────────────────────────────────────────────────
+
+/** Cross-query dedup is on unless CONTEXT_MODE_SEARCH_DEDUP=0. */
+export function searchDedupEnabled(): boolean {
+  return process.env.CONTEXT_MODE_SEARCH_DEDUP !== "0";
+}
+
+export type DedupDecision =
+  /** Not shown yet in this response — render in full. */
+  | { kind: "render" }
+  /** Byte-identical snippet already rendered above — replace with a pointer. */
+  | { kind: "suppress"; firstQuery: string }
+  /** Same chunk, a different snippet window — render in full, marked. */
+  | { kind: "further" };
+
+/**
+ * Suppresses verbatim repeats *within a single response*.
+ *
+ * A multi-query search answers each query independently, so a chunk that is a
+ * good answer to three of them is printed three times. Measured on three live
+ * `batch:` sources: 45 renders of 30 distinct chunks — 37% of the bytes handed
+ * to the model were text it had already read a few lines earlier.
+ *
+ * The safety property is deliberately narrow: only text that is **byte-identical
+ * to something already shown above in this same response** is replaced, and only
+ * by a pointer to where it was shown. A different snippet window over the same
+ * chunk is new information and is rendered in full. Nothing is ever dropped —
+ * headings always survive, so a query whose every hit is a repeat still shows
+ * what it matched rather than claiming it found nothing.
+ */
+export class CrossQueryDeduper {
+  readonly enabled: boolean;
+  /** chunk identity → first query that showed it + every snippet already shown. */
+  readonly #seen = new Map<string, { query: string; snippets: Set<string> }>();
+  #suppressed = 0;
+  #savedBytes = 0;
+
+  constructor(enabled: boolean = searchDedupEnabled()) {
+    this.enabled = enabled;
+  }
+
+  /** Record this render and say how it should be printed. */
+  consider(
+    result: { source: string; title: string; content: string },
+    snippet: string,
+    query: string,
+  ): DedupDecision {
+    if (!this.enabled) return { kind: "render" };
+    const key = chunkIdentity(result);
+    const prior = this.#seen.get(key);
+    if (!prior) {
+      this.#seen.set(key, { query, snippets: new Set([snippet]) });
+      return { kind: "render" };
+    }
+    if (prior.snippets.has(snippet)) {
+      this.#suppressed++;
+      this.#savedBytes += snippet.length;
+      return { kind: "suppress", firstQuery: prior.query };
+    }
+    prior.snippets.add(snippet);
+    return { kind: "further" };
+  }
+
+  /** The line that stands in for a suppressed snippet. */
+  static pointerLine(firstQuery: string): string {
+    return `(identical to the section shown under "${firstQuery}" — not repeated)`;
+  }
+
+  get suppressedCount(): number { return this.#suppressed; }
+  get savedBytes(): number { return this.#savedBytes; }
+
+  /** Response footer, or null when nothing was suppressed. */
+  footer(): string | null {
+    if (this.#suppressed === 0) return null;
+    const kb = this.#savedBytes / 1024;
+    const size = kb >= 0.1 ? `~${kb.toFixed(1)} KB` : `${this.#savedBytes} B`;
+    return `> Deduplicated ${this.#suppressed} repeated section(s) (${size} not repeated).`;
+  }
+}
+
 export type BatchQueryScope = "batch" | "global";
 
 export async function formatBatchQueryResults(
@@ -1639,6 +1721,9 @@ export async function formatBatchQueryResults(
 ): Promise<string[]> {
   const sections: string[] = [];
   let outputSize = 0;
+  // One deduper for the whole response: the repeats we care about are the ones
+  // across queries, so it must outlive the per-query loop.
+  const deduper = new CrossQueryDeduper();
 
   // When scope is "global", searchWithFallback receives `undefined` for the
   // source filter, which makes it query the entire persistent index instead
@@ -1674,7 +1759,15 @@ export async function formatBatchQueryResults(
     if (results.length > 0) {
       for (const result of results) {
         const snippet = extractSnippet(result.content, query, 3000, result.highlighted);
-        sections.push(`### ${result.title}`);
+        const decision = deduper.consider(result, snippet, query);
+        if (decision.kind === "suppress") {
+          sections.push(`### ${result.title}`);
+          sections.push(CrossQueryDeduper.pointerLine(decision.firstQuery));
+          sections.push("");
+          outputSize += result.title.length;
+          continue;
+        }
+        sections.push(`### ${result.title}${decision.kind === "further" ? " — further match" : ""}`);
         sections.push(snippet);
         sections.push("");
         outputSize += snippet.length + result.title.length;
@@ -1685,6 +1778,9 @@ export async function formatBatchQueryResults(
     sections.push("No matching sections found.");
     sections.push("");
   }
+
+  const dedupFooter = deduper.footer();
+  if (dedupFooter) sections.push(`\n${dedupFooter}`);
 
   if (scope === "global") {
     sections.push(`\n> **Scope:** Queries searched the entire persistent index (query_scope: "global").`);
@@ -2950,6 +3046,9 @@ EXAMPLE: ctx_search(queries: ["last user prompt", "active skills", "open blocker
       const MAX_TOTAL = 40 * 1024; // 40KB total cap
       let totalSize = 0;
       const sections: string[] = [];
+      // Lives across the whole query loop — the repeats worth cutting are the
+      // ones between queries of the same response.
+      const deduper = new CrossQueryDeduper();
 
       // Open SessionDB once before the loop (Blocker 4: avoid open/close per query).
       // Issue #737: also open in relevance mode when a string `projectScope`
@@ -3064,8 +3163,13 @@ EXAMPLE: ctx_search(queries: ["last user prompt", "active skills", "open blocker
             const origin = (r as any).origin || "current-session";
             const ts = (r as any).timestamp ? (r as any).timestamp.slice(0, 16).replace("T", " ") : "";
             const header = `--- [${origin}${ts ? " | " + ts : ""} | ${r.source}] ---`;
-            const heading = `### ${r.title}`;
             const snippet = extractSnippet(r.content, q, 1500, r.highlighted);
+            const decision = deduper.consider(r, snippet, q);
+            if (decision.kind === "suppress") {
+              // Heading and provenance stay — only the verbatim body goes.
+              return `${header}\n### ${r.title}\n\n${CrossQueryDeduper.pointerLine(decision.firstQuery)}`;
+            }
+            const heading = `### ${r.title}${decision.kind === "further" ? " — further match" : ""}`;
             return `${header}\n${heading}\n\n${snippet}`;
           })
           .join("\n\n");
@@ -3083,6 +3187,9 @@ EXAMPLE: ctx_search(queries: ["last user prompt", "active skills", "open blocker
       if (store.lastRefreshCount > 0) {
         output = `> Auto-refreshed ${store.lastRefreshCount} stale source${store.lastRefreshCount > 1 ? "s" : ""} (file changed since indexing).\n\n` + output;
       }
+
+      const dedupFooter = deduper.footer();
+      if (dedupFooter) output += `\n\n${dedupFooter}`;
 
       // Throttle counter — always surfaced so agents can pace themselves
       // proactively instead of discovering the limit only after results are
