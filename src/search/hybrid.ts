@@ -216,6 +216,45 @@ export async function backfillVectors(
 }
 
 /**
+ * Embed repeatedly until the index is covered, the deadline passes, or
+ * `maxChunks` chunks have been embedded.
+ *
+ * The per-search backfill is sized for the hot path — one small batch, so a
+ * search never pays for a bulk index. That makes it a warm-up, not a way to
+ * reach full coverage: a 1,320-chunk store at 16 chunks per search needs ~83
+ * searches. This is the bounded bulk pass, called from `context-mode drain`
+ * (which the SessionEnd hook already runs detached), where latency is free.
+ *
+ * Bounded on both axes on purpose: a wall clock so a detached drain cannot run
+ * forever, and a chunk cap so a huge cold store cannot monopolise a local
+ * embedding endpoint.
+ *
+ * @returns Number of chunks embedded across all batches.
+ */
+export async function backfillVectorsUntil(
+  db: HybridDb,
+  config: EmbeddingConfig,
+  opts: { deadlineMs?: number; maxChunks?: number } = {},
+): Promise<number> {
+  const deadlineMs = opts.deadlineMs ?? 60_000;
+  const maxChunks = opts.maxChunks ?? 2000;
+  if (deadlineMs <= 0 || maxChunks <= 0) return 0;
+  if (!ensureVectorTable(db)) return 0;
+
+  const started = Date.now();
+  let total = 0;
+  while (total < maxChunks && Date.now() - started < deadlineMs) {
+    const batch = Math.min(config.backfillBatch, maxChunks - total);
+    const done = await backfillVectors(db, config, batch);
+    // 0 means either "nothing left to embed" or "the endpoint refused" — both
+    // are reasons to stop rather than spin.
+    if (done === 0) break;
+    total += done;
+  }
+  return total;
+}
+
+/**
  * Semantic neighbours of `queryVec`, scanned in memory.
  *
  * A brute-force scan is the right call at this scale, but two things keep it

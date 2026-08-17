@@ -966,6 +966,41 @@ function maybeIndexEditedFiles(store: ContentStore): void {
 }
 
 /**
+ * What ctx_stats should say about the state of the semantic index.
+ *
+ * Three states, three different truths. The line this replaces claimed
+ * "backfill runs in the background on every search" at every coverage level,
+ * including zero — where it is false twice over: with no embedder configured
+ * there is no backfill at all, and even with one, waiting for the per-search
+ * batch is not a plan (a 1,320-chunk index needs roughly 83 searches).
+ *
+ * Pure, so the wording is testable without a store.
+ *
+ * @param configuredModel Model from the embedding config, or undefined when no
+ *   embedder is configured.
+ */
+export function semanticCoverageAdvice(
+  coverage: { chunks: number; vectors: number },
+  configuredModel?: string,
+): string[] {
+  if (coverage.vectors === 0) {
+    return [
+      "  Hybrid search is INACTIVE — every query is lexical-only.",
+      configuredModel
+        ? `  Embedder configured (${configuredModel}) but nothing is embedded yet. Run \`context-mode drain\` to warm the index in one pass.`
+        : "  Set CONTEXT_MODE_EMBEDDINGS_URL (e.g. a local Ollama at http://127.0.0.1:11434) and CONTEXT_MODE_EMBEDDINGS_MODEL, then run `context-mode drain`.",
+    ];
+  }
+  if (coverage.vectors < coverage.chunks) {
+    return [
+      "  Warm-up is incremental: a small batch after each search, plus a longer pass at session end. " +
+      "Run `context-mode drain` to finish it now; uncovered chunks stay lexical-only until then.",
+    ];
+  }
+  return [];
+}
+
+/**
  * The semantic layer's own status line for ctx_stats.
  *
  * "Hybrid search is configured" and "hybrid search can answer" are different
@@ -994,9 +1029,7 @@ function semanticIndexReport(): string {
     out.push(
       `  Embedded: ${coverage.vectors.toLocaleString()} of ${coverage.chunks.toLocaleString()} chunks (${pct}%) · ${model} · ${mb}`,
     );
-    if (pct < 100) {
-      out.push("  Backfill runs in the background on every search; uncovered chunks stay lexical-only.");
-    }
+    out.push(...semanticCoverageAdvice(coverage, configured?.model));
     const t = getHybridTelemetry();
     if (t.searches > 0) {
       out.push(
@@ -1629,6 +1662,48 @@ export function extractSnippet(
 }
 
 // ─────────────────────────────────────────────────────────
+// Semantic coverage hint
+// ─────────────────────────────────────────────────────────
+
+/** The hint is a nudge, not a status bar: once per process, then silent. */
+let _semanticHintShown = false;
+
+/** Test seam — the latch is process-wide by design. */
+export function __resetSemanticHintLatch(): void {
+  _semanticHintShown = false;
+}
+
+/**
+ * One line telling the caller the semantic layer is not answering yet.
+ *
+ * Pure so the wording is testable without a store. Silent below 200 chunks
+ * (a small index is well served by lexical search alone, and the advice would
+ * be noise) and silent at full coverage.
+ */
+export function formatSemanticHint(coverage: { chunks: number; vectors: number }): string | null {
+  if (coverage.chunks < 200) return null;
+  if (coverage.vectors >= coverage.chunks) return null;
+  const pct = Math.min(100, Math.round((coverage.vectors / coverage.chunks) * 100));
+  const total = coverage.chunks.toLocaleString();
+  return coverage.vectors === 0
+    ? `> Semantic layer inactive: 0 of ${total} chunks embedded — these results are lexical-only. \`context-mode drain\` warms the index.`
+    : `> Semantic layer at ${pct}% of ${total} chunks — the rest is lexical-only. \`context-mode drain\` finishes the warm-up.`;
+}
+
+/** The hint for this store, at most once per process. */
+export function semanticStatusHint(store: ContentStore): string | null {
+  if (process.env.CONTEXT_MODE_SEMANTIC_HINT === "0") return null;
+  if (_semanticHintShown) return null;
+  try {
+    const line = formatSemanticHint(vectorCoverage(store.rawDb() as unknown as HybridDb));
+    if (line) _semanticHintShown = true;
+    return line;
+  } catch {
+    return null;
+  }
+}
+
+// ─────────────────────────────────────────────────────────
 // Cross-query deduplication
 // ─────────────────────────────────────────────────────────
 
@@ -1783,6 +1858,10 @@ export async function formatBatchQueryResults(
   if (dedupFooter) sections.push(`\n${dedupFooter}`);
 
   if (scope === "global") {
+    // Only the global path reaches cold prior knowledge, which is the one place
+    // a missing semantic layer changes what the caller gets back.
+    const hint = semanticStatusHint(store);
+    if (hint) sections.push(`\n${hint}`);
     sections.push(`\n> **Scope:** Queries searched the entire persistent index (query_scope: "global").`);
   } else {
     sections.push(`\n> **Tip:** Results are scoped to this batch only. To search across all indexed sources, use \`ctx_search(queries: [...])\` or call ctx_batch_execute with \`query_scope: "global"\`.`);
@@ -3190,6 +3269,9 @@ EXAMPLE: ctx_search(queries: ["last user prompt", "active skills", "open blocker
 
       const dedupFooter = deduper.footer();
       if (dedupFooter) output += `\n\n${dedupFooter}`;
+
+      const semanticHint = semanticStatusHint(store);
+      if (semanticHint) output += `\n\n${semanticHint}`;
 
       // Throttle counter — always surfaced so agents can pace themselves
       // proactively instead of discovering the limit only after results are

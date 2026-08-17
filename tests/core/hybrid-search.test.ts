@@ -9,7 +9,7 @@ import {
 } from "../../src/search/embeddings.js";
 import {
   fuseRankings, hybridSearch, pruneOrphanVectors, pruneStaleModelVectors,
-  vectorCoverage, semanticCandidates, backfillVectors,
+  vectorCoverage, semanticCandidates, backfillVectors, backfillVectorsUntil,
   getHybridTelemetry, resetHybridTelemetry,
 } from "../../src/search/hybrid.js";
 
@@ -453,6 +453,85 @@ describe("backfillVectors", () => {
     written.length = 0;
     expect(await backfillVectors(db, { ...base, quantize: false }, 1)).toBe(1);
     expect((written[0][3] as Buffer).length).toBe(16); // float32
+  });
+});
+
+describe("backfillVectorsUntil", () => {
+  afterEach(() => vi.unstubAllGlobals());
+
+  /** A store of `total` chunks that remembers which ones got a vector. */
+  function fakeStore(total: number) {
+    const embedded = new Set<number>();
+    const db = {
+      exec: () => undefined,
+      prepare: (sql: string) => ({
+        all: (...params: unknown[]) => {
+          if (!sql.includes("LEFT JOIN chunk_vectors")) return [];
+          const limit = Number(params[0] ?? 0);
+          const out: Array<{ rowid: number; title: string; content: string }> = [];
+          for (let i = 1; i <= total && out.length < limit; i++) {
+            if (!embedded.has(i)) out.push({ rowid: i, title: `t${i}`, content: `c${i}` });
+          }
+          return out;
+        },
+        get: () => ({ c: 0 }),
+        run: (...params: unknown[]) => {
+          if (sql.startsWith("INSERT")) embedded.add(Number(params[0]));
+          return {};
+        },
+      }),
+    };
+    return { db, embedded };
+  }
+
+  /** OpenAI/Ollama-shaped responder, optionally slow. */
+  function stubEmbedder(delayMs = 0) {
+    vi.stubGlobal("fetch", vi.fn(async (_url: string, init: { body: string }) => {
+      if (delayMs) await new Promise(r => setTimeout(r, delayMs));
+      const input = JSON.parse(init.body).input as string[];
+      return { ok: true, json: async () => ({ embeddings: input.map(() => [0.1, 0.2, 0.3, 0.4]) }) };
+    }));
+  }
+
+  const config = { url: "http://x", model: "bge-m3", timeoutMs: 500, backfillTimeoutMs: 500, backfillBatch: 10 };
+
+  test("stops at maxChunks instead of embedding the whole store", async () => {
+    stubEmbedder();
+    const { db, embedded } = fakeStore(100);
+    expect(await backfillVectorsUntil(db, config, { maxChunks: 25, deadlineMs: 30_000 })).toBe(25);
+    expect(embedded.size).toBe(25);
+  });
+
+  test("covers the store when the caps are generous — one pass, not 83 searches", async () => {
+    stubEmbedder();
+    const { db } = fakeStore(45);
+    expect(await backfillVectorsUntil(db, config, { maxChunks: 2000, deadlineMs: 30_000 })).toBe(45);
+  });
+
+  test("stops at the deadline with partial progress rather than running on", async () => {
+    stubEmbedder(40);
+    const { db } = fakeStore(1000);
+    const started = Date.now();
+    const done = await backfillVectorsUntil(db, { ...config, backfillBatch: 1 }, {
+      maxChunks: 1000,
+      deadlineMs: 120,
+    });
+    expect(done).toBeGreaterThan(0);
+    expect(done).toBeLessThan(1000);
+    expect(Date.now() - started).toBeLessThan(2_000);
+  });
+
+  test("an endpoint that refuses yields 0 instead of spinning", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => ({ ok: false, json: async () => ({}) })));
+    const { db } = fakeStore(50);
+    expect(await backfillVectorsUntil(db, config, { maxChunks: 50, deadlineMs: 5_000 })).toBe(0);
+  });
+
+  test("zeroed bounds are an off switch", async () => {
+    stubEmbedder();
+    const { db } = fakeStore(50);
+    expect(await backfillVectorsUntil(db, config, { maxChunks: 0 })).toBe(0);
+    expect(await backfillVectorsUntil(db, config, { deadlineMs: 0 })).toBe(0);
   });
 });
 

@@ -515,6 +515,42 @@ async function openCliContentStore(projectDir: string): Promise<{ store: Content
   return { store: new ContentStore(dbPath), dbPath, contentDir };
 }
 
+/** Positive integer from the environment, or the fallback. */
+function envInt(name: string, fallback: number): number {
+  const raw = Number.parseInt(process.env[name] ?? "", 10);
+  return Number.isFinite(raw) && raw >= 0 ? raw : fallback;
+}
+
+/**
+ * Bulk-embed whatever the per-search warm-up has not reached yet.
+ *
+ * The search-time backfill is one small batch per query — sized so a search
+ * never pays for a bulk index, which also means it never finishes one. `drain`
+ * is the place with latency to spare (the SessionEnd hook runs it detached), so
+ * it takes the bounded bulk pass instead.
+ *
+ * Silent no-op when embeddings are not configured.
+ */
+async function drainSemanticBackfill(store: ContentStore): Promise<number> {
+  if (process.env.CONTEXT_MODE_DRAIN_BACKFILL === "0") return 0;
+  try {
+    const { resolveEmbeddingConfigAsync } = await import("./search/embeddings.js");
+    const config = await resolveEmbeddingConfigAsync();
+    if (!config) return 0;
+    const { backfillVectorsUntil } = await import("./search/hybrid.js");
+    const deadlineMs = envInt("CONTEXT_MODE_DRAIN_BACKFILL_MS", 60_000);
+    const maxChunks = envInt("CONTEXT_MODE_DRAIN_BACKFILL_MAX", 2000);
+    return await backfillVectorsUntil(
+      store.rawDb() as unknown as Parameters<typeof backfillVectorsUntil>[0],
+      config,
+      { deadlineMs, maxChunks },
+    );
+  } catch {
+    // A drain that cannot embed still drained the queues — never fail for this.
+    return 0;
+  }
+}
+
 /**
  * `context-mode drain` — index the pending capture queues immediately.
  *
@@ -538,7 +574,10 @@ async function drainCommand(argv: string[]): Promise<number> {
       const agents = process.env.CONTEXT_MODE_SUBAGENT_CAPTURE === "0"
         ? 0
         : drainSubagentQueue({ store, sessionsDir, maxAgents: 20 });
-      console.log(`drained: ${files} code file(s), ${agents} subagent transcript(s)`);
+      const vectors = await drainSemanticBackfill(store);
+      console.log(
+        `drained: ${files} code file(s), ${agents} subagent transcript(s), ${vectors} vector(s)`,
+      );
     } finally {
       store.close();
     }
