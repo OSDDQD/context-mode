@@ -19,6 +19,7 @@ import { writeFileSync, readFileSync, rmSync, existsSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { buildFetchCode, classifyExtraction } from "../../src/server.js";
+import { serverSource } from "../shared/server-source.js";
 
 // ── Layer 1: the verdict itself, against real measured byte pairs ──────────
 
@@ -178,7 +179,7 @@ describe("generated subprocess reports pre-conversion bytes", () => {
 // ── Layer 3: the handler actually consults the verdict ────────────────────
 
 describe("the fetch handler wires the verdict into its result", () => {
-  const src = readFileSync(new URL("../../src/server.ts", import.meta.url), "utf-8");
+  const src = serverSource();
 
   test("classifyExtraction is called on the success path, not merely defined", () => {
     // Guard against a refactor that keeps the function but drops the call.

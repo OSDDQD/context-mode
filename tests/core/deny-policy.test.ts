@@ -15,12 +15,10 @@ import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, test, expect } from "vitest";
 import { evaluateFilePath } from "../../src/security.js";
+import { serverSource } from "../shared/server-source.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
-const serverSrc = readFileSync(
-  resolve(__dirname, "../../src/server.ts"),
-  "utf-8",
-);
+const serverSrc = serverSource();
 
 describe("checkFilePathDenyPolicy: project-dir resolution", () => {
   test("function exists in server.ts", () => {

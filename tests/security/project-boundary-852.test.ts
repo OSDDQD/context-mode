@@ -21,6 +21,7 @@ import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { isPathInsideProject, evaluateProjectContainment } from "../../src/security.js";
+import { serverSource } from "../shared/server-source.js";
 
 describe("isPathInsideProject — issue #852 containment", () => {
   let project: string;
@@ -118,7 +119,7 @@ describe("isPathInsideProject — issue #852 containment", () => {
 // ─────────────────────────────────────────────────────────
 describe("ctx_execute_file: project-boundary guard wiring (#852)", () => {
   const __dirname = dirname(fileURLToPath(import.meta.url));
-  const serverSrc = readFileSync(resolve(__dirname, "../../src/server.ts"), "utf-8");
+  const serverSrc = serverSource();
 
   // Algorithmic source-introspection helpers (no regex — project no-regex rule).
   // extractBlock: slice from a marker to the first top-level closing brace ("\n}").

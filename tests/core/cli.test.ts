@@ -15,6 +15,7 @@ import { tmpdir } from "node:os";
 import { execSync, spawnSync } from "node:child_process";
 import { toUnixPath } from "../../src/cli.js";
 import { findMissingLaunchFiles } from "../../src/util/plugin-cache-integrity.js";
+import { serverSource } from "../shared/server-source.js";
 
 const ROOT = resolve(import.meta.dirname, "../..");
 
@@ -1015,7 +1016,7 @@ describe("Bin entry uses cli.bundle.mjs", () => {
   });
 
   it("server.ts ctx_doctor runs diagnostics in-process (no CLI dependency)", () => {
-    const src = readFileSync(resolve(ROOT, "src", "server.ts"), "utf-8");
+    const src = serverSource();
     const doctorSection = src.slice(src.indexOf("ctx_doctor"), src.indexOf("ctx_upgrade"));
     // Must NOT delegate to CLI — runs server-side
     expect(doctorSection).not.toContain('node "');
@@ -1098,7 +1099,7 @@ describe("Bin entry uses cli.bundle.mjs", () => {
   });
 
   it("server.ts ctx_upgrade uses cli.bundle.mjs with fallback", () => {
-    const src = readFileSync(resolve(ROOT, "src", "server.ts"), "utf-8");
+    const src = serverSource();
     // ctx_upgrade handler must prefer cli.bundle.mjs
     const upgradeStart = src.indexOf('server.registerTool(\n  "ctx_upgrade"');
     const upgradeEnd = src.indexOf("// ── ctx-purge", upgradeStart);
@@ -1107,7 +1108,7 @@ describe("Bin entry uses cli.bundle.mjs", () => {
   });
 
   it("server.ts registers empty prompts/resources handlers to avoid -32601 (#168)", () => {
-    const src = readFileSync(resolve(ROOT, "src", "server.ts"), "utf-8");
+    const src = serverSource();
     // Must register prompts capability so clients don't get Method not found
     expect(src).toContain("ListPromptsRequestSchema");
     // Must register resources capability
@@ -2691,7 +2692,7 @@ describe("statuslineForward survives stale getPluginRoot() (post-upgrade)", () =
 // ── Statusline staleness fix: server emits a periodic stats heartbeat ──
 
 describe("server emits periodic stats heartbeat (statusline liveness fix)", () => {
-  const SERVER_SOURCE = readFileSync(resolve(ROOT, "src/server.ts"), "utf-8");
+  const SERVER_SOURCE = serverSource();
 
   test("server.ts schedules a setInterval that calls persistStats", () => {
     // bin/statusline.mjs flags the session as "stale — restart to resume saving"
@@ -2757,7 +2758,7 @@ describe("ctx-upgrade syncs marketplace clone (#418)", () => {
 
 describe("ctx-upgrade swap loop supply-chain containment", () => {
   const CLI_SOURCE = readFileSync(resolve(ROOT, "src/cli.ts"), "utf-8");
-  const SERVER_SOURCE = readFileSync(resolve(ROOT, "src/server.ts"), "utf-8");
+  const SERVER_SOURCE = serverSource();
 
   // Both /ctx-upgrade swap loops iterate `pkg.files[]` read from a freshly
   // cloned upstream package.json. Without containment, a compromised
@@ -2867,7 +2868,7 @@ describe("ctx-upgrade swap loop supply-chain containment", () => {
 
 describe("Shell-free upgrade (#185)", () => {
   const CLI_SOURCE = readFileSync(resolve(ROOT, "src/cli.ts"), "utf-8");
-  const SERVER_SOURCE = readFileSync(resolve(ROOT, "src/server.ts"), "utf-8");
+  const SERVER_SOURCE = serverSource();
 
   test("cli.ts upgrade function uses execFileSync, not execSync", () => {
     // Extract upgrade function body (from "async function upgrade" to end of file)
@@ -3497,7 +3498,7 @@ describe("installed_plugins.json installPath containment", () => {
   // assertions prove the lexical comparison rejects and the canonical
   // comparison accepts the symlinked-layout entry.
 
-  const SERVER_SOURCE = readFileSync(resolve(ROOT, "src/server.ts"), "utf-8");
+  const SERVER_SOURCE = serverSource();
 
   test("server.ts: healCacheMidSession canonicalizes cacheRoot with realpathSync (#795)", () => {
     // Locate the healCacheMidSession function body.

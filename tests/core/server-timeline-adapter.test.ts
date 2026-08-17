@@ -2,6 +2,7 @@ import "../setup-home";
 import { describe, it, expect } from "vitest";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
+import { serverSource } from "../shared/server-source.js";
 
 /**
  * Slice 5 — server.ts ctx_search timeline mode.
@@ -16,10 +17,7 @@ import { resolve } from "node:path";
  * while still preventing regressions of the original bug (#367 follow-ups).
  */
 
-const SERVER_SRC = readFileSync(
-  resolve(__dirname, "../../src/server.ts"),
-  "utf-8",
-);
+const SERVER_SRC = serverSource();
 
 describe("ctx_search timeline mode wiring (server.ts)", () => {
   it("opens SessionDB via resolveSessionDbPath (worktree suffix + casing migration)", () => {

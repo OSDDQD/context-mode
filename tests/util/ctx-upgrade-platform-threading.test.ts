@@ -27,11 +27,12 @@ import { describe, test, expect } from "vitest";
 import { readFileSync } from "node:fs";
 import { resolve, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
+import { serverSource } from "../shared/server-source.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const ROOT = resolve(__dirname, "..", "..");
 
-const serverSrc = readFileSync(resolve(ROOT, "src", "server.ts"), "utf-8");
+const serverSrc = serverSource();
 const cliSrc = readFileSync(resolve(ROOT, "src", "cli.ts"), "utf-8");
 
 // Carve out the ctx_upgrade handler body so we don't false-positive on

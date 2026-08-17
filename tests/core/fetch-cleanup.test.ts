@@ -25,9 +25,10 @@ import { tmpdir } from "node:os";
 import { join, dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, test, expect, beforeAll, afterAll } from "vitest";
+import { serverSourcePath } from "../shared/server-source.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
-const SERVER_TS = resolve(__dirname, "../../src/server.ts");
+const SERVER_TS = serverSourcePath();
 
 // ───────────────────────────────────────────────────────────────────
 // Helpers

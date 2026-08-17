@@ -55,6 +55,7 @@ import {
 import { ROUTING_BLOCK } from "../../hooks/routing-block.mjs";
 import { sanitizeSchemaForStrictClients, resolveExecTimeout, AGY_DEFAULT_EXEC_TIMEOUT_MS, REGISTERED_CTX_TOOLS } from "../../src/server.js";
 import { stripJsonComments, parseJsonc } from "../../src/util/jsonc.js";
+import { serverSource, serverSourcePath } from "../shared/server-source.js";
 
 // ─── Shared setup ───────────────────────────────────────────────────────────
 const runtimes = detectRuntimes();
@@ -1357,10 +1358,7 @@ describe("ctx_index: projectRoot path resolution (#365)", () => {
   // src/server.ts decision so a regression to `source ?? path` fails CI even
   // before bundle rebuild and end-to-end spawn coverage.
   test("source-label canonicalization: src/server.ts uses `source ?? resolvedPath`", () => {
-    const serverSrc = readFileSync(
-      resolve(__dirname, "../../src/server.ts"),
-      "utf-8",
-    );
+    const serverSrc = serverSource();
     // Locate the ctx_index store.index call site and assert canonical fallback.
     const indexCall = serverSrc.match(
       /store\.index\(\{[^}]*source:\s*source\s*\?\?\s*(\w+)/,
@@ -1721,10 +1719,7 @@ describe("ctx_index: Read deny-policy enforcement (#442)", () => {
 //      non-integer values BEFORE the handler runs.
 
 describe("ctx_insight: execFile migration source guard (#441)", () => {
-  const serverSrc = readFileSync(
-    resolve(__dirname, "../../src/server.ts"),
-    "utf-8",
-  );
+  const serverSrc = serverSource();
 
   test("server.ts contains no execSync template-string interpolation anywhere", () => {
     // Match: execSync(`...${...}...`) — the original injection pattern.
@@ -2206,10 +2201,7 @@ if (LIVE) {
 // ═══════════════════════════════════════════════════════════════════════════
 
 describe("ctx_upgrade tool: inline fallback for missing CLI", () => {
-  const serverSrc = readFileSync(
-    resolve(__dirname, "../../src/server.ts"),
-    "utf-8",
-  );
+  const serverSrc = serverSource();
   const packageJson = JSON.parse(
     readFileSync(resolve(__dirname, "../../package.json"), "utf-8"),
   );
@@ -2329,10 +2321,7 @@ describe("ctx_upgrade tool: inline fallback for missing CLI", () => {
 // ─── ctx_purge is the ONLY reset mechanism ──────────────────────────────────
 
 describe("ctx_purge is the sole reset/wipe mechanism", () => {
-  const serverSrc = readFileSync(
-    resolve(__dirname, "../../src/server.ts"),
-    "utf-8",
-  );
+  const serverSrc = serverSource();
   const routingBlockSrc = readFileSync(
     resolve(__dirname, "../../hooks/routing-block.mjs"),
     "utf-8",
@@ -2399,10 +2388,7 @@ describe("ctx_purge is the sole reset/wipe mechanism", () => {
 // ─── Platform-aware session DB paths ─────────────────────────────────────────
 
 describe("Platform-aware session paths via adapter", () => {
-  const serverSrc = readFileSync(
-    resolve(__dirname, "../../src/server.ts"),
-    "utf-8",
-  );
+  const serverSrc = serverSource();
 
   // ── Adapter is stored at startup ──
   test("server stores detected adapter at startup", () => {
@@ -2504,10 +2490,7 @@ describe("Platform-aware session paths via adapter", () => {
 // ─── Hash consistency ────────────────────────────────────────────────────────
 
 describe("Project dir hash consistency", () => {
-  const serverSrc = readFileSync(
-    resolve(__dirname, "../../src/server.ts"),
-    "utf-8",
-  );
+  const serverSrc = serverSource();
 
   test("server.ts imports canonical hash + path resolvers from session/db.js", () => {
     // After the case-fold migration + content-store migration, all DB
@@ -2595,10 +2578,7 @@ describe("Project dir hash consistency", () => {
 // ─── Purge deleted array honesty ─────────────────────────────────────────────
 
 describe("ctx_purge deleted array is honest", () => {
-  const serverSrc = readFileSync(
-    resolve(__dirname, "../../src/server.ts"),
-    "utf-8",
-  );
+  const serverSrc = serverSource();
 
   test("every deleted.push in ctx_purge is guarded by a success check", () => {
     // After the purgeSession() deep-module extraction, the per-file-kind
@@ -2648,10 +2628,7 @@ describe("ctx_purge deleted array is honest", () => {
 // the additive contract WITHOUT booting the MCP server.
 
 describe("ctx_purge scoped handler (issue #520)", () => {
-  const serverSrc = readFileSync(
-    resolve(__dirname, "../../src/server.ts"),
-    "utf-8",
-  );
+  const serverSrc = serverSource();
   const purgeBody = serverSrc.match(
     /server\.registerTool\(\s*"ctx_purge"[\s\S]*?^\);/m,
   )![0];
@@ -2870,10 +2847,7 @@ describe("ContentStore purge behavior", () => {
     // _store was open.  purgeSession unlinks the file unconditionally,
     // which is exactly the --continue scenario this test was created for.
     // Behavioral coverage: tests/session/purge-session.test.ts slice 5.
-    const serverSrc = readFileSync(
-      resolve(__dirname, "../../src/server.ts"),
-      "utf-8",
-    );
+    const serverSrc = serverSource();
     const purgeBody = serverSrc.match(
       /server\.registerTool\(\s*"ctx_purge"[\s\S]*?^\);/m,
     )![0];
@@ -2900,10 +2874,7 @@ describe("ContentStore purge behavior", () => {
 // ─── Version outdated warning ────────────────────────────────────────────────
 
 describe("Version outdated warning in trackResponse", () => {
-  const serverSrc = readFileSync(
-    resolve(__dirname, "../../src/server.ts"),
-    "utf-8",
-  );
+  const serverSrc = serverSource();
 
   test("fetchLatestVersion function exists and uses npm registry", () => {
     expect(serverSrc).toContain("function fetchLatestVersion");
@@ -2946,10 +2917,7 @@ describe("Version outdated warning in trackResponse", () => {
 // ═══════════════════════════════════════════════════════════════════════════
 
 describe("FS read instrumentation", () => {
-  const serverSrc = readFileSync(
-    resolve(__dirname, "../../src/server.ts"),
-    "utf-8",
-  );
+  const serverSrc = serverSource();
 
   test("wrapper contains __CM_FS__ marker for stderr reporting", () => {
     expect(serverSrc).toContain("__CM_FS__:");
@@ -2980,10 +2948,7 @@ describe("FS read instrumentation", () => {
 // ═══════════════════════════════════════════════════════════════════════════
 
 describe("batch_execute FS read tracking", () => {
-  const serverSrc = readFileSync(
-    resolve(__dirname, "../../src/server.ts"),
-    "utf-8",
-  );
+  const serverSrc = serverSource();
 
   test("creates CM_FS_PRELOAD temp file with FS tracking script", () => {
     expect(serverSrc).toContain("CM_FS_PRELOAD");
@@ -3561,10 +3526,7 @@ describe("runPool primitive", () => {
 // ═══════════════════════════════════════════════════════════════════════════
 
 describe("ctx_fetch_and_index batch refactor", () => {
-  const fetchHandlerSrc = readFileSync(
-    resolve(__dirname, "../../src/server.ts"),
-    "utf-8",
-  );
+  const fetchHandlerSrc = serverSource();
 
   test("schema accepts both legacy {url} and batch {requests}", () => {
     expect(fetchHandlerSrc).toContain('url: z.string().optional()');
@@ -3795,10 +3757,7 @@ describe("classifyIp — SSRF guard IP classifier", () => {
 });
 
 describe("SSRF guard — ssrfGuard policy in src/server.ts", () => {
-  const serverSrc = readFileSync(
-    resolve(__dirname, "../../src/server.ts"),
-    "utf-8",
-  );
+  const serverSrc = serverSource();
 
   test("allowlists only http: and https: schemes", () => {
     expect(serverSrc).toContain('parsed.protocol !== "http:"');
@@ -4238,10 +4197,7 @@ describe("ctx_doctor — renderer-safe output (Z.ai compat)", () => {
 // only if the map returns null (defensive — covers "unknown" PlatformId).
 
 describe("ctx_doctor hook script checks", () => {
-  const serverSrc = readFileSync(
-    resolve(__dirname, "../../src/server.ts"),
-    "utf-8",
-  );
+  const serverSrc = serverSource();
 
   test("resolves relative hook script paths against pluginRoot", () => {
     const doctorSection = serverSrc.slice(serverSrc.indexOf("ctx_doctor"), serverSrc.indexOf("ctx_upgrade"));
@@ -4278,10 +4234,7 @@ describe("getSessionDirSegments — sync platform → segments map", () => {
 });
 
 describe("getDefaultSessionDir uses pre-detection when adapter not yet detected", () => {
-  const serverSrc = readFileSync(
-    resolve(__dirname, "../../src/server.ts"),
-    "utf-8",
-  );
+  const serverSrc = serverSource();
 
   test("getDefaultSessionDir invokes detectPlatform + getSessionDirSegments before fallback", () => {
     const fn = serverSrc.match(/function getDefaultSessionDir\(\)[\s\S]*?^}/m);
@@ -4342,10 +4295,7 @@ describe("ctx_fetch_and_index cache key includes URL (Fix 6/10)", () => {
   });
 
   test("server.ts uses composeFetchCacheKey for cache lookup (no bare-label collision)", () => {
-    const serverSrc = readFileSync(
-      resolve(__dirname, "../../src/server.ts"),
-      "utf-8",
-    );
+    const serverSrc = serverSource();
     // The cache lookup may live in the handler block OR in an extracted helper
     // (post-refactor: `fetchOneUrl` is the parallel-safe fetcher invoked by both
     // single-URL and batch paths). Either location must use composeFetchCacheKey,
@@ -4867,10 +4817,7 @@ describe("killProcessOnPort — Windows non-English locale (#441 follow-up)", ()
 // Any caveman/terse-style language in shipped artifacts is a regression.
 
 describe("prose-style policy (#482)", () => {
-  const serverSrc = readFileSync(
-    resolve(__dirname, "../../src/server.ts"),
-    "utf-8",
-  );
+  const serverSrc = serverSource();
   const routingBlock = readFileSync(
     resolve(__dirname, "../../hooks/routing-block.mjs"),
     "utf-8",
@@ -5116,7 +5063,7 @@ test("OpenCode legacy MCP suppression parses JSONC URLs without stripping // ins
 // "parseJsonc / stripJsonComments" suite below — and must not reintroduce a
 // local whole-string trailing-comma regex.
 test("server.ts delegates JSONC stripping to string-aware src/util/jsonc (#787 in-string trailing-comma regression)", async () => {
-  const serverSrc = readFileSync(resolve(__dirname, "../../src/server.ts"), "utf8");
+  const serverSrc = serverSource();
   expect(serverSrc).toContain('from "./util/jsonc.js"');
   expect(serverSrc).not.toContain('.replace(/,(\\s*[}\\]])/g');
   // End-to-end sanity through the public boolean: a JSONC config that needs
@@ -5294,7 +5241,7 @@ test("registerEmptyToolsListHandler responds with {tools:[]} so operators don't 
 // descriptions by design — they are GUI/diagnostic affordances, not routing
 // targets, so the WHEN: structural requirement does not apply.
 describe("tool description style contract (#683 ADR-0002)", () => {
-  const serverTsPath = resolve(__dirname, "../../src/server.ts");
+  const serverTsPath = serverSourcePath();
   const serverTs = readFileSync(serverTsPath, "utf-8");
 
   // Extract every registered tool with its description string.
@@ -5896,7 +5843,7 @@ describe("hook routing prompt-surface contract (#683 ADR-0002 + ADR-0003)", () =
 // rejected forms (embedded `\n\n` escapes OR multi-line string concat).
 // ──────────────────────────────────────────────────────────────────────────
 describe("tool description source form contract (#683 PR follow-up)", () => {
-  const serverTsPath = resolve(__dirname, "../../src/server.ts");
+  const serverTsPath = serverSourcePath();
   const serverTs = readFileSync(serverTsPath, "utf-8");
 
   // Locate every `description: ...,` block under a server.registerTool() call
@@ -6213,10 +6160,7 @@ describe("ctx_index: root-level symlink defense in directory dispatch", () => {
   // lstatSync, realpath them once, and re-apply the deny check against
   // the actual walk target before dispatching.
 
-  const SERVER_SOURCE = readFileSync(
-    resolve(__dirname, "../../src/server.ts"),
-    "utf-8",
-  );
+  const SERVER_SOURCE = serverSource();
 
   test("ctx_index handler lstats and re-deny-checks symlinks before directory dispatch", () => {
     const dispatchBlock = SERVER_SOURCE.match(
@@ -6278,10 +6222,7 @@ describe("ctx_fetch_and_index: response body size cap", () => {
   // subprocess or, worse, propagate a multi-GB response into the parent
   // heap and crash the MCP server. Cap to 50 MB on both ends.
 
-  const SERVER_SOURCE = readFileSync(
-    resolve(__dirname, "../../src/server.ts"),
-    "utf-8",
-  );
+  const SERVER_SOURCE = serverSource();
 
   test("subprocess buildFetchCode caps response via Content-Length and post-text length", () => {
     expect(SERVER_SOURCE).toContain("const MAX_FETCH_BYTES = 50 * 1024 * 1024;");
@@ -6321,10 +6262,7 @@ describe("getStatsFilePath: sanitize CLAUDE_SESSION_ID before path.join", () => 
   // is an arbitrary-write primitive. Reject any session id whose
   // characters aren't [A-Za-z0-9._-] and fall back to pid-based id.
 
-  const SERVER_SOURCE = readFileSync(
-    resolve(__dirname, "../../src/server.ts"),
-    "utf-8",
-  );
+  const SERVER_SOURCE = serverSource();
 
   test("sanitizeSessionId exists and is called from getStatsFilePath", () => {
     expect(SERVER_SOURCE).toMatch(/const SESSION_ID_RE = \/\^\[A-Za-z0-9\._-\]\+\$\//);
@@ -6370,10 +6308,7 @@ describe("getStatsFilePath: sanitize CLAUDE_SESSION_ID before path.join", () => 
 // ═══════════════════════════════════════════════════════════════════════════
 
 describe("ctx_insight schema description (issue #697)", () => {
-  const serverSrc = readFileSync(
-    resolve(__dirname, "../../src/server.ts"),
-    "utf-8",
-  );
+  const serverSrc = serverSource();
 
   test("description states it is a dashboard launcher, not a Q&A engine", () => {
     expect(serverSrc).toMatch(/ctx_insight[\s\S]{0,2000}dashboard launcher/);
@@ -6389,10 +6324,7 @@ describe("ctx_insight schema description (issue #697)", () => {
 });
 
 describe("ctx_batch_execute query_scope (issue #696)", () => {
-  const serverSrc = readFileSync(
-    resolve(__dirname, "../../src/server.ts"),
-    "utf-8",
-  );
+  const serverSrc = serverSource();
 
   test("schema declares query_scope enum with batch default", () => {
     expect(serverSrc).toMatch(/query_scope:\s*z\s*\.enum\(\["batch",\s*"global"\]\)/);
@@ -6426,10 +6358,7 @@ describe("ctx_batch_execute query_scope (issue #696)", () => {
 });
 
 describe("ctx_search progressive throttle observability (issue #697)", () => {
-  const serverSrc = readFileSync(
-    resolve(__dirname, "../../src/server.ts"),
-    "utf-8",
-  );
+  const serverSrc = serverSource();
 
   test("env vars override throttle thresholds with positive-number validation", () => {
     expect(serverSrc).toContain("CONTEXT_MODE_SEARCH_WINDOW_MS");
