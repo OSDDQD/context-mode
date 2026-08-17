@@ -39,7 +39,7 @@ import {
   StorageDirectoryError,
   type ResolvedStorageDir,
 } from "./session/db.js";
-import { ContentStore } from "./store.js";
+import { ContentStore, contentStoreUsage, enforceContentBudget } from "./store.js";
 import { drainCodeIndexQueue } from "./session/code-index.js";
 import { drainSubagentQueue } from "./session/subagent-capture.js";
 import { readToolDenyPatterns, evaluateFilePath } from "./security.js";
@@ -515,6 +515,48 @@ async function openCliContentStore(projectDir: string): Promise<{ store: Content
   return { store: new ContentStore(dbPath), dbPath, contentDir };
 }
 
+/** Bytes as a short human string. */
+function mb(bytes: number): string {
+  return bytes >= 1024 * 1024
+    ? `${(bytes / (1024 * 1024)).toFixed(1)} MB`
+    : `${Math.round(bytes / 1024)} KB`;
+}
+
+/**
+ * Print what the knowledge base costs on disk, and evict LRU stores when it is
+ * over budget.
+ *
+ * The default budget (512 MB) sits well above the measured real footprint
+ * (210 MB across 328 stores), so on an ordinary install this only ever prints a
+ * number. That is the point of the first revision: make the cost visible before
+ * anything starts deleting on account of it.
+ */
+function reportContentBudget(contentDir: string, ownDbPath: string, dryRun: boolean): void {
+  try {
+    const usage = contentStoreUsage(contentDir);
+    if (usage.stores.length === 0) return;
+    console.log(
+      `knowledge base: ${mb(usage.totalBytes)} across ${usage.stores.length} store(s) ` +
+      `(${mb(usage.walBytes)} in WAL)`,
+    );
+
+    const budgetMb = envInt("CONTEXT_MODE_CONTENT_BUDGET_MB", 512);
+    if (budgetMb <= 0) return;
+    const result = enforceContentBudget({
+      contentDir,
+      protectPaths: [ownDbPath],
+      budgetBytes: budgetMb * 1024 * 1024,
+      dryRun: dryRun || process.env.CONTEXT_MODE_CONTENT_BUDGET_DRY_RUN === "1",
+    });
+    if (result.evicted.length === 0) return;
+    console.log(
+      `${result.dryRun ? "would evict" : "evicted"}: ${result.evicted.length} store(s), ` +
+      `${mb(result.freedBytes)} (budget ${budgetMb} MB)`,
+    );
+    for (const path of result.evicted) console.log(`  ${path}`);
+  } catch { /* accounting never fails a drain */ }
+}
+
 /** Positive integer from the environment, or the fallback. */
 function envInt(name: string, fallback: number): number {
   const raw = Number.parseInt(process.env[name] ?? "", 10);
@@ -566,7 +608,7 @@ async function drainCommand(argv: string[]): Promise<number> {
     const projectDir = resolveCliProjectDir(stringFlag(parsed.flags, "project"), process.cwd());
     const adapter = await getAdapter(detectPlatform().platform);
     const sessionsDir = ensureWritableStorageDir(resolveSessionStorageDir(() => adapter.getSessionDir()));
-    const { store } = await openCliContentStore(projectDir);
+    const { store, dbPath, contentDir } = await openCliContentStore(projectDir);
     try {
       const files = process.env.CONTEXT_MODE_CODE_INDEX === "0"
         ? 0
@@ -578,6 +620,9 @@ async function drainCommand(argv: string[]): Promise<number> {
       console.log(
         `drained: ${files} code file(s), ${agents} subagent transcript(s), ${vectors} vector(s)`,
       );
+      const reclaimed = store.compact();
+      if (reclaimed > 0) console.log(`compacted: ${mb(reclaimed)} reclaimed`);
+      reportContentBudget(contentDir, dbPath, boolFlag(parsed.flags, "dry-run"));
     } finally {
       store.close();
     }

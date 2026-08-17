@@ -287,6 +287,140 @@ export function cleanupStaleContentDBs(contentDir: string, maxAgeDays: number): 
   return cleaned;
 }
 
+// ─────────────────────────────────────────────────────────
+// Content store disk accounting
+// ─────────────────────────────────────────────────────────
+
+/** One project's content store on disk, sidecars included. */
+export interface ContentStoreEntry {
+  dbPath: string;
+  /** `.db` + `-wal` + `-shm`. The WAL is not a rounding error: measured at 14%
+   *  of the footprint across 328 stores (30.1 MB of 210.5 MB). */
+  bytes: number;
+  walBytes: number;
+  /** Newest mtime across the three files — when this store was last touched. */
+  lastUseMs: number;
+}
+
+export interface ContentStoreUsage {
+  dir: string;
+  stores: ContentStoreEntry[];
+  totalBytes: number;
+  walBytes: number;
+}
+
+/**
+ * Measure what the knowledge base costs on disk.
+ *
+ * A plain `statSync` walk, no SQLite: this runs before any decision to open or
+ * delete a store, and opening 328 databases to ask their size would cost more
+ * than the answer is worth.
+ */
+export function contentStoreUsage(contentDir: string): ContentStoreUsage {
+  const usage: ContentStoreUsage = { dir: contentDir, stores: [], totalBytes: 0, walBytes: 0 };
+  let files: string[];
+  try {
+    if (!existsSync(contentDir)) return usage;
+    files = readdirSync(contentDir).filter(f => f.endsWith(".db"));
+  } catch {
+    return usage;
+  }
+
+  for (const file of files) {
+    const dbPath = join(contentDir, file);
+    let bytes = 0;
+    let walBytes = 0;
+    let lastUseMs = 0;
+    for (const suffix of ["", "-wal", "-shm"]) {
+      try {
+        const st = statSync(dbPath + suffix);
+        bytes += st.size;
+        if (suffix === "-wal") walBytes = st.size;
+        if (st.mtimeMs > lastUseMs) lastUseMs = st.mtimeMs;
+      } catch { /* sidecar absent — normal */ }
+    }
+    if (bytes === 0 && lastUseMs === 0) continue;
+    usage.stores.push({ dbPath, bytes, walBytes, lastUseMs });
+    usage.totalBytes += bytes;
+    usage.walBytes += walBytes;
+  }
+  return usage;
+}
+
+export interface ContentBudgetResult {
+  totalBytes: number;
+  budgetBytes: number;
+  /** Stores that were (or, in a dry run, would be) evicted. */
+  evicted: string[];
+  freedBytes: number;
+  dryRun: boolean;
+}
+
+/**
+ * Evict least-recently-used content stores until the directory fits its budget.
+ *
+ * Deliberately *not* wired into `getStore()`: deleting other projects' data on
+ * the hot path of a tool call is the kind of thing that should happen where it
+ * can be seen and where nothing is waiting on it. `context-mode drain` is that
+ * place.
+ *
+ * Three things are never evicted, in order of how much damage the mistake would
+ * do: the caller's own open store, a store with a live non-empty WAL (another
+ * process is writing to it right now), and anything used inside `minAgeMs`.
+ */
+export function enforceContentBudget(opts: {
+  contentDir: string;
+  /** Absolute paths that must survive regardless — normally the caller's DB. */
+  protectPaths?: string[];
+  budgetBytes: number;
+  /** Stores touched more recently than this are never candidates. */
+  minAgeMs?: number;
+  dryRun?: boolean;
+}): ContentBudgetResult {
+  const minAgeMs = opts.minAgeMs ?? 48 * 60 * 60 * 1000;
+  const dryRun = opts.dryRun ?? false;
+  const protectedSet = new Set(opts.protectPaths ?? []);
+  const usage = contentStoreUsage(opts.contentDir);
+  const result: ContentBudgetResult = {
+    totalBytes: usage.totalBytes,
+    budgetBytes: opts.budgetBytes,
+    evicted: [],
+    freedBytes: 0,
+    dryRun,
+  };
+  if (usage.totalBytes <= opts.budgetBytes) return result;
+
+  // Evict down to 90% of budget, not to exactly budget: stopping at the line
+  // means the next store opened puts us straight back over it.
+  const target = Math.floor(opts.budgetBytes * 0.9);
+  const now = Date.now();
+  const candidates = usage.stores
+    .filter(s => !protectedSet.has(s.dbPath))
+    .filter(s => s.walBytes === 0)
+    .filter(s => now - s.lastUseMs >= minAgeMs)
+    .sort((a, b) => a.lastUseMs - b.lastUseMs);
+
+  let remaining = usage.totalBytes;
+  for (const store of candidates) {
+    if (remaining <= target) break;
+    if (!dryRun) {
+      let failed = false;
+      for (const suffix of ["", "-wal", "-shm"]) {
+        try { unlinkSync(store.dbPath + suffix); } catch (err) {
+          // ENOENT on a sidecar is expected; anything else means we did not
+          // actually free this store.
+          if ((err as NodeJS.ErrnoException)?.code !== "ENOENT") failed = true;
+        }
+      }
+      if (failed) continue;
+    }
+    result.evicted.push(store.dbPath);
+    result.freedBytes += store.bytes;
+    remaining -= store.bytes;
+  }
+  return result;
+}
+
 // ── Proximity helpers (pure functions) ──
 
 /** Find all positions of a term in text. */
@@ -1665,6 +1799,46 @@ export class ContentStore {
   getDBSizeBytes(): number {
     try {
       return statSync(this.#dbPath).size;
+    } catch {
+      return 0;
+    }
+  }
+
+  /**
+   * Reclaim free pages with VACUUM — but only when there is something to
+   * reclaim and the file is small enough for it to be quick.
+   *
+   * VACUUM rewrites the whole database, so it is wrong on `close()` (a session
+   * ending should not pay seconds of I/O) and wrong when the freelist is a few
+   * pages. Called from `context-mode drain`, where latency is free.
+   *
+   * @returns Bytes reclaimed, or 0 when the vacuum was skipped or gained
+   *   nothing.
+   */
+  compact(): number {
+    try {
+      // Fold the WAL in first. Without this the `.db` file can be a single page
+      // while megabytes sit in the WAL, and every size test below reads a
+      // number that has nothing to do with what the store costs.
+      try { this.#db.exec("PRAGMA wal_checkpoint(TRUNCATE)"); } catch { /* busy — sizes below still hold */ }
+      const before = this.getDBSizeBytes();
+      if (before === 0) return 0;
+
+      const maxBytes = Number.parseInt(process.env.CONTEXT_MODE_VACUUM_MAX_BYTES ?? "", 10);
+      const cap = Number.isFinite(maxBytes) && maxBytes > 0 ? maxBytes : 256 * 1024 * 1024;
+      if (before > cap) return 0;
+
+      const freelist = (this.#db.prepare("PRAGMA freelist_count").get() as { freelist_count?: number } | undefined)?.freelist_count ?? 0;
+      const pageSize = (this.#db.prepare("PRAGMA page_size").get() as { page_size?: number } | undefined)?.page_size ?? 4096;
+      const reclaimable = freelist * pageSize;
+      // Worth a full rewrite only when the waste is material both absolutely
+      // and relative to the file.
+      if (reclaimable <= Math.max(1024 * 1024, before * 0.2)) return 0;
+
+      this.#db.exec("VACUUM");
+      try { this.#db.exec("PRAGMA wal_checkpoint(TRUNCATE)"); } catch { /* best-effort */ }
+      const after = this.getDBSizeBytes();
+      return Math.max(0, before - after);
     } catch {
       return 0;
     }
