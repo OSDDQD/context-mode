@@ -1,11 +1,14 @@
 # Context Mode
 
-> **This is a fork** of [mksglu/context-mode](https://github.com/mksglu/context-mode) (v1.0.169) with nine additions:
+> **This is a fork** of [mksglu/context-mode](https://github.com/mksglu/context-mode) (v1.0.169) with twelve additions:
 > a user-extensible bounded-command allowlist, missed-redirect telemetry in `ctx_stats`, a read-only `ctx_gather`
-> tool that survives plan mode, compact tool descriptions (~3.4K tokens/request reclaimed), incremental indexing
-> of edited files, optional hybrid semantic search, an opt-in proxy for `ctx_fetch_and_index`, and a WebFetch
-> passthrough so claude.ai Artifact URLs reach the tool that can actually read them (upstream #938/#984/#1006),
-> and a fix that finally makes Claude Code's own memory files searchable from `ctx_search`.
+> tool that survives plan mode, compact tool descriptions (~3.4K tokens/request reclaimed), a code index that
+> seeds itself from `git ls-files` and evicts deleted files (and never indexes credentials), hybrid semantic
+> search that adopts a local bge-m3 runtime on its own and stores int8 vectors, an opt-in proxy for
+> `ctx_fetch_and_index`, a WebFetch passthrough so claude.ai Artifact URLs reach the tool that can actually read
+> them (upstream #938/#984/#1006), a fix that finally makes Claude Code's own memory files searchable from
+> `ctx_search`, a `ctx upgrade` that pulls from *this* repo instead of silently reinstalling upstream over it,
+> a one-command upstream merge that survives the tracked bundles, and a contract test for ADR-0003.
 > See **[docs/FORK-CHANGES.md](docs/FORK-CHANGES.md)** for the full rationale, env vars, and trade-offs.
 
 **The other half of the context problem.**

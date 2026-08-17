@@ -2,10 +2,12 @@
 
 Fork of [mksglu/context-mode](https://github.com/mksglu/context-mode) at v1.0.169.
 
-Nine changes, each addressing a gap observed while running the plugin daily in
-Claude Code. Every one is off-by-default or backwards compatible except the
-compact tool descriptions, which change what ships on every request (and carry
-an env switch back to the original text).
+Twelve changes, each addressing a gap observed while running the plugin daily in
+Claude Code. Every one is backwards compatible, and every behavioural default
+carries an env switch back. Two defaults differ from upstream on purpose: the
+compact tool descriptions (what ships on every request) and the semantic layer,
+which now adopts a local embedding runtime if one is already running instead of
+waiting to be configured.
 
 ---
 
@@ -118,6 +120,39 @@ server drains that queue the next time it opens the content store. Files are
 indexed under `code:<relative-path>`, capped at 512 KB, skipping lockfiles,
 `node_modules`, `dist`, and binaries. Disable with `CONTEXT_MODE_CODE_INDEX=0`.
 
+**Seeded, not just accumulated.** The queue only ever holds files the agent has
+already touched, so a fresh session started blind: search over code returned
+nothing until something was edited — precisely when it is needed least.
+`bootstrapCodeIndex()` now seeds the index once per project from `git ls-files`,
+newest-first, bounded at 200 files / 4 MB. Using the repo's own file list means
+no `.gitignore` parsing, no walk into `node_modules`, and nothing untracked.
+
+The seed is **amortised, not blocking**: indexing 200 files measured 1.3 s on
+this repo — too much to spend inside one tool call. The plan is computed once
+and worked through 15 files (~190 ms) per store open, the same lazy shape the
+vector backfill already uses, and it survives a restart because the remaining
+plan is persisted. Tune with `CONTEXT_MODE_CODE_INDEX_BOOTSTRAP_BATCH`, or opt
+out with `CONTEXT_MODE_CODE_INDEX_BOOTSTRAP=0`.
+
+**Deletions are evicted.** A file indexed and later deleted kept answering
+searches forever — the worst failure mode a retrieval layer has, because a
+stale answer is indistinguishable from a correct one until the agent acts on
+it. `pruneDeletedCodeSources()` sweeps `code:` sources whose file is gone (once
+per server process), and a queued file that vanished before the drain evicts
+its source instead of being silently skipped. Backed by a new
+`ContentStore.deleteSource(label)`.
+
+**Credentials never enter the index.** The old extension allowlist contained
+`.env`, and `.json` covered `credentials.json` and `service-account-prod.json`.
+The knowledge base is a plaintext SQLite file that search returns snippets
+from, so anything indexed can resurface in a future answer — possibly in a
+subagent's context, possibly in a transcript. `isSensitivePath()` now refuses
+dotenv files, `.ssh` / `.aws` / `.gnupg` / `.kube` trees, private keys and
+certificate bundles, and config-ish files whose *name* advertises secrets.
+Source files are deliberately exempt from the name check: `token-service.ts`
+and `password_reset.py` are ordinary code, and excluding them would blind
+search to the exact modules people ask about.
+
 ## 6. Optional hybrid (semantic) search
 
 `src/search/embeddings.ts`, `src/search/hybrid.ts`, `src/store.ts`
@@ -127,17 +162,71 @@ containing `useEffect`", blind to "why does the deploy keep failing" when the
 chunk says "build step exits 137".
 
 Semantic candidates are now fused into the same RRF the lexical strategies
-already use. **Off by default**, dependency-free, no bundled model: point it at
-an OpenAI-compatible embeddings endpoint you already run.
+already use. Dependency-free, no bundled model, no vendor call: it uses an
+embeddings endpoint you already run.
 
 | Variable | Meaning |
 |---|---|
-| `CONTEXT_MODE_EMBEDDINGS_URL` | e.g. `http://localhost:11434/v1/embeddings` |
-| `CONTEXT_MODE_EMBEDDINGS_MODEL` | e.g. `bge-m3` (multilingual) or `nomic-embed-text` |
+| `CONTEXT_MODE_EMBEDDINGS_URL` | e.g. `http://localhost:11434/api/embed` — set it to skip autodetection |
+| `CONTEXT_MODE_EMBEDDINGS_MODEL` | e.g. `bge-m3` (multilingual, the default) or `nomic-embed-text` |
 | `CONTEXT_MODE_EMBEDDINGS_API_KEY` | optional bearer token |
 | `CONTEXT_MODE_EMBEDDINGS_TIMEOUT_MS` | query budget, default 5000 |
 | `CONTEXT_MODE_EMBEDDINGS_BACKFILL_TIMEOUT_MS` | background batch budget, default 120000 |
 | `CONTEXT_MODE_EMBEDDINGS_BACKFILL` | chunks embedded per pass, default 16 |
+| `CONTEXT_MODE_EMBEDDINGS_QUANT` | `f32` stores float32 instead of the int8 default |
+| `CONTEXT_MODE_EMBEDDINGS_AUTODETECT` | `0` never probes localhost |
+| `CONTEXT_MODE_EMBEDDINGS` | `0` hard-off, whatever else is configured |
+
+**It finds the runtime you already have.** Requiring two env vars meant the
+feature shipped switched off for everyone who did not read this file — a
+capability nobody uses is worth exactly nothing. With no URL configured, the
+first hybrid search probes three loopback endpoints (Ollama `:11434`, LM Studio
+`:1234`, llama.cpp `:8080`) with a 400 ms budget, once per process, and adopts
+the first one listing an embedding model. `bge-m3` is preferred — multilingual, so a Russian query matches an English
+chunk (measured end-to-end against the local runtime: «почему падает деплой»
+scores 0.454 against an English chunk about a build exiting 137, versus 0.338
+against an unrelated proxy-configuration chunk). A chat model is never adopted as a
+fallback: it answers the embed call with plausible garbage, which poisons
+ranking silently. Nothing off-machine is ever probed, and
+`CONTEXT_MODE_EMBEDDINGS_AUTODETECT=0` disables the probe entirely.
+
+**Vectors are stored as int8.** Cosine similarity divides by both norms, so a
+per-vector positive scale cancels out; quantising to the vector's own peak
+makes the table 4× smaller at a measured cosine of **0.99990** against the
+unquantised vector (real bge-m3 output, 1024 dims) — noise well below the gap
+between any two candidates a ranking has to separate. That matters because
+every query walks it: bge-m3's 1024 dims are 4 KB per chunk as float32 and 1 KB
+as int8 — 200 MB vs 50 MB read per search over a 50k-chunk store. Rows written
+before quantisation existed keep working: the decoder tells the formats apart
+by blob length against the `dim` the row already carries, so there is no
+migration and no rewrite. `CONTEXT_MODE_EMBEDDINGS_QUANT=f32` opts out.
+
+**The scan is scoped and streamed.** A search filtered to one source used to
+pay cosine over every vector in the store and filter afterwards — which could
+also return nothing at all when the global top-K happened to belong to other
+sources. The filter is now a SQL join pushed into the scan, and rows stream
+through `iterate()` instead of materialising every BLOB at once.
+
+**Repeated queries embed once.** `ctx_search` takes an array of queries and
+agents re-ask the same question across a session, so the same string was
+embedded again and again on the latency path. A 256-entry LRU turns every
+repeat into a map lookup. Backfill batches are never cached — they are never
+repeated.
+
+**Switching models evicts the old vectors.** Two models' vectors are not
+comparable: different dimensionality scores 0 (dead weight), same
+dimensionality scores *plausible nonsense*, which is worse because nothing
+looks broken. `pruneStaleModelVectors()` runs before each backfill, so changing
+`CONTEXT_MODE_EMBEDDINGS_MODEL` re-warms the index instead of leaving it
+permanently half-degraded.
+
+**Coverage and payoff are visible in `ctx_stats`.** "Hybrid search is
+configured" and "hybrid search can answer" are different states, and a cold
+index degrades silently to lexical — which looks exactly like working. The
+report now prints embedded-chunk coverage, the model, index size, and how many
+of this session's semantic passes actually changed a ranking. That last number
+is the only honest answer to "is the embedding round trip earning its
+latency?".
 
 **Two budgets, not one.** Measured against bge-m3 on CPU: a single query
 embedding is ~230 ms, a batch of 16-32 real chunks is 5-15 s. One shared
@@ -273,6 +362,72 @@ verified here, so they are left untouched.
 
 ---
 
+## 10. `ctx upgrade` stops overwriting the fork with upstream
+
+`src/util/fork-info.ts`, `src/cli.ts`, `package.json`
+
+`ctx upgrade` cloned `https://github.com/mksglu/context-mode.git`
+unconditionally and rsynced it over the install. Run from a fork install that
+is not an upgrade — it is a silent downgrade that deletes every change in this
+document, from a command the plugin itself advertises in a skill. The
+marketplace step had the same shape: `git reset --hard origin/HEAD` in a clone
+that might track a different repo than the one being upgraded from.
+
+The upgrade source is now resolved from what the install actually is, in order:
+
+1. `CONTEXT_MODE_UPGRADE_REPO` — operator override;
+2. the `fork` block in the installed `package.json`;
+3. the git `origin` of the installed tree;
+4. upstream, for an unforked install (unchanged behaviour).
+
+The marketplace clone is only reset when its `origin` matches the resolved
+upgrade source; otherwise it is skipped with an explanation instead of quietly
+reinstalling another tree's plugin metadata.
+
+**And the install is now identifiable.** Fork and upstream ship the same
+`version`, so "which tree is running?" had no answer — the first thing that
+matters when a fork-only feature appears to be missing. `package.json` carries
+a `fork` block (`name`, `repo`, `upstream`, `version`), and `doctor` prints
+`context-mode v1.0.169 · fork OSDDQD/context-mode rev 1` plus the repo it would
+upgrade from.
+
+## 11. Merging upstream without drowning in bundle conflicts
+
+`.gitattributes`, `scripts/sync-upstream.mjs`
+
+Eight `*.bundle.mjs` files are tracked because the plugin loader reads them
+directly, and they are minified to a handful of enormous lines. Every upstream
+merge therefore conflicts on all eight in a form no human can resolve by
+reading — a measured 25 conflict hunks against `upstream/next`, essentially all
+of them noise. The resolution is always mechanical: take the source-level
+merge, then rebuild.
+
+`.gitattributes` marks the bundles `merge=ours -diff linguist-generated`, and
+`npm run sync-upstream` does the rest: registers the `ours` driver (git ships
+the attribute but not the driver, so it must be configured per clone), fetches
+and merges, reports any conflicts left in *real source files* — those are
+yours — then rebuilds the bundles and stages them.
+
+```bash
+npm run sync-upstream               # merge upstream/main
+npm run sync-upstream -- next       # merge upstream/next
+npm run sync-upstream -- --dry-run  # count the conflicts first
+```
+
+## 12. Deny-reason contract test (ADR-0003 follow-up)
+
+`tests/hooks/deny-reason-contract.test.ts`
+
+[ADR-0003](adr/0003-routing-deny-reasons.md) formalised the rule that a
+redirect must not speak the vocabulary of a restriction — PR #654 reproduced
+an Opus 4.6 session reading the bare word "blocked" in a redirect reason as a
+network restriction and giving up instead of calling the tool it was being
+handed. The ADR closes by recommending a contract test as a follow-up, "the
+rule is already mechanically checkable". This is that test: every CASE A
+denial (curl, wget, inline HTTP, WebFetch) must avoid restriction vocabulary
+*and* name a concrete alternative, while CASE B security denials keep reading
+like the restrictions they are.
+
 ## New environment variables
 
 | Variable | Default | Effect |
@@ -282,19 +437,29 @@ verified here, so they are left untouched.
 | `CONTEXT_MODE_MISSED_REDIRECT_MIN_BYTES` | `2000` | Threshold for recording an unrouted payload |
 | `CONTEXT_MODE_TOOL_DESCRIPTIONS` | compact | `full` restores the verbose descriptions |
 | `CONTEXT_MODE_CODE_INDEX` | on | `0` disables indexing of edited files |
-| `CONTEXT_MODE_EMBEDDINGS_URL` | — | Enables hybrid search (with `_MODEL`) |
-| `CONTEXT_MODE_EMBEDDINGS_MODEL` | — | Embedding model name |
+| `CONTEXT_MODE_CODE_INDEX_BOOTSTRAP` | on | `0` skips the one-time `git ls-files` seed |
+| `CONTEXT_MODE_CODE_INDEX_BOOTSTRAP_BATCH` | `15` | Files seeded per store open |
+| `CONTEXT_MODE_EMBEDDINGS_URL` | autodetected | Embeddings endpoint; set it to skip the loopback probe |
+| `CONTEXT_MODE_EMBEDDINGS_MODEL` | `bge-m3` | Embedding model name |
 | `CONTEXT_MODE_EMBEDDINGS_API_KEY` | — | Bearer token for the endpoint |
 | `CONTEXT_MODE_EMBEDDINGS_TIMEOUT_MS` | `5000` | Query embedding timeout (on the answer path) |
 | `CONTEXT_MODE_EMBEDDINGS_BACKFILL_TIMEOUT_MS` | `120000` | Background backfill batch timeout |
 | `CONTEXT_MODE_EMBEDDINGS_BACKFILL` | `16` | Chunks embedded per background pass |
+| `CONTEXT_MODE_EMBEDDINGS_QUANT` | `i8` | `f32` stores unquantised vectors |
+| `CONTEXT_MODE_EMBEDDINGS_AUTODETECT` | on | `0` never probes localhost for a runtime |
+| `CONTEXT_MODE_EMBEDDINGS` | on | `0` disables the semantic layer entirely |
+| `CONTEXT_MODE_UPGRADE_REPO` | fork marker → git origin → upstream | Repository `ctx upgrade` pulls from |
 | `CONTEXT_MODE_ALLOW_PROXY` | off | `1` lets the fetch subprocess use the ambient proxy |
 | `CONTEXT_MODE_FETCH_PASSTHROUGH` | claude.ai artifacts | Extra hosts/regexes the WebFetch redirect must skip |
 | `CONTEXT_MODE_INDEX_HOST_MEMORY` | on | `0` stops indexing the host's memory files into FTS5 |
 
 ## Tests
 
-`npm test` — 4796 passing, 38 skipped. New suites:
+`npm test` — 4853 passing, 38 skipped. New suites:
+
+- `tests/cli/fork-info.test.ts` — upgrade-source resolution, fork identity
+- `tests/core/store-delete-source.test.ts` — source eviction
+- `tests/hooks/deny-reason-contract.test.ts` — ADR-0003 redirect ≠ restriction
 
 - `tests/core/host-memory.test.ts` — host memory path resolution, scoping, indexing
 

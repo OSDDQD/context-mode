@@ -43,6 +43,7 @@ import { ContentStore } from "./store.js";
 import { readToolDenyPatterns, evaluateFilePath } from "./security.js";
 // v1.0.128 — Issue #559 sibling MCP kill helpers (see PR-559-560-FIX-DESIGN.md).
 import { discoverSiblingMcpPids, killSiblingMcpServers } from "./util/sibling-mcp.js";
+import { resolveUpgradeRepo, gitOriginUrl, sameGitRepo, describeInstall } from "./util/fork-info.js";
 // v1.0.119 — Issue #523 Layer 5 heal: post-bump assertion on .claude-plugin/plugin.json
 // mcpServers args. Single source of truth shared with start.mjs HEAL block + postinstall.
 // @ts-expect-error — JS module, no TS declarations
@@ -665,6 +666,15 @@ async function doctor(): Promise<number> {
     `Platform: ${color.cyan(adapter.name)}` +
       color.dim(` (${detection.confidence} confidence — ${detection.reason})`),
   );
+  // Fork and upstream ship the same `version`, so without this line "which
+  // tree am I running?" is unanswerable — and it is the first thing that
+  // matters when a fork-only feature appears to be missing.
+  try {
+    const root = getPluginRoot();
+    p.log.info(`Install: ${color.cyan(describeInstall(root, getLocalVersion()))}`);
+    const repo = resolveUpgradeRepo({ pluginRoot: root });
+    p.log.info(color.dim(`Upgrades from: ${repo.url} (${repo.reason})`));
+  } catch { /* identity is informational — never fail doctor over it */ }
 
   let criticalFails = 0;
 
@@ -1255,6 +1265,16 @@ async function upgrade(opts?: { platform?: string }) {
   const changes: string[] = [];
   const s = p.spinner();
 
+  // Which repo is "latest" depends on which tree is installed. A fork install
+  // pulling upstream is not an upgrade — it silently replaces every local
+  // addition with the code they were written against. See src/util/fork-info.ts.
+  const upgradeRepo = resolveUpgradeRepo({ pluginRoot });
+  if (upgradeRepo.reason !== "upstream") {
+    p.log.info(
+      `Upgrade source: ${color.cyan(upgradeRepo.url)}` + color.dim(` (${upgradeRepo.reason})`),
+    );
+  }
+
   // Step 0: Sync the marketplace clone (#418).
   // Claude Code reads plugin metadata from ~/.claude/plugins/marketplaces/context-mode/.
   // Without a git pull there, the marketplace stays pinned at the install-time
@@ -1272,10 +1292,21 @@ async function upgrade(opts?: { platform?: string }) {
         "git", ["-C", marketplaceDir, "status", "--porcelain"],
         { stdio: "pipe", encoding: "utf-8", timeout: 5000 },
       );
+      const marketplaceOrigin = gitOriginUrl(marketplaceDir);
       if (statusOut.trim()) {
         s.stop(color.yellow("Marketplace clone has local edits — skipping git pull"));
         p.log.info(
           color.dim(`  Run manually: git -C "${marketplaceDir}" stash && git pull --ff-only`),
+        );
+      } else if (!sameGitRepo(marketplaceOrigin, upgradeRepo.url)) {
+        // The clone tracks a different repo than the one being upgraded from —
+        // resetting it hard would reinstall that other tree's plugin metadata
+        // and quietly undo this upgrade at the plugin-system level.
+        s.stop(color.yellow("Marketplace clone tracks a different repo — skipping reset"));
+        p.log.info(
+          color.dim(`  Clone origin: ${marketplaceOrigin ?? "unknown"}`) +
+            color.dim(`\n  Upgrading from: ${upgradeRepo.url}`) +
+            color.dim(`\n  Point the clone at the same repo to keep plugin metadata in sync.`),
         );
       } else {
         execFileSync(
@@ -1302,10 +1333,13 @@ async function upgrade(opts?: { platform?: string }) {
   const localVersion = getLocalVersion();
   const tmpDir = join(tmpdir(), `context-mode-upgrade-${Date.now()}`);
 
-  s.start("Cloning mksglu/context-mode");
+  const repoLabel = upgradeRepo.url
+    .replace(/^https?:\/\/github\.com\//, "")
+    .replace(/\.git$/, "");
+  s.start(`Cloning ${repoLabel}`);
   try {
     execFileSync(
-      "git", ["clone", "--depth", "1", "https://github.com/mksglu/context-mode.git", tmpDir],
+      "git", ["clone", "--depth", "1", upgradeRepo.url, tmpDir],
       { stdio: "pipe", timeout: 30000 },
     );
     s.stop("Downloaded");

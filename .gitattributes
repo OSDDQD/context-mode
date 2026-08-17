@@ -2,3 +2,11 @@
 # Prevents CRLF conversion on Windows (git core.autocrlf=true) from
 # showing unmodified files as changed after clone.
 * text=auto eol=lf
+
+# Build artefacts that are tracked because the plugin loader reads them
+# directly. They are generated from src/, so a three-way merge on minified
+# single-line bundles produces conflicts that carry no information: the
+# resolution is always "rebuild". `merge=ours` keeps our copy during a merge,
+# and `npm run sync-upstream` regenerates them right after — see
+# scripts/sync-upstream.mjs, which also registers the driver.
+*.bundle.mjs merge=ours -diff linguist-generated=true

@@ -1,9 +1,11 @@
 import { describe, test, expect, beforeEach, afterEach } from "vitest";
-import { mkdtempSync, rmSync, writeFileSync, existsSync, readFileSync } from "node:fs";
+import { execFileSync } from "node:child_process";
+import { mkdtempSync, rmSync, writeFileSync, existsSync, readFileSync, mkdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
-  isIndexableSource, codeIndexQueuePath, drainCodeIndexQueue,
+  isIndexableSource, isSensitivePath, codeIndexQueuePath, drainCodeIndexQueue,
+  pruneDeletedCodeSources, bootstrapCodeIndex, CODE_INDEX_BOOTSTRAP_STATE,
 } from "../../src/session/code-index.js";
 
 let dir: string;
@@ -97,5 +99,174 @@ describe("drainCodeIndexQueue", () => {
 
     expect(drainCodeIndexQueue({ store, sessionsDir: dir, projectDir: dir })).toBe(1);
     expect(calls).toBe(2);
+  });
+
+  test("a file deleted before the drain evicts whatever the index still holds", () => {
+    const gone = join(dir, "removed.ts");
+    writeFileSync(codeIndexQueuePath(dir), gone + "\n");
+
+    const deleted: string[] = [];
+    const store = {
+      index() { return {}; },
+      listSources: () => [],
+      deleteSource(label: string) { deleted.push(label); return 1; },
+    };
+
+    expect(drainCodeIndexQueue({ store, sessionsDir: dir, projectDir: dir })).toBe(0);
+    expect(deleted).toEqual(["code:removed.ts"]);
+  });
+});
+
+describe("isSensitivePath", () => {
+  test("refuses credential files whatever their extension", () => {
+    expect(isSensitivePath("/repo/.env")).toBe(true);
+    expect(isSensitivePath("/repo/.env.production")).toBe(true);
+    expect(isSensitivePath("/home/u/.ssh/id_ed25519")).toBe(true);
+    expect(isSensitivePath("/home/u/.aws/credentials")).toBe(true);
+    expect(isSensitivePath("/repo/certs/server.pem")).toBe(true);
+    expect(isSensitivePath("/repo/service-account-prod.json")).toBe(true);
+    expect(isSensitivePath("/repo/config/secrets.yml")).toBe(true);
+    expect(isSensitivePath("/repo/deploy/api-keys.json")).toBe(true);
+  });
+
+  test("leaves ordinary code alone even when the name mentions secrets", () => {
+    // Excluding these would blind search to the exact modules people ask
+    // about — "where do we refresh the token" is a normal question.
+    expect(isSensitivePath("/repo/src/auth/token-service.ts")).toBe(false);
+    expect(isSensitivePath("/repo/src/password_reset.py")).toBe(false);
+    expect(isSensitivePath("/repo/docs/secrets-rotation.md")).toBe(false);
+  });
+
+  test("isIndexableSource inherits the refusal", () => {
+    expect(isIndexableSource("/repo/.env")).toBe(false);
+    expect(isIndexableSource("/repo/config/credentials.json")).toBe(false);
+    expect(isIndexableSource("/repo/src/auth/token-service.ts")).toBe(true);
+  });
+});
+
+describe("pruneDeletedCodeSources", () => {
+  test("evicts code sources whose file is gone and keeps the rest", () => {
+    const alive = join(dir, "alive.ts");
+    writeFileSync(alive, "export const a = 1;\n");
+
+    const deleted: string[] = [];
+    const store = {
+      index() { return {}; },
+      listSources: () => [
+        { label: "code:alive.ts", chunkCount: 1 },
+        { label: "code:vanished.ts", chunkCount: 1 },
+        { label: "batch:git log", chunkCount: 4 },
+      ],
+      deleteSource(label: string) { deleted.push(label); return 1; },
+    };
+
+    expect(pruneDeletedCodeSources({ store, projectDir: dir })).toBe(1);
+    expect(deleted).toEqual(["code:vanished.ts"]);
+  });
+
+  test("a store without the optional methods is a no-op, not a crash", () => {
+    expect(pruneDeletedCodeSources({ store: { index() { return {}; } }, projectDir: dir })).toBe(0);
+  });
+});
+
+describe("bootstrapCodeIndex", () => {
+  function gitRepo(root: string, files: Record<string, string>): void {
+    execFileSync("git", ["init", "-q", root], { stdio: "ignore" });
+    for (const [rel, content] of Object.entries(files)) {
+      const abs = join(root, rel);
+      mkdirSync(join(abs, ".."), { recursive: true });
+      writeFileSync(abs, content);
+    }
+    execFileSync("git", ["-C", root, "add", "-A"], { stdio: "ignore" });
+  }
+
+  test("seeds the index from tracked files, skipping noise and secrets", () => {
+    const project = join(dir, "project");
+    mkdirSync(project);
+    gitRepo(project, {
+      "src/server.ts": "export const server = 1;\n",
+      "README.md": "# hi\n",
+      ".env": "SECRET=1\n",
+      "package-lock.json": "{}\n",
+    });
+
+    const indexed: string[] = [];
+    const store = { index(o: { source?: string }) { indexed.push(o.source ?? ""); return {}; } };
+
+    const count = bootstrapCodeIndex({ store, sessionsDir: dir, projectDir: project });
+
+    expect(count).toBe(2);
+    expect(indexed.sort()).toEqual(["code:README.md", "code:src/server.ts"]);
+  });
+
+  test("runs once per project — the marker stops a repeat pass", () => {
+    const project = join(dir, "once");
+    mkdirSync(project);
+    gitRepo(project, { "a.ts": "export const a = 1;\n" });
+
+    const store = { calls: 0, index() { this.calls++; return {}; } };
+    expect(bootstrapCodeIndex({ store, sessionsDir: dir, projectDir: project })).toBe(1);
+    expect(bootstrapCodeIndex({ store, sessionsDir: dir, projectDir: project })).toBe(0);
+    expect(store.calls).toBe(1);
+    expect(existsSync(join(dir, CODE_INDEX_BOOTSTRAP_STATE))).toBe(true);
+
+    // force re-runs it, for an explicit re-seed.
+    expect(bootstrapCodeIndex({ store, sessionsDir: dir, projectDir: project, force: true })).toBe(1);
+  });
+
+  test("honours the file budget", () => {
+    const project = join(dir, "budget");
+    mkdirSync(project);
+    gitRepo(project, {
+      "a.ts": "export const a = 1;\n",
+      "b.ts": "export const b = 2;\n",
+      "c.ts": "export const c = 3;\n",
+    });
+
+    const store = { calls: 0, index() { this.calls++; return {}; } };
+    expect(bootstrapCodeIndex({ store, sessionsDir: dir, projectDir: project, maxFiles: 2 })).toBe(2);
+  });
+
+  test("spreads the seed across passes instead of stalling one tool call", () => {
+    // Measured on this repo, seeding 200 files in one pass costs ~1.3s. The
+    // plan is computed once and worked through a batch at a time, so no single
+    // tool call pays for the whole tree.
+    const project = join(dir, "batched");
+    mkdirSync(project);
+    gitRepo(project, Object.fromEntries(
+      Array.from({ length: 5 }, (_, i) => [`f${i}.ts`, `export const f${i} = ${i};\n`]),
+    ));
+
+    const store = { calls: 0, index() { this.calls++; return {}; } };
+    expect(bootstrapCodeIndex({ store, sessionsDir: dir, projectDir: project, batchSize: 2 })).toBe(2);
+    expect(bootstrapCodeIndex({ store, sessionsDir: dir, projectDir: project, batchSize: 2 })).toBe(2);
+    expect(bootstrapCodeIndex({ store, sessionsDir: dir, projectDir: project, batchSize: 2 })).toBe(1);
+    // Plan exhausted — further passes are free.
+    expect(bootstrapCodeIndex({ store, sessionsDir: dir, projectDir: project, batchSize: 2 })).toBe(0);
+    expect(store.calls).toBe(5);
+  });
+
+  test("the plan survives a restart — git ls-files runs once, not per pass", () => {
+    const project = join(dir, "resume");
+    mkdirSync(project);
+    gitRepo(project, { "a.ts": "export const a = 1;\n", "b.ts": "export const b = 2;\n" });
+
+    const store = { calls: 0, index() { this.calls++; return {}; } };
+    bootstrapCodeIndex({ store, sessionsDir: dir, projectDir: project, batchSize: 1 });
+
+    const state = JSON.parse(readFileSync(join(dir, CODE_INDEX_BOOTSTRAP_STATE), "utf-8"));
+    expect(state[project].pending).toHaveLength(1);
+    expect(state[project].done).toBe(false);
+  });
+
+  test("a non-git directory is marked seeded instead of retried forever", () => {
+    const project = join(dir, "plain");
+    mkdirSync(project);
+    writeFileSync(join(project, "a.ts"), "export const a = 1;\n");
+
+    const store = { calls: 0, index() { this.calls++; return {}; } };
+    expect(bootstrapCodeIndex({ store, sessionsDir: dir, projectDir: project })).toBe(0);
+    const state = JSON.parse(readFileSync(join(dir, CODE_INDEX_BOOTSTRAP_STATE), "utf-8"));
+    expect(state[project]).toBeTruthy();
   });
 });

@@ -1607,6 +1607,33 @@ export class ContentStore {
     return info.changes;
   }
 
+  /**
+   * Delete one source and every chunk that belongs to it.
+   *
+   * Needed by the code index: a file deleted on disk must stop answering
+   * searches, and "wait for the 14-day staleness sweep" is not an answer when
+   * the agent is acting on the result today.
+   *
+   * @returns Number of source rows removed (0 or 1).
+   */
+  deleteSource(label: string): number {
+    const remove = this.#db.transaction((lbl: string) => {
+      const row = this.#db.prepare("SELECT id FROM sources WHERE label = ?").get(lbl) as
+        | { id: number }
+        | undefined;
+      if (!row) return 0;
+      this.#db.prepare("DELETE FROM chunks WHERE source_id = ?").run(row.id);
+      this.#db.prepare("DELETE FROM chunks_trigram WHERE source_id = ?").run(row.id);
+      this.#db.prepare("DELETE FROM sources WHERE id = ?").run(row.id);
+      return 1;
+    });
+    try {
+      return remove(label) as number;
+    } catch {
+      return 0;
+    }
+  }
+
   /** Get DB file size in bytes. */
   getDBSizeBytes(): number {
     try {

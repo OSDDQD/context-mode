@@ -1,9 +1,17 @@
-import { describe, test, expect } from "vitest";
+import { describe, test, expect, beforeEach, afterEach, vi } from "vitest";
 import {
   resolveEmbeddingConfig, isEmbeddingsEnabled, parseEmbeddingResponse,
   encodeVector, decodeVector, cosineSimilarity, embedTexts,
+  encodeVectorInt8, decodeVectorInt8, decodeStoredVector,
+  parseModelListing, pickEmbeddingModel, detectLocalEmbeddingEndpoint,
+  resolveEmbeddingConfigAsync, resetEmbeddingAutodetect, clearEmbeddingCache,
+  DEFAULT_EMBEDDING_MODEL,
 } from "../../src/search/embeddings.js";
-import { fuseRankings, hybridSearch, pruneOrphanVectors } from "../../src/search/hybrid.js";
+import {
+  fuseRankings, hybridSearch, pruneOrphanVectors, pruneStaleModelVectors,
+  vectorCoverage, semanticCandidates, backfillVectors,
+  getHybridTelemetry, resetHybridTelemetry,
+} from "../../src/search/hybrid.js";
 
 describe("embedding config", () => {
   test("stays disabled until both url and model are set", () => {
@@ -163,5 +171,370 @@ describe("hybridSearch", () => {
       config: { url: "http://127.0.0.1:1/v1/embeddings", model: "m", timeoutMs: 50 },
     });
     expect(out).toEqual(lexical);
+  });
+});
+
+// ─────────────────────────────────────────────────────────
+// int8 quantisation
+// ─────────────────────────────────────────────────────────
+
+describe("int8 vector storage", () => {
+  test("a quantised vector keeps its direction", () => {
+    // Cosine divides by both norms, so the per-vector scale cancels and only
+    // rounding noise survives. That is the whole reason the scale is not stored.
+    const vec = Array.from({ length: 256 }, (_, i) => Math.sin(i) * 0.37);
+    const restored = decodeVectorInt8(encodeVectorInt8(vec));
+    expect(cosineSimilarity(vec, restored)).toBeGreaterThan(0.999);
+  });
+
+  test("costs one byte per dimension instead of four", () => {
+    const vec = Array.from({ length: 1024 }, () => 0.5);
+    expect(encodeVectorInt8(vec)).toHaveLength(1024);
+    expect(encodeVector(vec)).toHaveLength(4096);
+  });
+
+  test("an all-zero vector round-trips instead of dividing by zero", () => {
+    const zeros = new Array(8).fill(0);
+    expect([...decodeVectorInt8(encodeVectorInt8(zeros))]).toEqual(zeros);
+  });
+
+  test("decodeStoredVector tells the two formats apart by dim", () => {
+    const vec = [0.5, -0.25, 1, 0];
+    expect(decodeStoredVector(encodeVector(vec), 4)).toBeInstanceOf(Float32Array);
+    expect(decodeStoredVector(encodeVectorInt8(vec), 4)).toBeInstanceOf(Int8Array);
+    // Legacy rows written before quantisation existed still decode.
+    expect([...decodeStoredVector(encodeVector(vec), 4)]).toEqual(vec);
+  });
+});
+
+// ─────────────────────────────────────────────────────────
+// Local runtime autodetection
+// ─────────────────────────────────────────────────────────
+
+describe("model listing", () => {
+  test("reads Ollama and OpenAI-compatible shapes", () => {
+    expect(parseModelListing({ models: [{ name: "bge-m3:latest" }, { name: "llama3" }] }))
+      .toEqual(["bge-m3:latest", "llama3"]);
+    expect(parseModelListing({ data: [{ id: "text-embedding-3-small" }] }))
+      .toEqual(["text-embedding-3-small"]);
+    expect(parseModelListing("nope")).toEqual([]);
+  });
+});
+
+describe("pickEmbeddingModel", () => {
+  test("prefers bge-m3 — the model this fork is tuned against", () => {
+    expect(pickEmbeddingModel(["llama3:8b", "bge-m3:latest", "nomic-embed-text"]))
+      .toBe("bge-m3:latest");
+    expect(DEFAULT_EMBEDDING_MODEL).toBe("bge-m3");
+  });
+
+  test("honours an explicit choice, tag or no tag", () => {
+    expect(pickEmbeddingModel(["bge-m3:latest", "nomic-embed-text"], "nomic-embed-text"))
+      .toBe("nomic-embed-text");
+    expect(pickEmbeddingModel(["mxbai-embed-large:335m"], "mxbai-embed-large"))
+      .toBe("mxbai-embed-large:335m");
+  });
+
+  test("refuses to fall back to a chat model", () => {
+    // A chat model answers the embed call with garbage vectors, which poisons
+    // ranking silently — far worse than staying lexical.
+    expect(pickEmbeddingModel(["llama3:8b", "qwen2.5-coder"])).toBeNull();
+    expect(pickEmbeddingModel([])).toBeNull();
+    expect(pickEmbeddingModel(["llama3:8b"], "bge-m3")).toBeNull();
+  });
+});
+
+describe("detectLocalEmbeddingEndpoint", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    resetEmbeddingAutodetect();
+  });
+
+  test("adopts the first loopback runtime that lists an embedding model", async () => {
+    vi.stubGlobal("fetch", vi.fn(async (url: string) => {
+      if (String(url).includes("11434")) throw new Error("ECONNREFUSED");
+      return { ok: true, json: async () => ({ data: [{ id: "bge-m3" }] }) };
+    }));
+
+    const found = await detectLocalEmbeddingEndpoint({ env: {} as NodeJS.ProcessEnv });
+    expect(found?.name).toBe("lm-studio");
+    expect(found?.model).toBe("bge-m3");
+  });
+
+  test("returns null when nothing local answers", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => { throw new Error("ECONNREFUSED"); }));
+    expect(await detectLocalEmbeddingEndpoint({ env: {} as NodeJS.ProcessEnv })).toBeNull();
+  });
+});
+
+describe("resolveEmbeddingConfigAsync", () => {
+  beforeEach(() => resetEmbeddingAutodetect());
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    resetEmbeddingAutodetect();
+  });
+
+  test("an explicit endpoint wins without probing anything", async () => {
+    const fetchSpy = vi.fn();
+    vi.stubGlobal("fetch", fetchSpy);
+    const cfg = await resolveEmbeddingConfigAsync({
+      CONTEXT_MODE_EMBEDDINGS_URL: "http://x/v1/embeddings",
+      CONTEXT_MODE_EMBEDDINGS_MODEL: "bge-m3",
+    } as NodeJS.ProcessEnv);
+    expect(cfg?.url).toBe("http://x/v1/embeddings");
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
+  test("a URL without a model defaults to bge-m3 rather than staying off", async () => {
+    const cfg = await resolveEmbeddingConfigAsync({
+      CONTEXT_MODE_EMBEDDINGS_URL: "http://x/v1/embeddings",
+    } as NodeJS.ProcessEnv);
+    expect(cfg?.model).toBe("bge-m3");
+  });
+
+  test("CONTEXT_MODE_EMBEDDINGS=0 is a hard off switch", async () => {
+    const fetchSpy = vi.fn();
+    vi.stubGlobal("fetch", fetchSpy);
+    expect(await resolveEmbeddingConfigAsync({
+      CONTEXT_MODE_EMBEDDINGS: "0",
+      CONTEXT_MODE_EMBEDDINGS_URL: "http://x/v1/embeddings",
+      CONTEXT_MODE_EMBEDDINGS_MODEL: "bge-m3",
+    } as NodeJS.ProcessEnv)).toBeNull();
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
+  test("autodetection is memoised — one probe per process, not per search", async () => {
+    const fetchSpy = vi.fn(async () => ({ ok: true, json: async () => ({ models: [{ name: "bge-m3:latest" }] }) }));
+    vi.stubGlobal("fetch", fetchSpy);
+
+    const first = await resolveEmbeddingConfigAsync({} as NodeJS.ProcessEnv);
+    const second = await resolveEmbeddingConfigAsync({} as NodeJS.ProcessEnv);
+    expect(first?.model).toBe("bge-m3:latest");
+    expect(second?.model).toBe("bge-m3:latest");
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
+  });
+
+  test("opting out of autodetection keeps an unconfigured install lexical", async () => {
+    const fetchSpy = vi.fn();
+    vi.stubGlobal("fetch", fetchSpy);
+    expect(await resolveEmbeddingConfigAsync({
+      CONTEXT_MODE_EMBEDDINGS_AUTODETECT: "0",
+    } as NodeJS.ProcessEnv)).toBeNull();
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+});
+
+describe("query embedding cache", () => {
+  beforeEach(() => clearEmbeddingCache());
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    clearEmbeddingCache();
+  });
+
+  const config = {
+    url: "http://x/v1/embeddings", model: "bge-m3",
+    timeoutMs: 500, backfillTimeoutMs: 500, backfillBatch: 4,
+  };
+
+  test("the same query embeds once, however often it is asked", async () => {
+    const fetchSpy = vi.fn(async () => ({ ok: true, json: async () => ({ embeddings: [[1, 2, 3]] }) }));
+    vi.stubGlobal("fetch", fetchSpy);
+
+    expect(await embedTexts(["retry logic"], config)).toEqual([[1, 2, 3]]);
+    expect(await embedTexts(["retry logic"], config)).toEqual([[1, 2, 3]]);
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
+  });
+
+  test("backfill batches are never served from cache", async () => {
+    const fetchSpy = vi.fn(async () => ({ ok: true, json: async () => ({ embeddings: [[1, 2, 3]] }) }));
+    vi.stubGlobal("fetch", fetchSpy);
+
+    await embedTexts(["a"], config, { background: true });
+    await embedTexts(["a"], config, { background: true });
+    expect(fetchSpy).toHaveBeenCalledTimes(2);
+  });
+});
+
+// ─────────────────────────────────────────────────────────
+// Vector table maintenance
+// ─────────────────────────────────────────────────────────
+
+/** Records every SQL string prepared, so pushdown can be asserted. */
+function recordingDb(rows: Record<string, unknown[]>, counts: Record<string, number> = {}) {
+  const sqls: string[] = [];
+  return {
+    sqls,
+    exec: () => undefined,
+    prepare: (sql: string) => {
+      sqls.push(sql);
+      const key = Object.keys(rows).find(k => sql.includes(k));
+      const countKey = Object.keys(counts).find(k => sql.includes(k));
+      return {
+        all: () => (key ? rows[key] : []),
+        run: () => ({}),
+        get: () => (countKey ? { c: counts[countKey] } : { c: 0 }),
+      };
+    },
+  };
+}
+
+describe("pruneStaleModelVectors", () => {
+  test("evicts vectors from a model that is no longer in use", () => {
+    // Same-dimension vectors from a different model score plausible nonsense —
+    // worse than scoring 0, because nothing looks broken.
+    let deleted = "";
+    const db = {
+      exec: () => undefined,
+      prepare: (sql: string) => ({
+        get: () => ({ c: sql.includes("COUNT") ? 7 : 0 }),
+        run: () => { if (sql.startsWith("DELETE")) deleted = sql; return {}; },
+        all: () => [],
+      }),
+    };
+    expect(pruneStaleModelVectors(db, "bge-m3")).toBe(7);
+    expect(deleted).toContain("model != ?");
+  });
+
+  test("does nothing when every vector is current", () => {
+    const db = {
+      exec: () => undefined,
+      prepare: () => ({ get: () => ({ c: 0 }), run: () => ({}), all: () => [] }),
+    };
+    expect(pruneStaleModelVectors(db, "bge-m3")).toBe(0);
+  });
+});
+
+describe("vectorCoverage", () => {
+  test("reports how much of the store is actually embedded", () => {
+    const db = {
+      exec: () => undefined,
+      prepare: (sql: string) => ({
+        get: () => (sql.includes("FROM chunks")
+          ? { c: 100 }
+          : { c: 40, b: 40 * 1024 }),
+        all: () => [{ model: "bge-m3" }],
+        run: () => ({}),
+      }),
+    };
+    expect(vectorCoverage(db)).toEqual({ chunks: 100, vectors: 40, models: ["bge-m3"], bytes: 40960 });
+  });
+
+  test("a store without the table reports zeroes instead of throwing", () => {
+    const db = { exec: () => { throw new Error("no db"); }, prepare: () => { throw new Error("no db"); } };
+    expect(vectorCoverage(db).vectors).toBe(0);
+  });
+});
+
+describe("backfillVectors", () => {
+  afterEach(() => vi.unstubAllGlobals());
+
+  test("writes int8 blobs by default and float32 when asked", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => ({
+      ok: true,
+      json: async () => ({ embeddings: [[0.1, 0.2, 0.3, 0.4]] }),
+    })));
+
+    const written: unknown[][] = [];
+    const db = {
+      exec: () => undefined,
+      prepare: (sql: string) => ({
+        all: () => (sql.includes("LEFT JOIN chunk_vectors")
+          ? [{ rowid: 1, title: "t", content: "c" }]
+          : []),
+        get: () => ({ c: 0 }),
+        run: (...params: unknown[]) => { if (sql.startsWith("INSERT")) written.push(params); return {}; },
+      }),
+    };
+    const base = { url: "http://x", model: "bge-m3", timeoutMs: 500, backfillTimeoutMs: 500, backfillBatch: 1 };
+
+    expect(await backfillVectors(db, base, 1)).toBe(1);
+    expect((written[0][3] as Buffer).length).toBe(4); // int8: 1 byte per dim
+
+    written.length = 0;
+    expect(await backfillVectors(db, { ...base, quantize: false }, 1)).toBe(1);
+    expect((written[0][3] as Buffer).length).toBe(16); // float32
+  });
+});
+
+describe("semanticCandidates", () => {
+  test("pushes the source filter into the scan instead of filtering after", () => {
+    // Filtering afterwards meant a scoped search still paid cosine over every
+    // vector in the store — and could return nothing when the global top-K all
+    // belonged to other sources.
+    const db = recordingDb({});
+    semanticCandidates(db, [1, 0], { limit: 5, sourceFilter: "code:" });
+    const scan = db.sqls.find(s => s.includes("chunk_vectors"));
+    expect(scan).toContain("JOIN sources");
+    expect(scan).toContain("sources.label LIKE ?");
+  });
+
+  test("scans the whole table only when no filter is given", () => {
+    const db = recordingDb({});
+    semanticCandidates(db, [1, 0], { limit: 5 });
+    expect(db.sqls.some(s => s === "SELECT chunk_rowid, dim, vec FROM chunk_vectors")).toBe(true);
+  });
+
+  test("streams through iterate() when the driver offers it", () => {
+    let iterated = false;
+    const db = {
+      exec: () => undefined,
+      prepare: () => ({
+        all: () => [],
+        get: () => ({ c: 0 }),
+        run: () => ({}),
+        iterate: () => { iterated = true; return []; },
+      }),
+    };
+    semanticCandidates(db, [1, 0], { limit: 5 });
+    expect(iterated).toBe(true);
+  });
+});
+
+describe("hybrid telemetry", () => {
+  beforeEach(() => {
+    resetHybridTelemetry();
+    clearEmbeddingCache();
+  });
+  afterEach(() => vi.unstubAllGlobals());
+
+  test("counts a pass that changed the ranking", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => ({
+      ok: true,
+      json: async () => ({ embeddings: [[1, 0]] }),
+    })));
+
+    const vec = encodeVectorInt8([1, 0]);
+    const db = {
+      exec: () => undefined,
+      prepare: (sql: string) => ({
+        all: () => {
+          if (sql.includes("FROM chunk_vectors")) return [{ chunk_rowid: 9, dim: 2, vec }];
+          if (sql.includes("FROM chunks")) {
+            return [{
+              rowid: 9, title: "backoff", content: "exponential backoff",
+              content_type: null, timestamp: null, session_id: null, source: "docs",
+            }];
+          }
+          return [];
+        },
+        get: () => ({ c: 0 }),
+        run: () => ({}),
+      }),
+    };
+
+    const out = await hybridSearch({
+      db,
+      query: "why does it keep retrying",
+      lexical: [{ source: "docs", title: "cache", content: "cache invalidation" }],
+      limit: 3,
+      backfillBatch: 0,
+      config: { url: "http://x", model: "bge-m3", timeoutMs: 500, backfillTimeoutMs: 500, backfillBatch: 0 },
+    });
+
+    expect(out).toHaveLength(2);
+    const t = getHybridTelemetry();
+    expect(t.searches).toBe(1);
+    expect(t.withCandidates).toBe(1);
+    expect(t.changedRanking).toBe(1);
   });
 });

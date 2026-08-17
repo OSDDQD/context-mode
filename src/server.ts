@@ -31,10 +31,14 @@ import {
 } from "./runtime.js";
 import { classifyNonZeroExit } from "./exit-classify.js";
 import { findWriteCommands } from "./read-only.js";
-import { drainCodeIndexQueue } from "./session/code-index.js";
+import { drainCodeIndexQueue, bootstrapCodeIndex, pruneDeletedCodeSources } from "./session/code-index.js";
 import { indexHostMemory } from "./session/host-memory.js";
 import { searchAutoMemory } from "./search/auto-memory.js";
-import { hybridSearch, type HybridDb, type LexicalResult } from "./search/hybrid.js";
+import {
+  hybridSearch, vectorCoverage, getHybridTelemetry,
+  type HybridDb, type LexicalResult,
+} from "./search/hybrid.js";
+import { resolveEmbeddingConfig } from "./search/embeddings.js";
 import { isFetchPassthroughUrl, passthroughFetchError } from "./fetch-passthrough.js";
 import { startLifecycleGuard, noteMcpActivity, noteRequestStart, noteRequestEnd, attachMcpActivityTap } from "./lifecycle.js";
 import { charSafePrefix } from "./truncate.js";
@@ -827,17 +831,87 @@ function maybeIndexHostMemory(store: ContentStore): void {
 /**
  * Drain the PostToolUse code-index queue into the store (see
  * src/session/code-index.ts). Opt out with CONTEXT_MODE_CODE_INDEX=0.
+ *
+ * Three passes, in the order that keeps the index honest: seed the project's
+ * tracked files once so a fresh session is not searching an empty index, evict
+ * sources whose file is gone so nothing stale answers, then index the edits.
+ * Seeding and pruning run once per server process (`_store` is memoized).
  */
 function maybeIndexEditedFiles(store: ContentStore): void {
   if (process.env.CONTEXT_MODE_CODE_INDEX === "0") return;
+  const sessionsDir = getSessionDir();
+  const projectDir = getProjectDir();
+  const attribution = currentAttribution();
+
+  if (process.env.CONTEXT_MODE_CODE_INDEX_BOOTSTRAP !== "0") {
+    try {
+      const rawBatch = Number.parseInt(process.env.CONTEXT_MODE_CODE_INDEX_BOOTSTRAP_BATCH ?? "", 10);
+      bootstrapCodeIndex({
+        store, sessionsDir, projectDir, attribution,
+        ...(Number.isFinite(rawBatch) && rawBatch > 0 ? { batchSize: rawBatch } : {}),
+      });
+    } catch { /* best-effort — seeding never blocks a tool call */ }
+  }
+  try {
+    pruneDeletedCodeSources({ store, projectDir });
+  } catch { /* best-effort */ }
+
   try {
     drainCodeIndexQueue({
       store,
-      sessionsDir: getSessionDir(),
-      projectDir: getProjectDir(),
-      attribution: currentAttribution(),
+      sessionsDir,
+      projectDir,
+      attribution,
     });
   } catch { /* best-effort — indexing never blocks a tool call */ }
+}
+
+/**
+ * The semantic layer's own status line for ctx_stats.
+ *
+ * "Hybrid search is configured" and "hybrid search can answer" are different
+ * states: a cold index degrades silently to lexical, which looks exactly like
+ * working. Printing coverage plus how often fusion actually changed a ranking
+ * makes both the warm-up and the payoff visible — and answers the only
+ * question worth asking about an optional side-car: is it earning its latency?
+ *
+ * @returns A report block, or "" when there is nothing to say.
+ */
+function semanticIndexReport(): string {
+  try {
+    const coverage = vectorCoverage(getStore().rawDb() as unknown as HybridDb);
+    const configured = resolveEmbeddingConfig();
+    if (coverage.vectors === 0 && !configured) return "";
+
+    const pct = coverage.chunks > 0
+      ? Math.min(100, Math.round((coverage.vectors / coverage.chunks) * 100))
+      : 0;
+    const model = coverage.models[0] ?? configured?.model ?? "unknown";
+    const mb = coverage.bytes >= 1024 * 1024
+      ? `${(coverage.bytes / (1024 * 1024)).toFixed(1)} MB`
+      : `${Math.round(coverage.bytes / 1024)} KB`;
+
+    const out: string[] = ["", "  ─── Semantic index (hybrid search) ───", ""];
+    out.push(
+      `  Embedded: ${coverage.vectors.toLocaleString()} of ${coverage.chunks.toLocaleString()} chunks (${pct}%) · ${model} · ${mb}`,
+    );
+    if (pct < 100) {
+      out.push("  Backfill runs in the background on every search; uncovered chunks stay lexical-only.");
+    }
+    const t = getHybridTelemetry();
+    if (t.searches > 0) {
+      out.push(
+        `  This session: ${t.searches} semantic pass${t.searches === 1 ? "" : "es"}, ` +
+        `${t.withCandidates} returned neighbours, ${t.changedRanking} changed the ranking.`,
+      );
+    }
+    if (coverage.models.length > 1) {
+      out.push(`  Mixed models present (${coverage.models.join(", ")}) — stale vectors are evicted on next backfill.`);
+    }
+    return out.join("\n") + "\n";
+  } catch {
+    return "";
+  }
 }
 
 // ─────────────────────────────────────────────────────────
@@ -4440,6 +4514,8 @@ server.registerTool(
       try { multiAdapter = getMultiAdapterLifetimeStats(); } catch { /* never block ctx_stats */ }
       text = formatReport(report, VERSION, _latestVersion, (lifetime || multiAdapter) ? { lifetime, multiAdapter } : undefined);
     }
+
+    text += semanticIndexReport();
 
     return trackResponse("ctx_stats", {
       content: [{ type: "text" as const, text }],
