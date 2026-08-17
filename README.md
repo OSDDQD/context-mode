@@ -9,6 +9,10 @@
 > them (upstream #938/#984/#1006), a fix that finally makes Claude Code's own memory files searchable from
 > `ctx_search`, a `ctx upgrade` that pulls from *this* repo instead of silently reinstalling upstream over it,
 > a one-command upstream merge that survives the tracked bundles, and a contract test for ADR-0003.
+> It also carries upstream's **fetch extraction ladder** (merged from `next` ahead of `upstream/main`): a
+> JavaScript-rendered shell is no longer reported as a successful fetch, the article is extracted instead of
+> the whole page transliterated, and SPA pages are recovered browser-free via their `.md` sibling or the host's
+> `llms.txt`.
 > See **[docs/FORK-CHANGES.md](docs/FORK-CHANGES.md)** for the full rationale, env vars, and trade-offs.
 
 **The other half of the context problem.**

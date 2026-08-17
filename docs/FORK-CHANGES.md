@@ -428,6 +428,45 @@ denial (curl, wget, inline HTTP, WebFetch) must avoid restriction vocabulary
 *and* name a concrete alternative, while CASE B security denials keep reading
 like the restrictions they are.
 
+## Merged ahead of upstream: the fetch extraction ladder
+
+`src/fetch/blocks.ts`, `src/fetch/extract.ts`, `src/fetch/page-store.ts`, `src/server.ts`
+
+Not a fork change — upstream's `next` branch, merged here before it reached
+`upstream/main`, because it fixes a failure this fork hits daily: fetching
+documentation that is client-rendered.
+
+- **A JavaScript shell is no longer a successful fetch.** excalidraw.com turned
+  6,862 B of HTML into 21 B of markdown — the page `<title>` — and that was
+  indexed as though it were the document. `classifyExtraction()` now answers
+  "did this produce an article?" with one definition shared by parent and
+  subprocess.
+- **The article is extracted, not the whole page transliterated.** Chrome is
+  what repeats across pages of the same host; content is what does not. A block
+  is labelled `template` only when the identical block was already seen on a
+  *different* page of that host — no per-page threshold, which upstream's
+  measurements show cannot work (28.3% link-only lines on Stripe vs 0.3% on
+  Resend). Nothing is dropped: the full document is stored verbatim in
+  `fetch-pages.db`, only content blocks reach FTS.
+- **Rung 2 recovers SPA pages browser-free**: the page's `.md` sibling, then the
+  host's `llms.txt` — fired only when the cheaper rungs produced no article, so
+  the happy path is still one request. Upstream measured 36 doc pages: 4 had no
+  article in the HTTP response, 4 of 4 recovered without a browser, 0 needed one.
+
+Verified end-to-end against the bundle this fork ships:
+
+| Page | Result |
+|---|---|
+| `resend.com/docs/api-reference/emails/send-email` | rung 1 — site served markdown to the `Accept` header, 12,410 B, 6 sections |
+| `developer.apple.com/documentation/swiftui/view` | rung 2a — rung 1 returned a JS shell, the `.md` sibling carried the article, 5,593 B, 11 sections |
+
+The Apple page is the one that used to produce 36 bytes and call it success.
+
+Every fork feature on this code path was re-checked after the merge: the
+Artifact-URL passthrough, the proxy opt-in (which is where the single merge
+conflict landed), compact descriptions, `ctx_gather`, hybrid search, host
+memory and the code index.
+
 ## New environment variables
 
 | Variable | Default | Effect |
@@ -455,7 +494,8 @@ like the restrictions they are.
 
 ## Tests
 
-`npm test` — 4853 passing, 38 skipped. New suites:
+`npm test` — 4910 passing, 38 skipped (4853 of them this fork's, the rest
+upstream's three new fetch suites). New suites:
 
 - `tests/cli/fork-info.test.ts` — upgrade-source resolution, fork identity
 - `tests/core/store-delete-source.test.ts` — source eviction
