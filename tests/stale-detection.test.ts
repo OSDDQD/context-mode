@@ -145,12 +145,16 @@ describe("Hash-based stale detection", () => {
     expect(results.length).toBeGreaterThan(0);
     expect(results[0].content).toContain("Redis");
 
-    // Source metadata should NOT have a file_path or content_hash
-    // (only file-backed sources get stale detection)
+    // No file_path: stale detection only ever applies to file-backed sources,
+    // and #refreshStaleSources selects on `file_path IS NOT NULL`.
+    //
+    // A content_hash IS recorded, though — since ADR-0007 it is what lets a
+    // repeated command capture skip its rewrite, and command captures are most
+    // of what this store holds.
     const meta = store.getSourceMeta("redis-guide");
     expect(meta).not.toBeNull();
     expect((meta as any).filePath).toBeNull();
-    expect((meta as any).contentHash).toBeNull();
+    expect((meta as any).contentHash).toMatch(/^[0-9a-f]{64}$/);
   });
 
   test("index a file, delete it, search returns results without crashing", () => {

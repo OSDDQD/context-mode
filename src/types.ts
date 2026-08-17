@@ -91,6 +91,12 @@ export interface IndexResult {
   label: string;
   totalChunks: number;
   codeChunks: number;
+  /**
+   * The content was already indexed byte for byte, so nothing was rewritten.
+   * `sourceId` is -1 in this case: the caller did not create a row, and the
+   * counts describe what is already stored. See ADR-0007.
+   */
+  skipped?: boolean;
 }
 
 /**

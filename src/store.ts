@@ -535,6 +535,8 @@ export class ContentStore {
   #stmtDeleteChunksByLabel!: PreparedStatement;
   #stmtDeleteChunksTrigramByLabel!: PreparedStatement;
   #stmtDeleteSourcesByLabel!: PreparedStatement;
+  /** Lazy: only the content-hash skip path uses it. */
+  #stmtTouchSource?: PreparedStatement;
 
   // Search path (hot)
   #stmtSearchPorter!: PreparedStatement;
@@ -1056,13 +1058,77 @@ export class ContentStore {
       }
     }
     const label = source ?? path ?? "untitled";
-    const chunks = this.#chunkMarkdown(text);
 
-    // Stale detection: store file_path + SHA-256 for file-backed sources
+    // Stale detection: file_path + SHA-256. Hashed for EVERY source, not only
+    // file-backed ones — a batch command re-run with identical output is just
+    // as skippable as an unchanged file, and that is the common case for the
+    // command captures that dominate this index.
     const filePath = path ?? undefined;
-    const contentHash = filePath ? createHash("sha256").update(text).digest("hex") : undefined;
+    const contentHash = createHash("sha256").update(text).digest("hex");
 
+    const unchanged = this.#skipUnchanged(label, filePath, contentHash);
+    if (unchanged) return unchanged;
+
+    const chunks = this.#chunkMarkdown(text);
     return withRetry(() => this.#insertChunks(chunks, label, text, filePath, contentHash, attribution));
+  }
+
+  /**
+   * Return the existing result when this exact content is already indexed.
+   *
+   * Re-indexing was unconditional even though `content_hash` was already being
+   * written — the column was used for staleness detection and never consulted
+   * on the write path. Skipping buys two things beyond the FTS5 work avoided:
+   *
+   * - `indexed_at` moves forward, so `#refreshStaleSources` stops re-reading
+   *   the file on every single search (its mtime gate compares against it);
+   * - the chunk rowids survive, and `chunk_vectors` is keyed on `chunks.rowid`.
+   *   Every re-index of an unchanged file used to orphan its embeddings and
+   *   make the backfill compute them again.
+   *
+   * The trade, accepted explicitly in ADR-0007: a skipped chunk keeps the
+   * `session_id` of the session that first indexed it. Re-attributing means an
+   * UPDATE on an FTS5 column, which changes the rowid and destroys the very
+   * saving this exists for. First writer wins;
+   * `CONTEXT_MODE_INDEX_HASH_SKIP_REATTRIBUTE=1` forces the rewrite for anyone
+   * who needs per-session attribution more than they need the cache.
+   *
+   * @returns The unchanged source's result, or null when indexing must proceed.
+   */
+  #skipUnchanged(label: string, filePath: string | undefined, contentHash: string): IndexResult | null {
+    if (process.env.CONTEXT_MODE_INDEX_HASH_SKIP === "0") return null;
+    if (process.env.CONTEXT_MODE_INDEX_HASH_SKIP_REATTRIBUTE === "1") return null;
+    try {
+      const meta = this.getSourceMeta(label);
+      if (!meta) return null;
+      // Legacy rows carry no hash: index once more to record one, then skip.
+      if (!meta.contentHash || meta.contentHash !== contentHash) return null;
+      // A label that moved to a different file is a different source.
+      if ((meta.filePath ?? null) !== (filePath ?? null)) return null;
+
+      this.#touchSource(label);
+      return {
+        sourceId: -1,
+        label,
+        totalChunks: meta.chunkCount,
+        codeChunks: meta.codeChunkCount,
+        skipped: true,
+      };
+    } catch {
+      // Any doubt — index it. A redundant re-index costs milliseconds; a
+      // wrongly skipped one loses the content.
+      return null;
+    }
+  }
+
+  /** Move `indexed_at` forward without touching the chunks. */
+  #touchSource(label: string): void {
+    try {
+      this.#stmtTouchSource ??= this.#db.prepare(
+        "UPDATE sources SET indexed_at = CURRENT_TIMESTAMP WHERE label = ?",
+      );
+      this.#stmtTouchSource.run(label);
+    } catch { /* the skip is still valid without the touch */ }
   }
 
   // ── Index Directory (#687) ──
@@ -1616,7 +1682,14 @@ export class ContentStore {
           closeSync(fd);
         }
         const newHash = createHash("sha256").update(newContent).digest("hex");
-        if (newHash === src.content_hash) continue; // content identical — skip
+        if (newHash === src.content_hash) {
+          // Content identical — the mtime moved without the bytes changing
+          // (a touch, a checkout, a formatter that rewrote the same text).
+          // Move indexed_at forward so the mtime gate above catches it next
+          // time instead of re-reading the file on every single search.
+          this.#touchSource(src.label);
+          continue;
+        }
 
         // File genuinely changed — re-index using already-read content
         // (avoids a second open/read race) but preserve file_path/hash
