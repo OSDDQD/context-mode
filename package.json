@@ -8,7 +8,7 @@
     "version": "4"
   },
   "type": "module",
-  "description": "MCP plugin that saves 98% of your context window. Works with Claude Code, Gemini CLI, VS Code Copilot, OpenCode, and Codex CLI. Sandboxed code execution, FTS5 knowledge base, and intent-driven search.",
+  "description": "MCP plugin that saves 98% of your context window. Works with Claude Code, Gemini CLI, VS Code Copilot, OpenCode, and Codex CLI. Out-of-context code execution, FTS5 knowledge base, and intent-driven search.",
   "author": "Mert Koseoğlu",
   "license": "Elastic-2.0",
   "keywords": [

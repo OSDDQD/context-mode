@@ -86,7 +86,7 @@ export const OPENCLAW_TOOL_DEFS: readonly OpenClawToolDef[] = [
   {
     name: "ctx_execute",
     description:
-      "Execute code in a sandboxed subprocess. Only stdout enters context. Prefer over Bash for any command producing >20 lines.",
+      "Execute code in a separate subprocess. Only stdout enters context. Prefer over Bash for any command producing >20 lines.",
     parameters: {
       type: "object",
       properties: {
@@ -102,7 +102,7 @@ export const OPENCLAW_TOOL_DEFS: readonly OpenClawToolDef[] = [
   {
     name: "ctx_execute_file",
     description:
-      "Execute code with a file path. Only printed summary enters context — raw file stays in sandbox.",
+      "Execute code with a file path. Only printed summary enters context — raw file stays in the subprocess.",
     parameters: {
       type: "object",
       properties: {

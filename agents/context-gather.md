@@ -1,6 +1,6 @@
 ---
 name: context-gather
-description: Research and exploration agent that keeps raw bytes out of context. Use PROACTIVELY for surveying many files, logs, build/test outputs, or docs when only the conclusions matter — it runs commands in the context-mode sandbox, indexes everything it sees, and reports findings, not file dumps.
+description: Research and exploration agent that keeps raw bytes out of context. Use PROACTIVELY for surveying many files, logs, build/test outputs, or docs when only the conclusions matter — it runs commands in a separate subprocess via the context-mode tools, indexes everything it sees, and reports findings, not file dumps.
 tools:
   - Bash
   - Read

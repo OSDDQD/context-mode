@@ -310,13 +310,13 @@ export function registerEmptyToolsListHandler(target: McpServer = server): void 
  */
 const COMPACT_TOOL_DESCRIPTIONS: Record<string, string> = {
   ctx_execute:
-    "Run code in a sandboxed subprocess (javascript, typescript, python, shell, ruby, go, rust, php, perl, r, elixir, csharp). " +
-    "Only what you print enters the conversation — the data your code reads stays in the sandbox. " +
+    "Run code in a separate subprocess (javascript, typescript, python, shell, ruby, go, rust, php, perl, r, elixir, csharp). " +
+    "Only what you print enters the conversation — the data your code reads stays in the subprocess. " +
     "Use it to derive an answer FROM data (filter, count, parse, aggregate) instead of reading the raw bytes. " +
     "`background: true` keeps servers/daemons alive; `intent` auto-indexes large output for ctx_search instead of returning it. " +
     "File writes do NOT persist — use Write/Edit for those.",
   ctx_execute_file:
-    "Read a file into a sandboxed FILE_CONTENT variable and run code over it; only what you print enters the conversation. " +
+    "Read a file into a FILE_CONTENT variable in a separate subprocess and run code over it; only what you print enters the conversation. " +
     "Use when you need to KNOW something about a file (counts, matches, parsed structure) rather than SEE all of it. " +
     "Use the native Read tool instead when you intend to edit the file.",
   ctx_batch_execute:
@@ -2208,17 +2208,18 @@ server.registerTool(
   {
     // #852: surface code execution in the host approval prompt's title (the
     // only server-controlled field the MCP permission UI renders besides args).
-    title: "Run code in a sandbox (executes the supplied code)",
-    // #846: runs arbitrary code in a sandbox with full network access.
+    title: "Run code in a separate process (executes the supplied code)",
+    // #846: runs arbitrary code in a child process with full network access,
+    // the project root as cwd, and the parent's filesystem permissions.
     annotations: {
       readOnlyHint: false,
       destructiveHint: true,
       idempotentHint: false,
       openWorldHint: true,
     },
-    description: `Run code in a sandboxed subprocess.${bunNote} Languages: ${langList}.
+    description: `Run code in a separate subprocess.${bunNote} Languages: ${langList}.
 
-Think-in-Code — the core philosophy: the bytes your code processes never enter your conversation memory; only what you console.log() does. Reading a 700 KB log directly means 700 KB of your remaining reasoning capacity gets spent on raw bytes. Running code over that same log in this sandbox and printing a 3 KB summary leaves you with 697 KB of capacity for the actual work.
+Think-in-Code — the core philosophy: the bytes your code processes never enter your conversation memory; only what you console.log() does. Reading a 700 KB log directly means 700 KB of your remaining reasoning capacity gets spent on raw bytes. Running code over that same log in the subprocess and printing a 3 KB summary leaves you with 697 KB of capacity for the actual work.
 
 Concrete shape — analyze 47 source files without reading any of them:
   ctx_execute(language: "javascript", code: \`
@@ -2605,14 +2606,15 @@ server.registerTool(
     // raw args — the title is the one server-controlled signal, so make it
     // unambiguously announce code execution + file read for the reviewer.
     title: "Run code over a file (executes code, reads the given path)",
-    // #846: runs arbitrary code over a file in a sandbox with full network access.
+    // #846: runs arbitrary code over a file in a child process with full
+    // network access and the parent's filesystem permissions.
     annotations: {
       readOnlyHint: false,
       destructiveHint: true,
       idempotentHint: false,
       openWorldHint: true,
     },
-    description: `Read a file into a sandboxed FILE_CONTENT variable and run code over it. Only what you console.log() enters your conversation — the file bytes stay in the sandbox.
+    description: `Read a file into a FILE_CONTENT variable in a separate subprocess and run code over it. Only what you console.log() enters your conversation — the file bytes stay in the subprocess.
 
 Think-in-Code applied to file-level analysis: Reading the whole file means every byte enters your conversation memory and costs reasoning capacity for the rest of the session. Running code over it here lets you keep the raw bytes out and only the derived answer in. Same principle as ctx_execute, scoped to one named file via the FILE_CONTENT variable.
 

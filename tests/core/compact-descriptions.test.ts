@@ -22,7 +22,8 @@ describe("resolveToolDescription", () => {
     delete process.env.CONTEXT_MODE_TOOL_DESCRIPTIONS;
     const out = resolveToolDescription("ctx_execute", "VERBOSE ORIGINAL");
     expect(out).not.toBe("VERBOSE ORIGINAL");
-    expect(String(out)).toContain("sandbox");
+    // "separate subprocess", not "sandboxed subprocess" — ADR-0006.
+    expect(String(out)).toContain("subprocess");
   });
 
   test("CONTEXT_MODE_TOOL_DESCRIPTIONS=full restores the authored text", () => {
@@ -79,7 +80,7 @@ describe("shipped descriptions", () => {
   test("each heavy tool still names its purpose in the compact text", () => {
     delete process.env.CONTEXT_MODE_TOOL_DESCRIPTIONS;
     const expectations: Record<string, string[]> = {
-      ctx_execute: ["sandbox", "print"],
+      ctx_execute: ["subprocess", "print"],
       ctx_execute_file: ["FILE_CONTENT"],
       ctx_batch_execute: ["indexed", "concurrency"],
       ctx_search: ["queries"],

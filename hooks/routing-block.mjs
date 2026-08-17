@@ -18,7 +18,7 @@ export function createRoutingBlock(t, options = {}) {
   return `
 <context_window_protection>
   <priority_instructions>
-    Every byte a tool returns enters your conversation memory and costs reasoning capacity for the rest of the session. The context-mode tools let you do the work in a sandbox and surface only the derived answer — the raw bytes stay out. Think-in-Code: program the analysis, do not compute it by reading raw data into your conversation.
+    Every byte a tool returns enters your conversation memory and costs reasoning capacity for the rest of the session. The context-mode tools let you do the work in a separate subprocess and surface only the derived answer — the raw bytes stay out. Think-in-Code: program the analysis, do not compute it by reading raw data into your conversation.
   </priority_instructions>
 ${toolSearchBootstrap ? `
   <deferred_tool_bootstrap>
