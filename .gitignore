@@ -5,6 +5,8 @@ packages/*/dist/
 .DS_Store
 /tmp/
 tmp.*/
+# Scratch files some suites drop in the repo root (f0.tmp, f1.tmp, …).
+/*.tmp
 *.db
 server.bundle.mjs
 cli.bundle.mjs
