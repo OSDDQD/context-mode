@@ -1244,6 +1244,21 @@ async function insight() {
  * Upgrade — adapter-aware hook configuration
  * ------------------------------------------------------- */
 
+/**
+ * Budget for the `git clone` the upgrade depends on.
+ *
+ * The old hard-coded 30s was a guess that this repository has outgrown:
+ * measured 51s for `git clone --depth 1` of the 20 MB tree on a working
+ * connection, so the upgrade could never succeed here — it timed out, reported
+ * "GitHub pull failed", and left the old version on disk every single run. A
+ * clone is a one-off cost the user is already waiting on; three minutes is a
+ * fairer ceiling than half a minute, and slow links can raise it further.
+ */
+function resolveCloneTimeoutMs(env: NodeJS.ProcessEnv = process.env): number {
+  const raw = Number.parseInt(env.CONTEXT_MODE_UPGRADE_TIMEOUT_MS ?? "", 10);
+  return Number.isFinite(raw) && raw > 0 ? raw : 180_000;
+}
+
 async function upgrade(opts?: { platform?: string }) {
   if (process.stdout.isTTY) console.clear();
 
@@ -1343,7 +1358,7 @@ async function upgrade(opts?: { platform?: string }) {
   try {
     execFileSync(
       "git", ["clone", "--depth", "1", upgradeRepo.url, tmpDir],
-      { stdio: "pipe", timeout: 30000 },
+      { stdio: "pipe", timeout: resolveCloneTimeoutMs() },
     );
     s.stop("Downloaded");
 

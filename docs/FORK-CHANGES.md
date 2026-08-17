@@ -405,6 +405,13 @@ release.
 `package.json` — the same role `version` plays upstream. Skip it and installs
 will keep reporting themselves up to date while running older code.
 
+**And the clone it all depends on got a realistic budget.** The `git clone`
+carried a hard-coded 30 s timeout; this tree measures 51 s for
+`git clone --depth 1` (20 MB) on a working connection, so the upgrade could
+never finish here — it timed out, printed "GitHub pull failed", and left the
+old version on disk on every run. The ceiling is now 180 s, overridable with
+`CONTEXT_MODE_UPGRADE_TIMEOUT_MS`.
+
 ## 11. Merging upstream without drowning in bundle conflicts
 
 `.gitattributes`, `scripts/sync-upstream.mjs`
@@ -502,6 +509,7 @@ memory and the code index.
 | `CONTEXT_MODE_EMBEDDINGS_AUTODETECT` | on | `0` never probes localhost for a runtime |
 | `CONTEXT_MODE_EMBEDDINGS` | on | `0` disables the semantic layer entirely |
 | `CONTEXT_MODE_UPGRADE_REPO` | fork marker → git origin → upstream | Repository `ctx upgrade` pulls from |
+| `CONTEXT_MODE_UPGRADE_TIMEOUT_MS` | `180000` | Budget for the upgrade's `git clone` |
 | `CONTEXT_MODE_ALLOW_PROXY` | off | `1` lets the fetch subprocess use the ambient proxy |
 | `CONTEXT_MODE_FETCH_PASSTHROUGH` | claude.ai artifacts | Extra hosts/regexes the WebFetch redirect must skip |
 | `CONTEXT_MODE_INDEX_HOST_MEMORY` | on | `0` stops indexing the host's memory files into FTS5 |
