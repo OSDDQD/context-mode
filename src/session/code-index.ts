@@ -21,10 +21,18 @@
  */
 
 import { execFileSync } from "node:child_process";
-import { existsSync, readFileSync, statSync, unlinkSync, writeFileSync } from "node:fs";
+import { createHash } from "node:crypto";
+import { appendFileSync, existsSync, readFileSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { join, relative, extname, isAbsolute, basename } from "node:path";
 
-/** Queue filename, resolved inside the sessions storage dir. */
+/**
+ * Shared inbox filename, resolved inside the sessions storage dir.
+ *
+ * Hooks append here without knowing which project's server will drain it —
+ * they run in whatever directory the agent is working in, and the sessions dir
+ * is shared by every project on the machine. Drains claim the paths that belong
+ * to them and put the rest back for their owner.
+ */
 export const CODE_INDEX_QUEUE = "code-index-queue.txt";
 
 /** Bookkeeping for the one-time seed pass, resolved inside the sessions dir. */
@@ -118,9 +126,30 @@ export function isIndexableSource(filePath: string): boolean {
   return INDEXABLE_EXTENSIONS.has(ext);
 }
 
-/** @returns Absolute path of the queue file for a given sessions storage dir. */
-export function codeIndexQueuePath(sessionsDir: string): string {
-  return join(sessionsDir, CODE_INDEX_QUEUE);
+/** Project scoping is on unless CONTEXT_MODE_CODE_INDEX_PROJECT_SCOPE=0. */
+export function codeIndexProjectScopeEnabled(): boolean {
+  return process.env.CONTEXT_MODE_CODE_INDEX_PROJECT_SCOPE !== "0";
+}
+
+/**
+ * Stable per-project suffix for the backlog filename.
+ *
+ * Deliberately its own hash rather than the content-store's: nothing needs the
+ * two to agree, and borrowing that one would drag the SessionDB module (and
+ * better-sqlite3 with it) into a file that is imported by a hook path.
+ */
+function queueScopeHash(projectDir: string): string {
+  return createHash("sha256").update(projectDir).digest("hex").slice(0, 16);
+}
+
+/**
+ * @param projectDir When given, the project's own backlog file; otherwise the
+ *   shared inbox every hook appends to.
+ * @returns Absolute path of a queue file inside the sessions storage dir.
+ */
+export function codeIndexQueuePath(sessionsDir: string, projectDir?: string): string {
+  if (!projectDir || !codeIndexProjectScopeEnabled()) return join(sessionsDir, CODE_INDEX_QUEUE);
+  return join(sessionsDir, `code-index-queue-${queueScopeHash(projectDir)}.txt`);
 }
 
 /** @returns The label a file is indexed under, relative to the project root. */
@@ -128,6 +157,12 @@ export function codeSourceLabel(filePath: string, projectDir?: string): string {
   return projectDir && filePath.startsWith(projectDir)
     ? `code:${relative(projectDir, filePath)}`
     : `code:${filePath}`;
+}
+
+/** @returns true when `filePath` lives inside `projectDir`. */
+function isInsideProject(filePath: string, projectDir: string): boolean {
+  const rel = relative(projectDir, filePath);
+  return rel !== "" && !rel.startsWith("..") && !isAbsolute(rel);
 }
 
 /**
@@ -149,26 +184,47 @@ export function drainCodeIndexQueue(opts: {
 }): number {
   const { store, sessionsDir, projectDir, attribution } = opts;
   const maxFiles = opts.maxFiles ?? 50;
-  const queuePath = codeIndexQueuePath(sessionsDir);
-  if (!existsSync(queuePath)) return 0;
+  const scoped = codeIndexProjectScopeEnabled() && !!projectDir;
+  const inboxPath = codeIndexQueuePath(sessionsDir);
+  // Own backlog first: those paths were already claimed by this project.
+  const queuePaths = scoped ? [codeIndexQueuePath(sessionsDir, projectDir), inboxPath] : [inboxPath];
 
-  let paths: string[];
-  try {
-    const raw = readFileSync(queuePath, "utf-8");
-    // Newest wins: a file edited five times this turn is indexed once.
-    paths = [...new Set(raw.split(/\r?\n/).map(l => l.trim()).filter(Boolean))];
-  } catch {
-    return 0;
+  const seen = new Set<string>();
+  const claimed: string[] = [];
+  const foreign: string[] = [];
+  let sawQueue = false;
+
+  for (const queuePath of queuePaths) {
+    if (!existsSync(queuePath)) continue;
+    sawQueue = true;
+    let lines: string[] = [];
+    try {
+      lines = readFileSync(queuePath, "utf-8").split(/\r?\n/).map(l => l.trim()).filter(Boolean);
+    } catch { /* unreadable — drop it below along with the rest */ }
+
+    // Clear the queue BEFORE indexing. If indexing throws halfway, the next
+    // edit re-enqueues the file — better than replaying a poisoned queue on
+    // every store open.
+    try { unlinkSync(queuePath); } catch { /* raced with another drain */ }
+
+    for (const line of lines) {
+      // Newest wins: a file edited five times this turn is indexed once.
+      if (seen.has(line)) continue;
+      seen.add(line);
+      // A path outside this project belongs to another project's store. It used
+      // to be indexed here anyway, because the inbox is shared and whichever
+      // server opened first swallowed everything — measured: 48 of 253 `code:`
+      // sources in this project's DB were other repositories. Hand it back
+      // instead, so its own server can claim it.
+      if (scoped && !isInsideProject(line, projectDir!)) foreign.push(line);
+      else claimed.push(line);
+    }
   }
+  if (!sawQueue) return 0;
 
-  // Clear the queue BEFORE indexing. If indexing throws halfway, the next
-  // edit re-enqueues the file — better than replaying a poisoned queue on
-  // every store open.
-  try { unlinkSync(queuePath); } catch { /* raced with another drain */ }
-
-  const overflow = paths.slice(maxFiles);
+  const overflow = claimed.slice(maxFiles);
   let indexed = 0;
-  for (const filePath of paths.slice(0, maxFiles)) {
+  for (const filePath of claimed.slice(0, maxFiles)) {
     try {
       if (!isIndexableSource(filePath)) continue;
       if (!existsSync(filePath)) {
@@ -183,12 +239,59 @@ export function drainCodeIndexQueue(opts: {
     } catch { /* skip this file, keep draining */ }
   }
 
-  // Anything past the cap goes back so the next drain picks it up.
+  // Anything past the cap goes back so the next drain picks it up — into this
+  // project's own backlog, where another project's server will not take it.
   if (overflow.length > 0) {
-    try { writeFileSync(queuePath, overflow.join("\n") + "\n", "utf-8"); } catch { /* best-effort */ }
+    const backlogPath = codeIndexQueuePath(sessionsDir, scoped ? projectDir : undefined);
+    try { appendFileSync(backlogPath, overflow.join("\n") + "\n", "utf-8"); } catch { /* best-effort */ }
+  }
+  // Foreign paths go back to the shared inbox for their owner to claim.
+  if (foreign.length > 0) {
+    try { appendFileSync(inboxPath, foreign.join("\n") + "\n", "utf-8"); } catch { /* best-effort */ }
   }
 
   return indexed;
+}
+
+/**
+ * Evict `code:` sources whose file lives outside this project.
+ *
+ * Cleanup for what the shared inbox already leaked: before drains were
+ * project-scoped, whichever server opened first indexed every queued path, so a
+ * project's knowledge base ended up answering searches with another
+ * repository's source. Those labels are absolute (codeSourceLabel only goes
+ * relative inside the project), which is what makes them recognisable.
+ *
+ * @returns Number of sources evicted.
+ */
+export function pruneForeignCodeSources(opts: {
+  store: IndexTarget;
+  projectDir?: string;
+}): number {
+  const { store, projectDir } = opts;
+  if (!projectDir || !store.listSources || !store.deleteSource) return 0;
+  if (!codeIndexProjectScopeEnabled()) return 0;
+
+  let sources: Array<{ label: string }>;
+  try {
+    sources = store.listSources();
+  } catch {
+    return 0;
+  }
+
+  let removed = 0;
+  for (const { label } of sources) {
+    if (!label.startsWith("code:")) continue;
+    const path = label.slice("code:".length);
+    // Relative labels are this project's by construction — never touch them.
+    if (!isAbsolute(path)) continue;
+    if (isInsideProject(path, projectDir)) continue;
+    try {
+      store.deleteSource(label);
+      removed++;
+    } catch { /* skip, keep pruning */ }
+  }
+  return removed;
 }
 
 function evictCodeSource(store: IndexTarget, label: string): void {

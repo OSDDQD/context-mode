@@ -48,6 +48,14 @@ export interface SubagentQueueEntry {
   agentType?: string;
   /** transcript_path as the hook received it (may be the MAIN transcript). */
   transcriptPath?: string;
+  /**
+   * Project the subagent ran in. The queue file is shared by every project on
+   * the machine, so without this the first server to open swallows every
+   * digest — a transcript from one repository answering searches in another.
+   * Absent on entries written before this field existed; those stay
+   * first-come, which is the old behaviour and no worse than it was.
+   */
+  projectDir?: string;
   ts?: number;
 }
 
@@ -283,10 +291,12 @@ export function extractSubagentCapture(
 export function drainSubagentQueue(opts: {
   store: SubagentIndexTarget;
   sessionsDir: string;
+  /** When given, entries stamped with a different project are left for it. */
+  projectDir?: string;
   /** Cap per drain so a burst of agents can't stall a tool call. */
   maxAgents?: number;
 }): number {
-  const { store, sessionsDir } = opts;
+  const { store, sessionsDir, projectDir } = opts;
   const maxAgents = opts.maxAgents ?? 8;
   const queuePath = subagentQueuePath(sessionsDir);
   if (!existsSync(queuePath)) return 0;
@@ -310,11 +320,21 @@ export function drainSubagentQueue(opts: {
   // session is captured once, from its final transcript state.
   const byAgent = new Map<string, SubagentQueueEntry>();
   for (const entry of entries) byAgent.set(subagentSourceLabel(entry), entry);
-  const deduped = [...byAgent.values()];
+
+  // Entries belonging to another project go straight back: the queue file is
+  // shared machine-wide, and swallowing them here files another repository's
+  // transcript under this project's knowledge base.
+  const scoped = projectDir && process.env.CONTEXT_MODE_CODE_INDEX_PROJECT_SCOPE !== "0";
+  const foreign: SubagentQueueEntry[] = [];
+  const deduped: SubagentQueueEntry[] = [];
+  for (const entry of byAgent.values()) {
+    if (scoped && entry.projectDir && entry.projectDir !== projectDir) foreign.push(entry);
+    else deduped.push(entry);
+  }
 
   try { unlinkSync(queuePath); } catch { /* raced with another drain */ }
 
-  const overflow = deduped.slice(maxAgents);
+  const overflow = [...foreign, ...deduped.slice(maxAgents)];
   let indexed = 0;
   for (const entry of deduped.slice(0, maxAgents)) {
     try {

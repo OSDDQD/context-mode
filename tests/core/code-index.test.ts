@@ -5,7 +5,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   isIndexableSource, isSensitivePath, codeIndexQueuePath, drainCodeIndexQueue,
-  pruneDeletedCodeSources, bootstrapCodeIndex, CODE_INDEX_BOOTSTRAP_STATE,
+  pruneDeletedCodeSources, pruneForeignCodeSources, bootstrapCodeIndex,
+  CODE_INDEX_BOOTSTRAP_STATE,
 } from "../../src/session/code-index.js";
 
 let dir: string;
@@ -77,8 +78,24 @@ describe("drainCodeIndexQueue", () => {
     const count = drainCodeIndexQueue({ store, sessionsDir: dir, projectDir: dir, maxFiles: 2 });
 
     expect(count).toBe(2);
-    const remaining = readFileSync(codeIndexQueuePath(dir), "utf-8").trim();
+    // Overflow lands in this project's backlog, not the shared inbox.
+    const remaining = readFileSync(codeIndexQueuePath(dir, dir), "utf-8").trim();
     expect(remaining).toBe(files[2]);
+    expect(existsSync(codeIndexQueuePath(dir))).toBe(false);
+  });
+
+  test("the backlog is drained on the next pass", () => {
+    const files = ["a.ts", "b.ts", "c.ts"].map(n => {
+      const p = join(dir, n);
+      writeFileSync(p, "export const x = 1;\n");
+      return p;
+    });
+    writeFileSync(codeIndexQueuePath(dir), files.join("\n") + "\n");
+
+    const store = fakeStore();
+    drainCodeIndexQueue({ store, sessionsDir: dir, projectDir: dir, maxFiles: 2 });
+    expect(drainCodeIndexQueue({ store, sessionsDir: dir, projectDir: dir })).toBe(1);
+    expect(store.indexed.map(i => i.source)).toEqual(["code:a.ts", "code:b.ts", "code:c.ts"]);
   });
 
   test("a throwing store does not abort the drain", () => {
@@ -114,6 +131,95 @@ describe("drainCodeIndexQueue", () => {
 
     expect(drainCodeIndexQueue({ store, sessionsDir: dir, projectDir: dir })).toBe(0);
     expect(deleted).toEqual(["code:removed.ts"]);
+  });
+});
+
+describe("drainCodeIndexQueue — project scope", () => {
+  function fakeStore() {
+    const indexed: Array<{ path?: string; source?: string }> = [];
+    return {
+      indexed,
+      index(opts: { path?: string; source?: string }) { indexed.push(opts); return {}; },
+    };
+  }
+
+  let other: string;
+
+  beforeEach(() => {
+    other = mkdtempSync(join(tmpdir(), "ctx-code-index-other-"));
+  });
+
+  afterEach(() => {
+    rmSync(other, { recursive: true, force: true });
+    delete process.env.CONTEXT_MODE_CODE_INDEX_PROJECT_SCOPE;
+  });
+
+  test("a file from another project is not indexed and stays claimable", () => {
+    const mine = join(dir, "mine.ts");
+    const theirs = join(other, "theirs.ts");
+    writeFileSync(mine, "export const a = 1;\n");
+    writeFileSync(theirs, "export const b = 2;\n");
+    writeFileSync(codeIndexQueuePath(dir), [mine, theirs].join("\n") + "\n");
+
+    const store = fakeStore();
+    expect(drainCodeIndexQueue({ store, sessionsDir: dir, projectDir: dir })).toBe(1);
+    expect(store.indexed.map(i => i.source)).toEqual(["code:mine.ts"]);
+
+    // Handed back to the shared inbox — and the owning project picks it up.
+    expect(readFileSync(codeIndexQueuePath(dir), "utf-8").trim()).toBe(theirs);
+    const ownerStore = fakeStore();
+    expect(drainCodeIndexQueue({ store: ownerStore, sessionsDir: dir, projectDir: other })).toBe(1);
+    expect(ownerStore.indexed[0].source).toBe("code:theirs.ts");
+  });
+
+  test("labels for own files stay relative", () => {
+    const mine = join(dir, "nested", "deep.ts");
+    mkdirSync(join(dir, "nested"), { recursive: true });
+    writeFileSync(mine, "export const a = 1;\n");
+    writeFileSync(codeIndexQueuePath(dir), mine + "\n");
+
+    const store = fakeStore();
+    drainCodeIndexQueue({ store, sessionsDir: dir, projectDir: dir });
+    expect(store.indexed[0].source).toBe(join("code:nested", "deep.ts"));
+  });
+
+  test("CONTEXT_MODE_CODE_INDEX_PROJECT_SCOPE=0 restores the shared behaviour", () => {
+    process.env.CONTEXT_MODE_CODE_INDEX_PROJECT_SCOPE = "0";
+    const theirs = join(other, "theirs.ts");
+    writeFileSync(theirs, "export const b = 2;\n");
+    writeFileSync(codeIndexQueuePath(dir), theirs + "\n");
+
+    const store = fakeStore();
+    expect(drainCodeIndexQueue({ store, sessionsDir: dir, projectDir: dir })).toBe(1);
+    expect(store.indexed[0].source).toBe(`code:${theirs}`);
+  });
+});
+
+describe("pruneForeignCodeSources", () => {
+  test("evicts absolute code: labels from outside the project, keeps the rest", () => {
+    const deleted: string[] = [];
+    const store = {
+      index() { return {}; },
+      listSources: () => [
+        { label: "code:src/server.ts", chunkCount: 3 },
+        { label: "code:/elsewhere/other-project/src/app.py", chunkCount: 5 },
+        { label: `code:${join(dir, "inside.ts")}`, chunkCount: 1 },
+        { label: "batch:some command", chunkCount: 2 },
+      ],
+      deleteSource(label: string) { deleted.push(label); return 1; },
+    };
+
+    expect(pruneForeignCodeSources({ store, projectDir: dir })).toBe(1);
+    expect(deleted).toEqual(["code:/elsewhere/other-project/src/app.py"]);
+  });
+
+  test("does nothing without a project dir", () => {
+    const store = {
+      index() { return {}; },
+      listSources: () => [{ label: "code:/elsewhere/app.py", chunkCount: 1 }],
+      deleteSource() { return 1; },
+    };
+    expect(pruneForeignCodeSources({ store })).toBe(0);
   });
 });
 

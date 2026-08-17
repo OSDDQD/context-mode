@@ -573,7 +573,7 @@ async function drainCommand(argv: string[]): Promise<number> {
         : drainCodeIndexQueue({ store, sessionsDir, projectDir, maxFiles: 200 });
       const agents = process.env.CONTEXT_MODE_SUBAGENT_CAPTURE === "0"
         ? 0
-        : drainSubagentQueue({ store, sessionsDir, maxAgents: 20 });
+        : drainSubagentQueue({ store, sessionsDir, projectDir, maxAgents: 20 });
       const vectors = await drainSemanticBackfill(store);
       console.log(
         `drained: ${files} code file(s), ${agents} subagent transcript(s), ${vectors} vector(s)`,

@@ -40,6 +40,9 @@ try {
         agentId: typeof input.agent_id === "string" ? input.agent_id : undefined,
         agentType: typeof input.agent_type === "string" ? input.agent_type : undefined,
         transcriptPath: typeof input.transcript_path === "string" ? input.transcript_path : undefined,
+        // Stamped so the drain can tell whose digest this is: the queue file is
+        // shared by every project on the machine.
+        projectDir,
         ts: Date.now(),
       };
       if (entry.transcriptPath) {

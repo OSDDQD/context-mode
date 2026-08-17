@@ -33,7 +33,7 @@ import {
 } from "./runtime.js";
 import { classifyNonZeroExit } from "./exit-classify.js";
 import { findWriteCommands } from "./read-only.js";
-import { drainCodeIndexQueue, bootstrapCodeIndex, pruneDeletedCodeSources } from "./session/code-index.js";
+import { drainCodeIndexQueue, bootstrapCodeIndex, pruneDeletedCodeSources, pruneForeignCodeSources } from "./session/code-index.js";
 import { drainSubagentQueue } from "./session/subagent-capture.js";
 import { indexHostMemory } from "./session/host-memory.js";
 import { searchAutoMemory } from "./search/auto-memory.js";
@@ -905,7 +905,7 @@ function getStore(): ContentStore {
 function maybeIndexSubagentCaptures(store: ContentStore): void {
   if (process.env.CONTEXT_MODE_SUBAGENT_CAPTURE === "0") return;
   try {
-    drainSubagentQueue({ store, sessionsDir: getSessionDir() });
+    drainSubagentQueue({ store, sessionsDir: getSessionDir(), projectDir: getProjectDir() });
   } catch { /* best-effort — capture never blocks a tool call */ }
 }
 
@@ -953,6 +953,9 @@ function maybeIndexEditedFiles(store: ContentStore): void {
   }
   try {
     pruneDeletedCodeSources({ store, projectDir });
+    // One-off repair for what the shared queue leaked before drains were
+    // project-scoped: other repositories' files indexed into this store.
+    pruneForeignCodeSources({ store, projectDir });
   } catch { /* best-effort */ }
 
   try {

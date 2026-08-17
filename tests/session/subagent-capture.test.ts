@@ -229,6 +229,31 @@ describe("drainSubagentQueue", () => {
     expect(JSON.parse(remaining[0]).agentId).toBe("a3");
   });
 
+  test("a digest stamped with another project is left for that project", () => {
+    const transcript = join(scratch, "agent-x.jsonl");
+    writeFileSync(transcript, dedicatedTranscript());
+    enqueue([
+      { agentId: "mine", transcriptPath: transcript, projectDir: "/repo/mine" },
+      { agentId: "theirs", transcriptPath: transcript, projectDir: "/repo/theirs" },
+    ]);
+
+    const store = fakeStore();
+    expect(drainSubagentQueue({ store, sessionsDir: scratch, projectDir: "/repo/mine" })).toBe(1);
+    expect(store.calls[0].source).toBe("subagent:agent:mine");
+
+    const remaining = readFileSync(subagentQueuePath(scratch), "utf-8").trim().split("\n");
+    expect(remaining).toHaveLength(1);
+    expect(JSON.parse(remaining[0]).agentId).toBe("theirs");
+  });
+
+  test("entries written before the project stamp existed stay first-come", () => {
+    const transcript = join(scratch, "agent-x.jsonl");
+    writeFileSync(transcript, dedicatedTranscript());
+    enqueue([{ agentId: "legacy", transcriptPath: transcript }]);
+    const store = fakeStore();
+    expect(drainSubagentQueue({ store, sessionsDir: scratch, projectDir: "/repo/mine" })).toBe(1);
+  });
+
   test("no queue file — no work, no crash", () => {
     const store = fakeStore();
     expect(drainSubagentQueue({ store, sessionsDir: scratch })).toBe(0);
