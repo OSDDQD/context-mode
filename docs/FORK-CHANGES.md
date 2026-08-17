@@ -2,7 +2,7 @@
 
 Fork of [mksglu/context-mode](https://github.com/mksglu/context-mode) at v1.0.169.
 
-Twelve changes, each addressing a gap observed while running the plugin daily in
+Fifteen changes, each addressing a gap observed while running the plugin daily in
 Claude Code. Every one is backwards compatible, and every behavioural default
 carries an env switch back. Two defaults differ from upstream on purpose: the
 compact tool descriptions (what ships on every request) and the semantic layer,
@@ -449,6 +449,85 @@ denial (curl, wget, inline HTTP, WebFetch) must avoid restriction vocabulary
 *and* name a concrete alternative, while CASE B security denials keep reading
 like the restrictions they are.
 
+## 13. Deferred-tool awareness (Claude Code tool search)
+
+`hooks/sessionstart.mjs`, `hooks/routing-block.mjs`, `src/server.ts`
+
+Claude Code's tool-search releases (≥2.1, `ENABLE_TOOL_SEARCH` unset or on)
+defer MCP tool schemas: the ctx_* tools are visible by name only, and a direct
+call before a `ToolSearch` load fails with a validation error. That breaks
+this plugin in the worst way — the SessionStart block tells the model to call
+`ctx_batch_execute`, the call errors, and the model concludes the tools are
+unavailable and falls back to exactly the raw Bash/Read flood the plugin
+exists to prevent.
+
+Two halves:
+
+- **The routing block teaches the bootstrap.** On Claude Code, SessionStart
+  now includes a `deferred_tool_bootstrap` section: load the five core ctx_*
+  tools in ONE `ToolSearch("select:…")` call, and never fall back to raw tools
+  just because a schema was not loaded yet. Harmless on hosts that do not
+  defer (it reads "may be deferred"). Opt out with
+  `CONTEXT_MODE_TOOLSEARCH_HINT=0`.
+- **Descriptions upgrade themselves when they become free.** Deferral flips
+  the compact-descriptions trade-off (#4): schemas are no longer shipped per
+  request, so the verbose author-written text costs nothing and teaches more.
+  Tools still register compact; on `oninitialized` — after the MCP handshake
+  identifies the client, before its `tools/list` — the server swaps in the
+  full text when the client is Claude Code ≥2.1 by high-confidence clientInfo
+  mapping (no env-sniff fallback: a foreign host running inside a Claude
+  Code-launched shell must not qualify) and `ENABLE_TOOL_SEARCH` is not
+  `false`. `CONTEXT_MODE_TOOL_DESCRIPTIONS` grows an explicit `compact` value
+  that pins the old behaviour; `full` and the unset/`auto` default keep their
+  meaning.
+
+## 14. Subagent transcript capture
+
+`hooks/subagentstop.mjs`, `src/session/subagent-capture.ts`, `src/server.ts`
+
+A subagent's context dies with the subagent: every tool output it saw is
+discarded and only the final report survives. When the parent later needs a
+detail the report omitted, the transcript with the answer was sitting on disk
+the whole time — unreachable.
+
+Same split as the code index (#5): the new SubagentStop hook appends one JSON
+line (session, agent id/type, transcript path) to a queue file and records a
+`subagent_end` timeline event; the MCP server drains the queue on its next
+store open. The drain resolves the agent's own transcript (dedicated
+`subagents/agent-<id>.jsonl` files first, sidechain filtering on the legacy
+inline layout — and it refuses to index the main conversation when it cannot
+isolate the agent), distills it to a markdown digest — task prompt, each tool
+call with its result truncated to 2 KB, final report — and indexes it under
+`subagent:<type>:<id>`, capped at 256 KB. `ctx_search("what did that agent
+find")` now has somewhere to look. Disable with
+`CONTEXT_MODE_SUBAGENT_CAPTURE=0`.
+
+## 15. SessionEnd hook + `context-mode drain`
+
+`hooks/sessionend.mjs`, `src/cli.ts`
+
+The capture queues (#5, #14) drain lazily "on the next store open" — which
+taxes the first tool call of the NEXT session, and never happens at all if
+the project is not opened again. The new SessionEnd hook closes the books
+instead: it records a `session_end` event with the host's reason (clear,
+logout, prompt_input_exit, …), removes the session's guidance-throttle
+markers from tmp, and spawns a detached `context-mode drain --project <dir>`
+so the pending queues are indexed while the machine is idle. `drain` is also
+a plain CLI command — run it by hand to warm the index at any time. Disable
+the auto-drain with `CONTEXT_MODE_SESSION_END_DRAIN=0`.
+
+Also in this change: the ctx-* utility skills moved out of the
+auto-discovered `skills/` directory. Claude Code loads every skill
+description into every session's system prompt — ~1.5 KB spent per session on
+seven commands that are only ever invoked explicitly. They are now plugin
+slash commands in `commands/` (`disable-model-invocation: true`, zero
+standing context; same `/context-mode:ctx-*` invocations), the big
+`context-mode` skill description lost its 30-phrase trigger list, and the
+skill files live on in `platform-skills/` for the non-Claude-Code packagers
+(pi) that reference them. New in `agents/`: a `context-gather` subagent whose
+system prompt bakes in the routing rules — heavy exploration in a disposable
+context that reports conclusions, not file dumps.
+
 ## Merged ahead of upstream: the fetch extraction ladder
 
 `src/fetch/blocks.ts`, `src/fetch/extract.ts`, `src/fetch/page-store.ts`, `src/server.ts`
@@ -495,7 +574,10 @@ memory and the code index.
 | `CONTEXT_MODE_SAFE_COMMANDS` | — | Extra bounded-command regexes, `\|\|\|`-separated |
 | `CONTEXT_MODE_SAFE_COMMANDS_FILE` | `<config>/context-mode/safe-commands.txt` | Same, one per line |
 | `CONTEXT_MODE_MISSED_REDIRECT_MIN_BYTES` | `2000` | Threshold for recording an unrouted payload |
-| `CONTEXT_MODE_TOOL_DESCRIPTIONS` | compact | `full` restores the verbose descriptions |
+| `CONTEXT_MODE_TOOL_DESCRIPTIONS` | auto | `full` restores the verbose descriptions everywhere; `compact` pins compact even for schema-deferring hosts; unset/`auto` registers compact and upgrades to full for Claude Code ≥2.1 |
+| `CONTEXT_MODE_TOOLSEARCH_HINT` | on | `0` drops the deferred-tool ToolSearch bootstrap from the SessionStart block |
+| `CONTEXT_MODE_SUBAGENT_CAPTURE` | on | `0` disables SubagentStop transcript capture and its drain |
+| `CONTEXT_MODE_SESSION_END_DRAIN` | on | `0` stops SessionEnd from spawning the detached `context-mode drain` |
 | `CONTEXT_MODE_CODE_INDEX` | on | `0` disables indexing of edited files |
 | `CONTEXT_MODE_CODE_INDEX_BOOTSTRAP` | on | `0` skips the one-time `git ls-files` seed |
 | `CONTEXT_MODE_CODE_INDEX_BOOTSTRAP_BATCH` | `15` | Files seeded per store open |
@@ -530,6 +612,9 @@ upstream's three new fetch suites). New suites:
 
 - `tests/core/read-only.test.ts` — read-only classification
 - `tests/core/code-index.test.ts` — queue draining, overflow, failure isolation
+- `tests/session/subagent-capture.test.ts` — transcript resolution, digest extraction, drain lifecycle
+- `tests/hooks/toolsearch-bootstrap.test.ts` — deferred-tool bootstrap block, ADR-0003 vocabulary
+- `tests/hooks/lifecycle-hooks-registration.test.ts` — SubagentStop/SessionEnd wiring end to end
 - `tests/core/hybrid-search.test.ts` — embedding config, codec, RRF fusion, degradation
 - `tests/core/compact-descriptions.test.ts` — compact default + `full` escape hatch
 - `tests/hooks/user-safe-commands.test.ts` — user allowlist, malformed patterns, operator gate

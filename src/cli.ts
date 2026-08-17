@@ -40,6 +40,8 @@ import {
   type ResolvedStorageDir,
 } from "./session/db.js";
 import { ContentStore } from "./store.js";
+import { drainCodeIndexQueue } from "./session/code-index.js";
+import { drainSubagentQueue } from "./session/subagent-capture.js";
 import { readToolDenyPatterns, evaluateFilePath } from "./security.js";
 // v1.0.128 — Issue #559 sibling MCP kill helpers (see PR-559-560-FIX-DESIGN.md).
 import { discoverSiblingMcpPids, killSiblingMcpServers } from "./util/sibling-mcp.js";
@@ -200,6 +202,7 @@ function printHelp(): void {
     "  context-mode                         Start MCP server (stdio)",
     "  context-mode index <path>            Index a file or directory into the FTS5 knowledge base",
     "  context-mode search <query...>       Search the current project's FTS5 knowledge base",
+    "  context-mode drain [--project path]  Index the pending code-index and subagent-capture queues now",
     "  context-mode doctor                  Diagnose runtime issues, hooks, FTS5, version",
     "  context-mode upgrade                 Fix hooks, permissions, and settings",
     "  context-mode hook <platform> <event> Dispatch a configured hook script",
@@ -233,6 +236,8 @@ if (args[0] === "--help" || args[0] === "-h" || args[0] === "help") {
   indexCommand(args.slice(1)).then((code) => process.exit(code));
 } else if (args[0] === "search") {
   searchCommand(args.slice(1)).then((code) => process.exit(code));
+} else if (args[0] === "drain") {
+  drainCommand(args.slice(1)).then((code) => process.exit(code));
 } else if (args[0] === "doctor") {
   doctor().then((code) => process.exit(code));
 } else if (args[0] === "upgrade") {
@@ -508,6 +513,40 @@ async function openCliContentStore(projectDir: string): Promise<{ store: Content
   const { resolveContentStorePath } = await import("./session/db.js");
   const dbPath = resolveContentStorePath({ projectDir, contentDir });
   return { store: new ContentStore(dbPath), dbPath, contentDir };
+}
+
+/**
+ * `context-mode drain` — index the pending capture queues immediately.
+ *
+ * The queues (code-index edits, subagent transcripts) are normally drained
+ * lazily by the MCP server on its next store open, which taxes the first tool
+ * call of the NEXT session. The SessionEnd hook spawns this command detached
+ * so the work happens while the machine is idle instead. Also callable by
+ * hand for the same effect.
+ */
+async function drainCommand(argv: string[]): Promise<number> {
+  try {
+    const parsed = parseFlags(argv);
+    const projectDir = resolveCliProjectDir(stringFlag(parsed.flags, "project"), process.cwd());
+    const adapter = await getAdapter(detectPlatform().platform);
+    const sessionsDir = ensureWritableStorageDir(resolveSessionStorageDir(() => adapter.getSessionDir()));
+    const { store } = await openCliContentStore(projectDir);
+    try {
+      const files = process.env.CONTEXT_MODE_CODE_INDEX === "0"
+        ? 0
+        : drainCodeIndexQueue({ store, sessionsDir, projectDir, maxFiles: 200 });
+      const agents = process.env.CONTEXT_MODE_SUBAGENT_CAPTURE === "0"
+        ? 0
+        : drainSubagentQueue({ store, sessionsDir, maxAgents: 20 });
+      console.log(`drained: ${files} code file(s), ${agents} subagent transcript(s)`);
+    } finally {
+      store.close();
+    }
+    return 0;
+  } catch (err) {
+    console.error(err instanceof Error ? err.message : String(err));
+    return 1;
+  }
 }
 
 function defaultSourceForPath(absPath: string): string {
@@ -1883,10 +1922,12 @@ async function upgrade(opts?: { platform?: string }) {
               try { realInstallPath = realpathSync(resolvedInstallPath); }
               catch { continue; }
               if (!(realInstallPath + sep).startsWith(cacheRootWithSep)) continue;
-              const srcSkills = resolve(srcDir, "skills");
-              if (existsSync(srcSkills)) {
-                cpSync(srcSkills, resolve(realInstallPath, "skills"), { recursive: true });
-                changes.push(`Synced skills to active install path`);
+              for (const dir of ["skills", "platform-skills", "commands", "agents"]) {
+                const srcSub = resolve(srcDir, dir);
+                if (existsSync(srcSub)) {
+                  cpSync(srcSub, resolve(realInstallPath, dir), { recursive: true });
+                  changes.push(`Synced ${dir} to active install path`);
+                }
               }
             }
           }

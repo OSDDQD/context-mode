@@ -46,7 +46,16 @@ await runHook(async () => {
 
   const detectedPlatform = detectPlatformFromEnv();
   const toolNamer = createToolNamer(detectedPlatform);
-  const ROUTING_BLOCK = createRoutingBlock(toolNamer);
+  // Claude Code defers MCP tool schemas by default (tool-search releases):
+  // the ctx_* tools are visible by name only until a ToolSearch call loads
+  // them, and a direct call before that fails. The bootstrap block teaches
+  // the model to load them in ONE ToolSearch instead of erroring and falling
+  // back to raw Bash/Read. Harmless when the host does not defer — it reads
+  // "may be deferred". Opt out with CONTEXT_MODE_TOOLSEARCH_HINT=0.
+  const ROUTING_BLOCK = createRoutingBlock(toolNamer, {
+    toolSearchBootstrap:
+      detectedPlatform === "claude-code" && process.env.CONTEXT_MODE_TOOLSEARCH_HINT !== "0",
+  });
 
   // Resolve absolute path for imports (fileURLToPath for Windows compat)
   const HOOK_DIR = dirname(fileURLToPath(import.meta.url));

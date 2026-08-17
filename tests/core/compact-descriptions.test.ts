@@ -8,7 +8,7 @@
  */
 
 import { describe, expect, test, afterEach } from "vitest";
-import { resolveToolDescription, REGISTERED_CTX_TOOLS } from "../../src/server.js";
+import { resolveToolDescription, shouldServeFullDescriptions, REGISTERED_CTX_TOOLS } from "../../src/server.js";
 
 const ORIGINAL = process.env.CONTEXT_MODE_TOOL_DESCRIPTIONS;
 
@@ -33,6 +33,35 @@ describe("resolveToolDescription", () => {
   test("tools without a compact entry keep their original description", () => {
     delete process.env.CONTEXT_MODE_TOOL_DESCRIPTIONS;
     expect(resolveToolDescription("ctx_doctor", "DIAGNOSTICS")).toBe("DIAGNOSTICS");
+  });
+});
+
+describe("shouldServeFullDescriptions (post-initialize upgrade)", () => {
+  const cc = { name: "claude-code", version: "2.3.0" };
+
+  test("auto (default): full for a schema-deferring Claude Code", () => {
+    expect(shouldServeFullDescriptions(cc, {})).toBe(true);
+    expect(shouldServeFullDescriptions(cc, { CONTEXT_MODE_TOOL_DESCRIPTIONS: "auto" })).toBe(true);
+  });
+
+  test("env=full always upgrades, env=compact never does", () => {
+    expect(shouldServeFullDescriptions(undefined, { CONTEXT_MODE_TOOL_DESCRIPTIONS: "full" })).toBe(true);
+    expect(shouldServeFullDescriptions(cc, { CONTEXT_MODE_TOOL_DESCRIPTIONS: "compact" })).toBe(false);
+  });
+
+  test("ENABLE_TOOL_SEARCH=false means schemas ship per-request — stay compact", () => {
+    expect(shouldServeFullDescriptions(cc, { ENABLE_TOOL_SEARCH: "false" })).toBe(false);
+  });
+
+  test("pre-tool-search Claude Code stays compact", () => {
+    expect(shouldServeFullDescriptions({ name: "claude-code", version: "2.0.14" }, {})).toBe(false);
+  });
+
+  test("other or unknown clients stay compact (no env-sniff fallback)", () => {
+    expect(shouldServeFullDescriptions({ name: "cursor-vscode", version: "9.9.9" }, {})).toBe(false);
+    expect(shouldServeFullDescriptions({ name: "some-new-host", version: "9.9.9" }, {})).toBe(false);
+    expect(shouldServeFullDescriptions(undefined, {})).toBe(false);
+    expect(shouldServeFullDescriptions({ name: "claude-code" }, {})).toBe(false);
   });
 });
 

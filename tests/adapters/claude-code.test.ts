@@ -1150,6 +1150,8 @@ describe("ClaudeCodeAdapter", () => {
         "sessionstart.mjs",
         "userpromptsubmit.mjs",
         "stop.mjs",
+        "subagentstop.mjs",
+        "sessionend.mjs",
       ];
       for (const s of scripts) writeFileSync(join(pluginRoot, "hooks", s), "");
 
@@ -1163,7 +1165,7 @@ describe("ClaudeCodeAdapter", () => {
     });
 
     it("reports FAIL with missing path detail when a script is absent (Algo-D1)", () => {
-      // Only sessionstart.mjs present → 5 hook-script FAILs + 1 OK. The
+      // Only sessionstart.mjs present → 7 hook-script FAILs + 1 OK. The
       // FAIL detail must reference the exact missing absolute path (not
       // a regex capture artifact like ".../Services/AppData/...").
       // Filter to hook-script checks so this test is independent of
@@ -1179,7 +1181,7 @@ describe("ClaudeCodeAdapter", () => {
       const failed = hookResults.filter((r) => r.status === "FAIL");
       const ok = hookResults.filter((r) => r.status === "OK");
       expect(ok.length).toBe(1);
-      expect(failed.length).toBe(5);
+      expect(failed.length).toBe(7);
       for (const r of failed) {
         expect(r.detail).toContain(pluginRoot);
         expect(r.detail!.endsWith(".mjs")).toBe(true);
@@ -1256,6 +1258,8 @@ describe("ClaudeCodeAdapter", () => {
         "sessionstart.mjs",
         "userpromptsubmit.mjs",
         "stop.mjs",
+        "subagentstop.mjs",
+        "sessionend.mjs",
       ];
       for (const s of scripts) writeFileSync(join(pluginRoot, "hooks", s), "");
 

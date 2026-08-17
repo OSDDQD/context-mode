@@ -685,11 +685,16 @@ describe("Plugin Tool Name Format in ROUTING_BLOCK", () => {
 });
 
 describe("Skill Commands", () => {
-  const SKILLS_DIR = join(__dirname, "..", "..", "skills");
+  // Fork: the ctx-* utility skills moved out of the auto-discovered skills/
+  // dir (Claude Code loads every skill description into each session's
+  // system prompt) into platform-skills/, which only non-Claude-Code
+  // packagers reference. Claude Code gets commands/ instead.
+  const SKILLS_DIR = join(__dirname, "..", "..", "platform-skills");
+  const COMMANDS_DIR = join(__dirname, "..", "..", "commands");
 
   test("ctx-doctor skill directory exists with valid SKILL.md", () => {
     const skillMd = join(SKILLS_DIR, "ctx-doctor", "SKILL.md");
-    assert.ok(existsSync(skillMd), "skills/ctx-doctor/SKILL.md must exist");
+    assert.ok(existsSync(skillMd), "platform-skills/ctx-doctor/SKILL.md must exist");
     const content = readFileSync(skillMd, "utf-8");
     assert.ok(content.includes("name: ctx-doctor"), "SKILL.md name must be ctx-doctor");
     assert.ok(content.includes("/context-mode:ctx-doctor"), "Trigger must reference ctx-doctor");
@@ -697,7 +702,7 @@ describe("Skill Commands", () => {
 
   test("ctx-upgrade skill directory exists with valid SKILL.md", () => {
     const skillMd = join(SKILLS_DIR, "ctx-upgrade", "SKILL.md");
-    assert.ok(existsSync(skillMd), "skills/ctx-upgrade/SKILL.md must exist");
+    assert.ok(existsSync(skillMd), "platform-skills/ctx-upgrade/SKILL.md must exist");
     const content = readFileSync(skillMd, "utf-8");
     assert.ok(content.includes("name: ctx-upgrade"), "SKILL.md name must be ctx-upgrade");
     assert.ok(content.includes("/context-mode:ctx-upgrade"), "Trigger must reference ctx-upgrade");
@@ -705,7 +710,7 @@ describe("Skill Commands", () => {
 
   test("ctx-stats skill directory exists with valid SKILL.md", () => {
     const skillMd = join(SKILLS_DIR, "ctx-stats", "SKILL.md");
-    assert.ok(existsSync(skillMd), "skills/ctx-stats/SKILL.md must exist");
+    assert.ok(existsSync(skillMd), "platform-skills/ctx-stats/SKILL.md must exist");
     const content = readFileSync(skillMd, "utf-8");
     assert.ok(content.includes("name: ctx-stats"), "SKILL.md name must be ctx-stats");
     assert.ok(content.includes("/context-mode:ctx-stats"), "Trigger must reference ctx-stats");
@@ -715,7 +720,21 @@ describe("Skill Commands", () => {
     for (const old of ["doctor", "upgrade", "stats"]) {
       assert.ok(
         !existsSync(join(SKILLS_DIR, old)),
-        `Old skill directory skills/${old} must not exist`,
+        `Old skill directory platform-skills/${old} must not exist`,
+      );
+    }
+  });
+
+  test("utility skills are gone from the auto-discovered skills/ dir", () => {
+    const claudeSkillsDir = join(__dirname, "..", "..", "skills");
+    for (const name of ["ctx-doctor", "ctx-upgrade", "ctx-stats", "ctx-purge", "ctx-index", "ctx-search", "ctx-insight"]) {
+      assert.ok(
+        !existsSync(join(claudeSkillsDir, name)),
+        `skills/${name} must not exist — it would cost system-prompt context in every Claude Code session`,
+      );
+      assert.ok(
+        existsSync(join(COMMANDS_DIR, `${name}.md`)),
+        `commands/${name}.md must exist as the Claude Code replacement`,
       );
     }
   });

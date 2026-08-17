@@ -1,6 +1,6 @@
 # Context Mode
 
-> **This is a fork** of [mksglu/context-mode](https://github.com/mksglu/context-mode) (v1.0.169) with twelve additions:
+> **This is a fork** of [mksglu/context-mode](https://github.com/mksglu/context-mode) (v1.0.169) with fifteen additions:
 > a user-extensible bounded-command allowlist, missed-redirect telemetry in `ctx_stats`, a read-only `ctx_gather`
 > tool that survives plan mode, compact tool descriptions (~3.4K tokens/request reclaimed), a code index that
 > seeds itself from `git ls-files` and evicts deleted files (and never indexes credentials), hybrid semantic
@@ -9,6 +9,12 @@
 > them (upstream #938/#984/#1006), a fix that finally makes Claude Code's own memory files searchable from
 > `ctx_search`, a `ctx upgrade` that pulls from *this* repo instead of silently reinstalling upstream over it,
 > a one-command upstream merge that survives the tracked bundles, and a contract test for ADR-0003.
+> New in fork rev 4: deferred-tool awareness for Claude Code's tool search (a ToolSearch bootstrap in the
+> SessionStart block, plus descriptions that upgrade to the full text once the handshake shows schemas are
+> deferred and free), SubagentStop transcript capture (`ctx_search` can answer from what a finished subagent
+> saw, not just its report), a SessionEnd hook with a detached `context-mode drain` that warms the index while
+> the machine is idle, the ctx-* utility skills rehomed as zero-standing-context plugin commands, and a
+> `context-gather` subagent definition.
 > It also carries upstream's **fetch extraction ladder** (merged from `next` ahead of `upstream/main`): a
 > JavaScript-rendered shell is no longer reported as a successful fetch, the article is extracted instead of
 > the whole page transliterated, and SPA pages are recovered browser-free via their `.md` sibling or the host's

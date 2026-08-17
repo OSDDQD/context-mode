@@ -158,7 +158,7 @@ describe("cli.bundle.mjs — marketplace install support", () => {
   // ── Skill files ────────────────────────────────────────────
 
   it("ctx-upgrade skill uses cli.bundle.mjs with fallback", () => {
-    const skill = readFileSync(resolve(ROOT, "skills", "ctx-upgrade", "SKILL.md"), "utf-8");
+    const skill = readFileSync(resolve(ROOT, "platform-skills", "ctx-upgrade", "SKILL.md"), "utf-8");
     expect(skill).toContain("cli.bundle.mjs");
     expect(skill).toContain("build/cli.js");
     // Fallback pattern: try bundle first, then build
@@ -166,15 +166,15 @@ describe("cli.bundle.mjs — marketplace install support", () => {
   });
 
   it("ctx-doctor skill uses cli.bundle.mjs with fallback", () => {
-    const skill = readFileSync(resolve(ROOT, "skills", "ctx-doctor", "SKILL.md"), "utf-8");
+    const skill = readFileSync(resolve(ROOT, "platform-skills", "ctx-doctor", "SKILL.md"), "utf-8");
     expect(skill).toContain("cli.bundle.mjs");
     expect(skill).toContain("build/cli.js");
     expect(skill).toMatch(/CLI=.*cli\.bundle\.mjs.*\[ ! -f.*\].*build\/cli\.js/);
   });
 
   it("ctx-index and ctx-search skills expose slash-style triggers", () => {
-    const indexSkill = readFileSync(resolve(ROOT, "skills", "ctx-index", "SKILL.md"), "utf-8");
-    const searchSkill = readFileSync(resolve(ROOT, "skills", "ctx-search", "SKILL.md"), "utf-8");
+    const indexSkill = readFileSync(resolve(ROOT, "platform-skills", "ctx-index", "SKILL.md"), "utf-8");
+    const searchSkill = readFileSync(resolve(ROOT, "platform-skills", "ctx-search", "SKILL.md"), "utf-8");
     expect(indexSkill).toContain("Trigger: /context-mode:ctx-index");
     expect(indexSkill).toContain("user-invocable: true");
     expect(indexSkill).toContain("context-mode index");
@@ -2554,7 +2554,7 @@ describe("session-loaders.mjs fallback to build/session/*.js", () => {
 
 describe("SKILL.md prefers MCP tool over Bash", () => {
   it("ctx-doctor SKILL.md prefers MCP tool over Bash", () => {
-    const skill = readFileSync(resolve(ROOT, "skills", "ctx-doctor", "SKILL.md"), "utf-8");
+    const skill = readFileSync(resolve(ROOT, "platform-skills", "ctx-doctor", "SKILL.md"), "utf-8");
     // Must mention the MCP tool
     expect(skill).toContain("ctx_doctor");
     expect(skill).toContain("MCP tool");
@@ -2567,7 +2567,7 @@ describe("SKILL.md prefers MCP tool over Bash", () => {
   });
 
   it("ctx-upgrade SKILL.md prefers MCP tool over Bash", () => {
-    const skill = readFileSync(resolve(ROOT, "skills", "ctx-upgrade", "SKILL.md"), "utf-8");
+    const skill = readFileSync(resolve(ROOT, "platform-skills", "ctx-upgrade", "SKILL.md"), "utf-8");
     // Must mention the MCP tool
     expect(skill).toContain("ctx_upgrade");
     expect(skill).toContain("MCP tool");
@@ -3357,7 +3357,10 @@ describe("installed_plugins.json installPath containment", () => {
     expect(skillsBlock![0]).toMatch(/realpathSync\(cacheRoot\)/);
     expect(skillsBlock![0]).toMatch(/realpathSync\(resolvedInstallPath\)/);
     expect(skillsBlock![0]).toMatch(/\(realInstallPath \+ sep\)\.startsWith\(cacheRootWithSep\)/);
-    expect(skillsBlock![0]).toMatch(/cpSync\(srcSkills, resolve\(realInstallPath, "skills"\)/);
+    // Fork: the sync loops over skills + platform-skills + commands + agents,
+    // but every cpSync target must still be anchored at realInstallPath.
+    expect(skillsBlock![0]).toMatch(/cpSync\(srcSub, resolve\(realInstallPath, dir\)/);
+    expect(skillsBlock![0]).not.toMatch(/cpSync\((?!srcSub, resolve\(realInstallPath, dir\))/);
   });
 
   test("statuslineForward() candidate selection gates installPath under <claudeRoot>/plugins/cache", () => {

@@ -34,6 +34,7 @@ import {
 import { classifyNonZeroExit } from "./exit-classify.js";
 import { findWriteCommands } from "./read-only.js";
 import { drainCodeIndexQueue, bootstrapCodeIndex, pruneDeletedCodeSources } from "./session/code-index.js";
+import { drainSubagentQueue } from "./session/subagent-capture.js";
 import { indexHostMemory } from "./session/host-memory.js";
 import { searchAutoMemory } from "./search/auto-memory.js";
 import {
@@ -75,6 +76,7 @@ import {
 import { FloodGuard } from "./search/flood-guard.js";
 import { buildNodeCommand, type HookAdapter, type PlatformId, isInProcessPluginPlatform } from "./adapters/types.js";
 import { detectPlatform, getSessionDirSegments } from "./adapters/detect.js";
+import { CLIENT_NAME_TO_PLATFORM } from "./adapters/client-map.js";
 import { parseCodexContextModePluginRoot } from "./adapters/codex/index.js";
 import { getHookScriptPaths } from "./util/hook-config.js";
 import { stripJsonComments } from "./util/jsonc.js";
@@ -160,6 +162,10 @@ export interface RegisteredCtxTool {
   name: string;
   config: Record<string, unknown>;
   handler: (args: Record<string, unknown>) => Promise<unknown> | unknown;
+  /** Author-written verbose description, kept for the post-initialize upgrade. */
+  fullDescription?: string;
+  /** SDK handle from registerTool — carries update() on SDK ≥1.9. */
+  registered?: { update?: (updates: Record<string, unknown>) => void };
 }
 
 export const REGISTERED_CTX_TOOLS: RegisteredCtxTool[] = [];
@@ -340,6 +346,75 @@ export function resolveToolDescription(name: string, full: unknown): unknown {
   return COMPACT_TOOL_DESCRIPTIONS[name] ?? full;
 }
 
+/**
+ * Should this client get the FULL descriptions after the handshake?
+ *
+ * The compact/full trade-off flips when the host defers tool schemas: Claude
+ * Code's tool-search releases (≥2.1, `ENABLE_TOOL_SEARCH` unset or on) no
+ * longer ship MCP tool definitions in every request — the model loads a
+ * schema once, on demand. Under that regime the verbose author-written text
+ * costs nothing per request and teaches more, so serving compact would be
+ * saving tokens that were never being spent.
+ *
+ * Registration happens before the MCP handshake, so tools always register
+ * compact; `upgradeToolDescriptionsForClient` swaps in the full text from
+ * `oninitialized` — after the client identified itself, before its
+ * tools/list. Env contract:
+ *   - `full`    → full from registration (unchanged upstream behaviour);
+ *   - `compact` → pinned compact, never upgraded;
+ *   - unset / `auto` → compact, upgraded for schema-deferring hosts.
+ */
+export function shouldServeFullDescriptions(
+  clientInfo: { name?: string; version?: string } | undefined,
+  env: NodeJS.ProcessEnv = process.env,
+): boolean {
+  const mode = env.CONTEXT_MODE_TOOL_DESCRIPTIONS;
+  if (mode === "full") return true;
+  if (mode !== undefined && mode !== "" && mode !== "auto") return false;
+  // The host inherits ENABLE_TOOL_SEARCH from settings env; `false` is the
+  // only value that disables deferral outright.
+  if (env.ENABLE_TOOL_SEARCH === "false") return false;
+  if (!clientInfo?.name || !clientInfo.version) return false;
+  // Consult the clientInfo→platform map directly, NOT detectPlatform: that
+  // helper falls back to env sniffing for unknown names, which would claim
+  // "claude-code" for any host merely launched from a Claude Code shell.
+  if (CLIENT_NAME_TO_PLATFORM[clientInfo.name] !== "claude-code") return false;
+  return versionAtLeast(clientInfo.version, [2, 1, 0]);
+}
+
+function versionAtLeast(version: string, min: [number, number, number]): boolean {
+  const match = version.match(/(\d+)\.(\d+)\.(\d+)/);
+  if (!match) return false;
+  const parts = [Number(match[1]), Number(match[2]), Number(match[3])];
+  for (let i = 0; i < 3; i++) {
+    if (parts[i] > min[i]) return true;
+    if (parts[i] < min[i]) return false;
+  }
+  return true;
+}
+
+/**
+ * Swap every registered tool's description for the author-written full text
+ * when the connected client defers schemas (see shouldServeFullDescriptions).
+ *
+ * @returns Number of descriptions upgraded.
+ */
+export function upgradeToolDescriptionsForClient(): number {
+  const clientInfo = server.server.getClientVersion();
+  if (!shouldServeFullDescriptions(clientInfo ?? undefined)) return 0;
+  let upgraded = 0;
+  for (const tool of REGISTERED_CTX_TOOLS) {
+    if (!tool.fullDescription || typeof tool.registered?.update !== "function") continue;
+    if (tool.config.description === tool.fullDescription) continue;
+    try {
+      tool.registered.update({ description: tool.fullDescription });
+      tool.config.description = tool.fullDescription;
+      upgraded++;
+    } catch { /* an SDK without update() keeps compact — still correct */ }
+  }
+  return upgraded;
+}
+
 const originalRegisterTool = server.registerTool.bind(server);
 (server as unknown as { registerTool: (...args: unknown[]) => unknown }).registerTool = (...args: unknown[]) => {
   const [name, config, handler] = args as [
@@ -351,13 +426,20 @@ const originalRegisterTool = server.registerTool.bind(server);
     emitSuppressionDiagnostic();
     return undefined;
   }
+  let fullDescription: string | undefined;
   if (config && typeof config === "object" && "description" in config) {
+    if (typeof config.description === "string") fullDescription = config.description;
     config.description = resolveToolDescription(name, config.description);
   }
   const wrappedHandler = wrapToolHandler(name, handler);
-  REGISTERED_CTX_TOOLS.push({ name, config, handler: wrappedHandler });
+  const entry: RegisteredCtxTool = { name, config, handler: wrappedHandler, fullDescription };
+  REGISTERED_CTX_TOOLS.push(entry);
   args[2] = wrappedHandler;
-  return (originalRegisterTool as unknown as (...callArgs: unknown[]) => unknown)(...args);
+  const registered = (originalRegisterTool as unknown as (...callArgs: unknown[]) => unknown)(...args);
+  if (registered && typeof registered === "object") {
+    entry.registered = registered as RegisteredCtxTool["registered"];
+  }
+  return registered;
 };
 
 function wrapToolHandler(
@@ -807,8 +889,22 @@ function getStore(): ContentStore {
   }
   maybeIndexSessionEvents(_store);
   maybeIndexEditedFiles(_store);
+  maybeIndexSubagentCaptures(_store);
   maybeIndexHostMemory(_store);
   return _store;
+}
+
+/**
+ * Drain the SubagentStop capture queue into the store (see
+ * src/session/subagent-capture.ts). A subagent's context dies with the
+ * subagent; this indexes a digest of its transcript so ctx_search can still
+ * answer from what it saw. Opt out with CONTEXT_MODE_SUBAGENT_CAPTURE=0.
+ */
+function maybeIndexSubagentCaptures(store: ContentStore): void {
+  if (process.env.CONTEXT_MODE_SUBAGENT_CAPTURE === "0") return;
+  try {
+    drainSubagentQueue({ store, sessionsDir: getSessionDir() });
+  } catch { /* best-effort — capture never blocks a tool call */ }
 }
 
 /**
@@ -5741,6 +5837,14 @@ async function main() {
 
   // Lifecycle guard: detect parent death + stdin close to prevent orphaned processes (#103)
   startLifecycleGuard({ onShutdown: () => gracefulShutdown() });
+
+  // Upgrade tool descriptions once the client has identified itself (see
+  // shouldServeFullDescriptions). oninitialized fires after the MCP handshake
+  // and before the client's tools/list, so the upgraded text is what gets
+  // listed; assigned before connect so the callback cannot be missed.
+  server.server.oninitialized = () => {
+    try { upgradeToolDescriptionsForClient(); } catch { /* best-effort */ }
+  };
 
   const transport = new StdioServerTransport();
   await server.connect(transport);
