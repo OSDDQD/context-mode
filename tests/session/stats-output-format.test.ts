@@ -322,7 +322,8 @@ describe("formatReport — Bugs #5/#6/#7/#8", () => {
     expect(text).toMatch(/Files tracked\s+132/);
 
     // Section 3 — receipt-style rows (no "$X · Y%" framing anymore).
-    expect(text).toMatch(/This chat:/);
+    // "This chat" was the worktree pool, not one chat — see ADR-0005.
+    expect(text).toMatch(/This project:/);
     expect(text).toMatch(/All your work:/);
     expect(text).toMatch(/17,493 captures across 123 projects/);
 

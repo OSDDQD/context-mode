@@ -12,7 +12,7 @@ import { AsyncLocalStorage } from "node:async_hooks";
 import { z } from "zod";
 import { PolyglotExecutor } from "./executor.js";
 import { runPool, type PoolJob } from "./runPool.js";
-import { ContentStore, cleanupStaleDBs, cleanupStaleContentDBs, contentRetentionDays, type SearchResult, type IndexResult } from "./store.js";
+import { ContentStore, cleanupStaleDBs, cleanupStaleContentDBs, contentRetentionDays, contentStoreUsage, type SearchResult, type IndexResult } from "./store.js";
 import { composeFetchCacheKey } from "./fetch-cache.js";
 import { PageStore } from "./fetch/page-store.js";
 import { extractAndStore, routeSkipsExtraction, type FetchRoute, type Relabelled } from "./fetch/extract.js";
@@ -5321,7 +5321,12 @@ server.registerTool(
           // be unavailable on cold paths; failures are absorbed.
           let indexState;
           try { indexState = getStore().getIndexState(); } catch { /* never block ctx_stats */ }
-          text = formatReport(report, VERSION, _latestVersion, { lifetime, mcpUsage, multiAdapter, conversation, realBytes, indexState, cwd: projectDir });
+          let storeUsage;
+          try {
+            const usage = contentStoreUsage(dirname(getStorePath()));
+            storeUsage = { bytes: usage.totalBytes, stores: usage.stores.length };
+          } catch { /* never block ctx_stats */ }
+          text = formatReport(report, VERSION, _latestVersion, { lifetime, mcpUsage, multiAdapter, conversation, realBytes, indexState, storeUsage, cwd: projectDir });
         } finally {
           sdb.close();
         }

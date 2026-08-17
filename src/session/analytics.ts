@@ -310,8 +310,10 @@ export class AnalyticsEngine {
   /**
    * #1 Context Savings Total — bytes kept out of context window.
    *
-   * Stub: requires server.ts to accumulate rawBytes and contextBytes
-   * during a live session. Call with tracked values.
+   * @deprecated Dead stub. Nothing in the render path calls it: the real byte
+   *   accounting lives in `getRealBytesStats` / `getConversationWindowStats`,
+   *   which read the counters off disk instead of asking the caller for them.
+   *   Kept only so an external caller does not break; do not add callers.
    */
   static contextSavingsTotal(rawBytes: number, contextBytes: number): ContextSavings {
     const savedBytes = rawBytes - contextBytes;
@@ -1080,6 +1082,17 @@ export function getConversationStats(opts: {
  * because it represents bytes the model already paid for — adding it
  * would double-count what's already on the user's invoice.
  */
+/**
+ * Footprint of the persistent knowledge base, from `contentStoreUsage()`.
+ *
+ * Reported separately from every "kept out" number because it is the opposite
+ * kind of quantity: what keeping the index COSTS, not what it saved.
+ */
+export interface StoreDiskUsage {
+  bytes: number;
+  stores: number;
+}
+
 export interface RealBytesStats {
   eventDataBytes: number;
   bytesAvoided: number;
@@ -1101,6 +1114,17 @@ export interface RealBytesStats {
    */
   contentBytes: number;
   totalSavedTokens: number;
+  /**
+   * Kept-out bytes attributable to THIS session_id alone.
+   *
+   * Set only by {@link getConversationWindowStats}, whose other fields are
+   * deliberately worktree-wide (a conversation fans out into sub-agents that
+   * share the cwd hash but have their own session ids). That pool is the right
+   * number for "this project"; it is not the right number to label "this
+   * session", and for a long time the renderer labelled it that way. Both are
+   * now reported, each under its own name. See ADR-0005.
+   */
+  sessionKeptOutBytes?: number;
 }
 
 /**
@@ -1489,6 +1513,10 @@ export function getConversationWindowStats(opts: {
     totalSavedTokens: Math.floor(
       (pool.eventDataBytes + keptOut + pool.snapshotBytes) / 4,
     ),
+    // The narrow slice, kept separate rather than substituted: every field
+    // above is worktree-wide by design (see the comment on this function), so
+    // the renderer needs both to label its scopes honestly.
+    sessionKeptOutBytes: mine.eventDataBytes + mine.bytesAvoided + mine.snapshotBytes,
   };
 }
 
@@ -2014,6 +2042,7 @@ export function renderCostExample(
   lifetimeTokens: number,
   lifetimeDays: number,
 ): string[] {
+  if (process.env.CONTEXT_MODE_STATS_COST === "0") return [];
   if (!Number.isFinite(lifetimeTokens) || lifetimeTokens <= 0) return [];
 
   const lifetimeUsd = lifetimeTokens * pricePerToken();
@@ -2068,10 +2097,14 @@ export function renderCostExample(
   out.push(
     `  context-mode kept ${kb(lifetimeBytes)} out of context — that's ${cursorMonths} months of Cursor Pro paid for itself.`,
   );
-  if (teamUsd > 0 && teamYearUsd > 0) {
+  // The 10-dev extrapolation is a multiplication, not a measurement: this
+  // install has one developer's data in it. Opt-in, so the default receipt
+  // states only what was counted.
+  if (teamUsd > 0 && teamYearUsd > 0 && process.env.CONTEXT_MODE_STATS_TEAM_EXTRAPOLATION === "1") {
     out.push("");
     out.push(
-      `  Scale across a 10-dev team and that's ~$${teamYearUsd.toLocaleString("en-US")}/year saved.`,
+      `  Extrapolated to 10 developers at this rate: ~$${teamYearUsd.toLocaleString("en-US")}/year. ` +
+      `That is arithmetic on one person's usage, not a measurement of a team.`,
     );
   }
 
@@ -2081,6 +2114,14 @@ export function renderCostExample(
       `  (Opus rates shown for context. On cheaper models the dollar number drops; the savings ratio holds.)`,
     );
   }
+  // Where the number comes from, in one line. Without it the dollar figure
+  // reads as a controlled comparison; it is the plugin's own byte counters
+  // priced at list rates, with no A/B run behind it.
+  out.push("");
+  out.push(
+    "  Basis: context-mode's own byte counters (what it kept out, priced at list rates) — " +
+    "not an A/B measurement against a run without it.",
+  );
   return out;
 }
 
@@ -2109,6 +2150,7 @@ function renderNarrative5Section(args: {
   lifetime?: LifetimeStats;
   multiAdapter?: MultiAdapterLifetimeStats;
   realBytes?: { lifetime?: RealBytesStats; conversation?: RealBytesStats };
+  storeUsage?: StoreDiskUsage;
   cwd: string;
   locale: string;
   tz: string;
@@ -2116,7 +2158,7 @@ function renderNarrative5Section(args: {
   version?: string;
   latestVersion?: string | null;
 }): string[] {
-  const { conversation, lifetime, multiAdapter, realBytes, cwd, locale, tz, now, version, latestVersion } = args;
+  const { conversation, lifetime, multiAdapter, realBytes, storeUsage, cwd, locale, tz, now, version, latestVersion } = args;
   const out: string[] = [];
 
   // ── Token math (same monotonic-growth invariant as the legacy branch).
@@ -2152,6 +2194,22 @@ function renderNarrative5Section(args: {
     ? (realBytes.conversation.eventDataBytes + realBytes.conversation.bytesAvoided + realBytes.conversation.snapshotBytes)
     : conversationTokens * 4;
 
+  // Three scopes, each labelled for what it actually measures.
+  //
+  // `convBytes` was never one chat: its pool is the whole worktree,
+  // deliberately, so the sub-agents a conversation spawns (own session_id,
+  // same cwd hash) are credited to it. That makes it a PROJECT number, and
+  // printing it as a chat number is how "This chat 6.9 MB" came to exceed
+  // "All your work 6.7 MB" — the wide scope did not count what the narrow one
+  // counted (scanOneAdapter still reports contentBytes: 0).
+  //
+  // Containment is restored by raising the wider scope, never by lowering the
+  // narrower one — the same direction as the monotonic-growth invariant these
+  // numbers already obey. See ADR-0005.
+  const sessionBytes = realBytes?.conversation?.sessionKeptOutBytes ?? 0;
+  const projectShown = Math.max(convBytes, sessionBytes);
+  const lifetimeShown = Math.max(lifetimeBytes, projectShown);
+
   // ── Days alive of THE CONVERSATION (section 1).
   const convDays = conversation.daysAlive >= 1
     ? `${conversation.daysAlive.toFixed(1)} days alive · still going`
@@ -2182,8 +2240,8 @@ function renderNarrative5Section(args: {
   }
   // Daily-average sub-line — never tease users with a tiny number when the
   // average is sub-MB (still informative); fall back to KB display.
-  const dailyBytes = lifetimeDays > 0 ? lifetimeBytes / lifetimeDays : 0;
-  out.push(`  context-mode kept ${kb(lifetimeBytes)} out of your context window — about ${kb(dailyBytes)} every single day.`);
+  const dailyBytes = lifetimeDays > 0 ? lifetimeShown / lifetimeDays : 0;
+  out.push(`  context-mode kept ${kb(lifetimeShown)} out of your context window — about ${kb(dailyBytes)} every single day.`);
   out.push("");
   out.push("");
 
@@ -2307,12 +2365,31 @@ function renderNarrative5Section(args: {
     : "";
   const distinctProj = lifetime?.distinctProjects ?? 0;
   const allCaps = lifetime?.totalEvents ?? multiAdapter?.totalEvents ?? 0;
+
+  if (sessionBytes > 0) {
+    out.push(
+      `  This session: ${kb(sessionBytes)} kept out · ${conversation.events.toLocaleString(locale)} captures${convStartedYMD ? ` · started ${convStartedYMD}` : ""}.`,
+    );
+    out.push(
+      `  This project: ${kb(projectShown)} kept out · this conversation and the agents it spawned.`,
+    );
+  } else {
+    out.push(
+      `  This project: ${kb(projectShown)} kept out · ${conversation.events.toLocaleString(locale)} captures${convStartedYMD ? ` · started ${convStartedYMD}` : ""}.`,
+    );
+  }
   out.push(
-    `  This chat: ${kb(convBytes)} kept out · ${conversation.events.toLocaleString(locale)} captures${convStartedYMD ? ` · started ${convStartedYMD}` : ""}.`,
+    `  All your work: ${kb(lifetimeShown)} kept out · ${allCaps.toLocaleString(locale)} captures across ${distinctProj} project${distinctProj === 1 ? "" : "s"}${lifeStartedYMD ? ` · since ${lifeStartedYMD}` : ""}.`,
   );
-  out.push(
-    `  All your work: ${kb(lifetimeBytes)} kept out · ${allCaps.toLocaleString(locale)} captures across ${distinctProj} project${distinctProj === 1 ? "" : "s"}${lifeStartedYMD ? ` · since ${lifeStartedYMD}` : ""}.`,
-  );
+  // The footprint, stated as a footprint. It is what the knowledge base COSTS
+  // on disk, not more bytes "kept out" — printing it in the same breath as the
+  // savings ladder without that distinction is how a receipt turns into a
+  // brochure.
+  if (storeUsage && storeUsage.stores > 0) {
+    out.push(
+      `  Knowledge base on disk: ${kb(storeUsage.bytes)} across ${storeUsage.stores} store${storeUsage.stores === 1 ? "" : "s"} — this is what it costs to keep, not what it saved.`,
+    );
+  }
   // The honest counterweight: what routing did NOT catch. Printed only when
   // there is something to report, so a clean session stays clean.
   const missed = conversation.missedRedirect;
@@ -2336,7 +2413,7 @@ function renderNarrative5Section(args: {
   // optional team-scale callout, no scaling table, no math footnotes.
   out.push("  ─── 4. The bottom line ───");
   out.push("");
-  out.push(...renderCostExample(lifetimeBytes, lifetimeTokensWithout, lifetimeDays));
+  out.push(...renderCostExample(lifetimeShown, lifetimeTokensWithout, lifetimeDays));
   out.push("");
   out.push("");
 
@@ -2925,6 +3002,12 @@ export function formatReport(
      */
     indexState?: IndexState;
     /**
+     * Disk footprint of the content stores, from `contentStoreUsage()`.
+     * Rendered as its own line in the scope ladder — it is what the knowledge
+     * base costs to keep, not more bytes it saved.
+     */
+    storeUsage?: StoreDiskUsage;
+    /**
      * 5-section narrative renderer overrides. Defaults to ambient
      * `process.cwd()` + `Date.now()` + `detectLocaleAndTz()` for production
      * use; tests inject deterministic values so output is byte-stable.
@@ -2998,7 +3081,7 @@ export function formatReport(
     const locale = opts?.locale ?? detected.locale;
     const tz     = opts?.tz     ?? detected.tz;
     lines.push(...renderNarrative5Section({
-      conversation, lifetime, multiAdapter, realBytes,
+      conversation, lifetime, multiAdapter, realBytes, storeUsage: opts?.storeUsage,
       cwd, locale, tz, now, version, latestVersion,
     }));
     return lines.join("\n");

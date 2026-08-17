@@ -61,10 +61,37 @@ describe("renderCostExample", () => {
     expect(text).toMatch(/Cursor Pro paid for itself/);
   });
 
-  test("includes the 10-dev team scale projection", () => {
+  test("keeps the 10-dev extrapolation out unless it is asked for", () => {
+    // It multiplies one developer's usage by ten; the default receipt states
+    // only what was counted.
     const text = renderCostExample(LIFETIME_BYTES, LIFETIME_TOKENS, LIFETIME_DAYS).join("\n");
-    expect(text).toMatch(/Scale across a 10-dev team/);
-    expect(text).toMatch(/\$[\d,]+\/year saved/);
+    expect(text).not.toMatch(/10 developers/);
+  });
+
+  test("names its basis so the dollar figure is not read as an A/B result", () => {
+    const text = renderCostExample(LIFETIME_BYTES, LIFETIME_TOKENS, LIFETIME_DAYS).join("\n");
+    expect(text).toMatch(/Basis: context-mode's own byte counters/);
+    expect(text).toMatch(/not an A\/B measurement/);
+  });
+
+  test("CONTEXT_MODE_STATS_COST=0 drops the whole cost block", () => {
+    process.env.CONTEXT_MODE_STATS_COST = "0";
+    try {
+      expect(renderCostExample(LIFETIME_BYTES, LIFETIME_TOKENS, LIFETIME_DAYS)).toEqual([]);
+    } finally {
+      delete process.env.CONTEXT_MODE_STATS_COST;
+    }
+  });
+
+  test("CONTEXT_MODE_STATS_TEAM_EXTRAPOLATION=1 opts into the projection, labelled as arithmetic", () => {
+    process.env.CONTEXT_MODE_STATS_TEAM_EXTRAPOLATION = "1";
+    try {
+      const text = renderCostExample(LIFETIME_BYTES, LIFETIME_TOKENS, LIFETIME_DAYS).join("\n");
+      expect(text).toMatch(/Extrapolated to 10 developers/);
+      expect(text).toMatch(/not a measurement of a team/);
+    } finally {
+      delete process.env.CONTEXT_MODE_STATS_TEAM_EXTRAPOLATION;
+    }
   });
 
   test("ends with the EXAMPLES disclaimer", () => {
