@@ -193,18 +193,80 @@ function cleanupTmpDir(tmpDir: string): void {
   }
 }
 
-/** Kill process tree — on Windows uses taskkill /T; on Unix kills the process group. */
-function killTree(proc: ReturnType<typeof spawn>): void {
+/** Non-negative integer from the environment, or the fallback. */
+function envInt(name: string, fallback: number): number {
+  const raw = Number.parseInt(process.env[name] ?? "", 10);
+  return Number.isFinite(raw) && raw >= 0 ? raw : fallback;
+}
+
+/**
+ * Kill process tree — on Windows uses taskkill /T; on Unix kills the process
+ * group.
+ *
+ * On Unix the group gets SIGTERM first and SIGKILL after
+ * `CONTEXT_MODE_EXEC_KILL_GRACE_MS` (default 2000), so a killed build can flush
+ * its output and remove its lock files. Pass `graceMs: 0` where waiting is
+ * wrong — the output-cap path is already drowning in bytes and must stop now.
+ * Windows `taskkill /F` has no equivalent two-step, so the grace is Unix-only.
+ */
+function killTree(proc: ReturnType<typeof spawn>, opts: { graceMs?: number } = {}): void {
   if (isWin && proc.pid) {
     try {
       execSync(`taskkill /F /T /PID ${proc.pid}`, { stdio: "pipe" });
     } catch { /* already dead */ }
-  } else if (proc.pid) {
-    try {
-      // Kill entire process group (negative PID) to prevent orphaned children
-      process.kill(-proc.pid, "SIGKILL");
-    } catch { /* already dead */ }
+    return;
   }
+  if (!proc.pid) return;
+
+  const graceMs = opts.graceMs ?? envInt("CONTEXT_MODE_EXEC_KILL_GRACE_MS", 2000);
+  const pid = proc.pid;
+  if (graceMs <= 0) {
+    try { process.kill(-pid, "SIGKILL"); } catch { /* already dead */ }
+    return;
+  }
+  try {
+    // Kill entire process group (negative PID) to prevent orphaned children
+    process.kill(-pid, "SIGTERM");
+  } catch {
+    return; // already dead — nothing to escalate to
+  }
+  const hard = setTimeout(() => {
+    try { process.kill(-pid, "SIGKILL"); } catch { /* it exited on SIGTERM */ }
+  }, graceMs);
+  // Never hold the event loop open for a process that already died.
+  hard.unref?.();
+  proc.once("close", () => clearTimeout(hard));
+}
+
+/**
+ * Environment variables a sandboxed runtime needs to work at all.
+ *
+ * Used only when CONTEXT_MODE_EXEC_ENV_MODE=allowlist. Anything not named here
+ * (and not one of the forced sandbox values applied afterwards) does not reach
+ * the child: no cloud credentials, no tokens, no connection strings.
+ */
+const ALLOWED_ENV_EXACT = new Set([
+  // Where things are and who is running them.
+  "PATH", "Path", "HOME", "USER", "LOGNAME", "SHELL", "PWD", "TMPDIR", "TMP", "TEMP",
+  // Windows equivalents — a runtime that cannot find its own installation
+  // fails before it runs a line of the script.
+  "SYSTEMROOT", "SystemRoot", "WINDIR", "COMSPEC", "ComSpec", "PATHEXT", "PROCESSOR_ARCHITECTURE",
+  "USERPROFILE", "HOMEDRIVE", "HOMEPATH", "APPDATA", "LOCALAPPDATA", "PROGRAMFILES", "PROGRAMDATA",
+  // Locale and terminal shape.
+  "LANG", "LC_ALL", "LC_CTYPE", "TZ", "TERM", "NO_COLOR", "COLUMNS", "LINES",
+  // Toolchain roots that are locations, not secrets.
+  "NVM_DIR", "ASDF_DIR", "ASDF_DATA_DIR", "PYENV_ROOT", "RBENV_ROOT",
+  "GOROOT", "GOPATH", "GOMODCACHE", "GOCACHE", "CARGO_HOME", "RUSTUP_HOME",
+  "JAVA_HOME", "DOTNET_CLI_TELEMETRY_OPTOUT", "npm_config_cache",
+  "PYTHONDONTWRITEBYTECODE", "PYTHONUNBUFFERED", "PYTHONUTF8",
+]);
+
+/** Prefixes carried through in allowlist mode. */
+const ALLOWED_ENV_PREFIXES = ["CONTEXT_MODE_"];
+
+function isAllowlistedEnvVar(key: string): boolean {
+  if (ALLOWED_ENV_EXACT.has(key)) return true;
+  return ALLOWED_ENV_PREFIXES.some(p => key.startsWith(p));
 }
 
 interface ExecuteOptions {
@@ -256,7 +318,11 @@ export class PolyglotExecutor {
     projectRoot?: string | (() => string);
     runtimes?: RuntimeMap;
   }) {
-    this.#hardCapBytes = opts?.hardCapBytes ?? 100 * 1024 * 1024; // 100MB
+    // 32 MB: far above any output a human reads and far below the point where
+    // buffering it threatens the host process. CONTEXT_MODE_EXEC_MAX_OUTPUT_BYTES
+    // overrides; an explicit constructor value still wins.
+    this.#hardCapBytes = opts?.hardCapBytes
+      ?? envInt("CONTEXT_MODE_EXEC_MAX_OUTPUT_BYTES", 32 * 1024 * 1024);
     const pr = opts?.projectRoot;
     if (typeof pr === "function") {
       this.#projectRootResolver = pr;
@@ -476,6 +542,7 @@ export class PolyglotExecutor {
 
       let timedOut = false;
       let resolved = false;
+      let killedBy: ExecResult["killedBy"];
       // Issue #406 — if the caller didn't pass a timeout we don't fire one.
       // Timeout policy belongs to the MCP host/client (Claude Code, VSCode,
       // JetBrains all enforce their own RPC timeouts); imposing a second
@@ -483,6 +550,7 @@ export class PolyglotExecutor {
       // false negatives whenever the caller forgot the explicit value.
       const timer: NodeJS.Timeout | undefined = timeout === undefined ? undefined : setTimeout(() => {
         timedOut = true;
+        killedBy ??= "timeout";
         if (background) {
           // Background mode: detach process, return partial output, keep running
           resolved = true;
@@ -510,11 +578,58 @@ export class PolyglotExecutor {
             exitCode: 0,
             timedOut: true,
             backgrounded: true,
+            killedBy: "timeout",
           });
         } else {
           killTree(proc);
         }
       }, timeout);
+
+      // Idle watchdog — the answer to "the caller passed no timeout" that
+      // issue #406 rules out a wall clock for. A 30-minute Gradle build prints
+      // continuously; a process that has hung prints nothing. So the limit is
+      // silence, not elapsed time, and every byte of output resets it.
+      //
+      // Armed only when the caller set no timeout of its own (an explicit
+      // timeout is the caller's policy and is left alone) and never in
+      // background mode, where producing nothing for a while is the job.
+      //
+      // Default 0 = off. Shipping the mechanism before the default gives the
+      // watchdog a revision of real use to prove it does not kill honest work.
+      const idleMs = (timeout === undefined && !background)
+        ? envInt("CONTEXT_MODE_EXEC_IDLE_TIMEOUT_MS", 0)
+        : 0;
+      // Absolute cap, off unless asked for — for callers who do want a wall
+      // clock and know what it costs.
+      const wallMs = background ? 0 : envInt("CONTEXT_MODE_EXEC_WALL_TIMEOUT_MS", 0);
+
+      let idleTimer: NodeJS.Timeout | undefined;
+      const armIdle = (): void => {
+        if (idleMs <= 0) return;
+        clearTimeout(idleTimer);
+        idleTimer = setTimeout(() => {
+          timedOut = true;
+          killedBy ??= "idle";
+          killTree(proc);
+        }, idleMs);
+        idleTimer.unref?.();
+      };
+      armIdle();
+
+      const wallTimer: NodeJS.Timeout | undefined = wallMs > 0
+        ? setTimeout(() => {
+            timedOut = true;
+            killedBy ??= "wall";
+            killTree(proc);
+          }, wallMs)
+        : undefined;
+      wallTimer?.unref?.();
+
+      const clearTimers = (): void => {
+        clearTimeout(timer);
+        clearTimeout(idleTimer);
+        clearTimeout(wallTimer);
+      };
 
       // Stream-level byte cap: kill the process once combined stdout+stderr
       // exceeds hardCapBytes. Without this, a command like `yes` or
@@ -526,33 +641,40 @@ export class PolyglotExecutor {
       let capExceeded = false;
 
       proc.stdout!.on("data", (chunk: Buffer) => {
+        armIdle(); // output means alive
         totalBytes += chunk.length;
         if (totalBytes <= this.#hardCapBytes) {
           stdoutChunks.push(chunk);
         } else if (!capExceeded) {
           capExceeded = true;
-          killTree(proc);
+          killedBy ??= "output-cap";
+          killTree(proc, { graceMs: 0 });
         }
       });
 
       proc.stderr!.on("data", (chunk: Buffer) => {
+        armIdle(); // output means alive
         totalBytes += chunk.length;
         if (totalBytes <= this.#hardCapBytes) {
           stderrChunks.push(chunk);
         } else if (!capExceeded) {
           capExceeded = true;
-          killTree(proc);
+          killedBy ??= "output-cap";
+          killTree(proc, { graceMs: 0 });
         }
       });
 
       proc.on("close", (exitCode) => {
-        clearTimeout(timer);
+        clearTimers();
         if (resolved) return; // Already resolved by background timeout
         const rawStdout = Buffer.concat(stdoutChunks).toString("utf-8");
         let rawStderr = Buffer.concat(stderrChunks).toString("utf-8");
 
         if (capExceeded) {
           rawStderr += `\n[output capped at ${(this.#hardCapBytes / 1024 / 1024).toFixed(0)}MB — process killed]`;
+        }
+        if (killedBy === "idle") {
+          rawStderr += `\n[no output for ${Math.round(idleMs / 1000)}s — process killed as hung]`;
         }
 
         const stdout = rawStdout;
@@ -563,11 +685,12 @@ export class PolyglotExecutor {
           stderr,
           exitCode: timedOut ? 1 : (exitCode ?? 1),
           timedOut,
+          ...(killedBy ? { killedBy } : {}),
         });
       });
 
       proc.on("error", (err) => {
-        clearTimeout(timer);
+        clearTimers();
         if (resolved) return; // Already resolved by background timeout
         res({
           stdout: "",
@@ -685,10 +808,24 @@ export class PolyglotExecutor {
     // DOTNET_* runtime knobs (.NET back-compat alias — case-insensitive).
     // PR #546 follow-up: closes the alias bypass for the explicit denylist
     // entries above.
+    //
+    // A denylist can only remove what it has heard of. Everything else — the
+    // whole of AWS_*, GITHUB_TOKEN, database URLs, whatever the shell that
+    // launched the host happened to export — reaches the child. That is fine
+    // when the child is the user's own build and wrong when it is a script the
+    // model wrote, so CONTEXT_MODE_EXEC_ENV_MODE=allowlist inverts the default:
+    // pass the variables a runtime actually needs and nothing else. Left
+    // opt-in because it breaks any command that reads a credential from the
+    // ambient environment, which is a great many real commands.
     const env: Record<string, string> = {};
+    const allowlistMode = process.env.CONTEXT_MODE_EXEC_ENV_MODE === "allowlist";
     for (const [key, val] of Object.entries(process.env)) {
+      if (val === undefined) continue;
+      if (allowlistMode) {
+        if (isAllowlistedEnvVar(key)) env[key] = val;
+        continue;
+      }
       if (
-        val !== undefined &&
         !DENIED.has(key) &&
         !key.startsWith("BASH_FUNC_") &&
         !/^COMPlus_/i.test(key)

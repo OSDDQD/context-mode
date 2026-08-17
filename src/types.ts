@@ -62,6 +62,19 @@ export interface ExecResult {
   timedOut: boolean;
   /** Process was detached and continues running in the background. */
   backgrounded?: boolean;
+  /**
+   * Why the process was killed, when it was.
+   *
+   * `timedOut` stays `true` for every one of these so existing consumers keep
+   * working; this only says which limit fired.
+   *
+   * - `timeout`    — the caller's explicit timeout
+   * - `idle`       — produced no output for the idle window (a hung process;
+   *                  see issue #406 for why a wall clock is the wrong default)
+   * - `wall`       — the optional absolute cap, off unless configured
+   * - `output-cap` — combined stdout+stderr exceeded the byte cap
+   */
+  killedBy?: "timeout" | "idle" | "wall" | "output-cap";
 }
 
 // ─────────────────────────────────────────────────────────
