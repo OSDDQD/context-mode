@@ -16,6 +16,7 @@ import { createHash } from "node:crypto";
 import { tmpdir } from "node:os";
 import { extname, join } from "node:path";
 import { walkDirectoryDetailed, type WalkOptions } from "./store-directory.js";
+import { redactOptionsFromEnv, redactSecrets, type RedactOptions } from "./session/redact.js";
 import type { SearchCompleteness } from "./search/completeness.js";
 export type { SearchCompleteness } from "./search/completeness.js";
 
@@ -616,6 +617,13 @@ export class ContentStore {
   // added to the Read deny list afterwards. Without this hook, refresh
   // would re-read and re-expose the file. See #442 round-3.
   #denyChecker?: (filePath: string) => boolean;
+  /**
+   * Secret-screening policy for everything this store indexes.
+   *
+   * Resolved once: `#screen` runs on every capture, and `process.env` lookups
+   * at that rate are not free. Changing the switch takes a new store.
+   */
+  #redactOptions: RedactOptions;
 
   // ── Cached Prepared Statements ──
   // Prepared once at construction, reused on every call to avoid
@@ -712,6 +720,7 @@ export class ContentStore {
       }
     }
     this.#db = db;
+    this.#redactOptions = redactOptionsFromEnv();
     this.#initSchema();
     this.#prepareStatements();
   }
@@ -1113,6 +1122,31 @@ export class ContentStore {
     this.#denyChecker = fn;
   }
 
+  // ── Secret Screening ──
+
+  /**
+   * Screen credentials out of text on its way into the index.
+   *
+   * The one place the policy is applied, called by each public entry point
+   * exactly once, and always before anything durable is derived from the
+   * text — the chunks, the vocabulary, and above all the content hash.
+   * Hashing after screening is what keeps the P1.2 cache honest: the stored
+   * hash describes the bytes that were actually stored, so flipping
+   * CONTEXT_MODE_INDEX_REDACT invalidates the row and re-indexes the source
+   * instead of leaving a stale hash pointing at differently-screened content.
+   *
+   * See src/session/redact.ts for what this does and does not promise.
+   */
+  #screen(text: string): { text: string; count: number } {
+    const screened = redactSecrets(text, this.#redactOptions);
+    return { text: screened.text, count: screened.count };
+  }
+
+  /** Report redactions on an index result, and only when there were any. */
+  #withRedactions(result: IndexResult, count: number): IndexResult {
+    return count > 0 ? { ...result, redactions: count } : result;
+  }
+
   // ── Index ──
 
   index(options: {
@@ -1164,6 +1198,10 @@ export class ContentStore {
     }
     const label = source ?? path ?? "untitled";
 
+    // Ahead of the hash, the chunking and the vocabulary — see #screen.
+    const screened = this.#screen(text);
+    text = screened.text;
+
     // Stale detection: file_path + SHA-256. Hashed for EVERY source, not only
     // file-backed ones — a batch command re-run with identical output is just
     // as skippable as an unchanged file, and that is the common case for the
@@ -1175,7 +1213,8 @@ export class ContentStore {
     if (unchanged) return unchanged;
 
     const chunks = this.#chunkFile(text, filePath, MAX_CHUNK_BYTES);
-    return withRetry(() => this.#insertChunks(chunks, label, text, filePath, contentHash, attribution));
+    const result = withRetry(() => this.#insertChunks(chunks, label, text, filePath, contentHash, attribution));
+    return this.#withRedactions(result, screened.count);
   }
 
   /**
@@ -1314,6 +1353,28 @@ export class ContentStore {
     attribution?: { sessionId?: string; eventId?: string },
     maxChunkBytes: number = MAX_CHUNK_BYTES,
   ): IndexResult {
+    const screened = this.#screen(content ?? "");
+    const result = this.#indexScreenedPlainText(
+      screened.text, source, linesPerChunk, attribution, maxChunkBytes,
+    );
+    return this.#withRedactions(result, screened.count);
+  }
+
+  /**
+   * The body of `indexPlainText`, on text that has already been screened.
+   *
+   * Split out for `indexJSON`, which screens its own input before parsing it
+   * and falls back here when the parse fails. Screening twice would be
+   * harmless but pointless: the second pass has nothing left to find, and the
+   * count from the first would be the one that got dropped.
+   */
+  #indexScreenedPlainText(
+    content: string,
+    source: string,
+    linesPerChunk: number,
+    attribution: { sessionId?: string; eventId?: string } | undefined,
+    maxChunkBytes: number,
+  ): IndexResult {
     if (!content || content.trim().length === 0) {
       return this.#insertChunks([], source, "", undefined, undefined, attribution);
     }
@@ -1345,25 +1406,37 @@ export class ContentStore {
     maxChunkBytes: number = MAX_CHUNK_BYTES,
     attribution?: { sessionId?: string; eventId?: string },
   ): IndexResult {
-    if (!content || content.trim().length === 0) {
-      return this.indexPlainText("", source, undefined, attribution, maxChunkBytes);
+    // Screened before the parse, not after: what gets parsed has to be what
+    // gets stored, or the walk would build chunks out of the original bytes.
+    // A marker is an ordinary string body — `[redacted:aws-access-key]` inside
+    // a JSON string leaves the document parseable — and a paste mangled badly
+    // enough to stop parsing falls through to the plain-text path below.
+    const screened = this.#screen(content ?? "");
+    const text = screened.text;
+    const plainText = () => this.#indexScreenedPlainText(
+      text, source, PLAIN_TEXT_LINES_PER_CHUNK, attribution, maxChunkBytes,
+    );
+
+    if (!text || text.trim().length === 0) {
+      return this.#withRedactions(plainText(), screened.count);
     }
 
     let parsed: unknown;
     try {
-      parsed = JSON.parse(content);
+      parsed = JSON.parse(text);
     } catch {
-      return this.indexPlainText(content, source, undefined, attribution, maxChunkBytes);
+      return this.#withRedactions(plainText(), screened.count);
     }
 
     const chunks: Chunk[] = [];
     this.#walkJSON(parsed, [], chunks, maxChunkBytes);
 
     if (chunks.length === 0) {
-      return this.indexPlainText(content, source, undefined, attribution, maxChunkBytes);
+      return this.#withRedactions(plainText(), screened.count);
     }
 
-    return withRetry(() => this.#insertChunks(chunks, source, content, undefined, undefined, attribution));
+    const result = withRetry(() => this.#insertChunks(chunks, source, text, undefined, undefined, attribution));
+    return this.#withRedactions(result, screened.count);
   }
 
   // ── Shared DB Insertion ──

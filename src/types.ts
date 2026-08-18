@@ -97,6 +97,8 @@ export interface IndexResult {
    * counts describe what is already stored. See ADR-0007.
    */
   skipped?: boolean;
+  /** Credentials replaced by `[redacted:<type>]` before indexing. Absent when none. */
+  redactions?: number;
 }
 
 /**
