@@ -1050,8 +1050,11 @@ function semanticIndexReport(): string {
       : `${Math.round(coverage.bytes / 1024)} KB`;
 
     const out: string[] = ["", "  ─── Semantic index (hybrid search) ───", ""];
+    // Explicit locale, same reason as formatSemanticHint: the rest of this
+    // block (the percentage, the MB) is already locale-independent, so a
+    // host-locale group separator would be the one value that moved.
     out.push(
-      `  Embedded: ${coverage.vectors.toLocaleString()} of ${coverage.chunks.toLocaleString()} chunks (${pct}%) · ${model} · ${mb}`,
+      `  Embedded: ${coverage.vectors.toLocaleString("en-US")} of ${coverage.chunks.toLocaleString("en-US")} chunks (${pct}%) · ${model} · ${mb}`,
     );
     out.push(...semanticCoverageAdvice(coverage, configured?.model));
     const t = getHybridTelemetry();
@@ -1778,7 +1781,13 @@ export function formatSemanticHint(coverage: { chunks: number; vectors: number }
   if (coverage.chunks < 200) return null;
   if (coverage.vectors >= coverage.chunks) return null;
   const pct = Math.min(100, Math.round((coverage.vectors / coverage.chunks) * 100));
-  const total = coverage.chunks.toLocaleString();
+  // Explicit locale. A bare toLocaleString() renders 1320 as "1,320" here and
+  // "1 320" (with a non-breaking space) on a ru/fr host — same build, two
+  // different strings. This one goes into a tool response the model reads, so
+  // it has to be the same everywhere. The narrative ctx_stats report in
+  // src/session/analytics.ts is the deliberate opposite: it formats for the
+  // human through detectLocaleAndTz().
+  const total = coverage.chunks.toLocaleString("en-US");
   return coverage.vectors === 0
     ? `> Semantic layer inactive: 0 of ${total} chunks embedded — these results are lexical-only. \`context-mode drain\` warms the index.`
     : `> Semantic layer at ${pct}% of ${total} chunks — the rest is lexical-only. \`context-mode drain\` finishes the warm-up.`;
