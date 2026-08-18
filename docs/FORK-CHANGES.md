@@ -2,7 +2,7 @@
 
 Fork of [mksglu/context-mode](https://github.com/mksglu/context-mode) at v1.0.169.
 
-Thirty-two changes, each addressing a gap observed while running the plugin daily in
+Thirty-three changes, each addressing a gap observed while running the plugin daily in
 Claude Code. Every one is backwards compatible, and every behavioural default
 carries an env switch back. Two defaults differ from upstream on purpose: the
 compact tool descriptions (what ships on every request) and the semantic layer,
@@ -859,7 +859,8 @@ tools, the same names, the same registration order (MCP hosts render the list in
 that order), each with a handler and a description. It also greps the combined
 source for `registerTool` names, so a handler moved into a file the helper does
 not list fails loudly instead of vanishing. Baselines recorded for the move:
-bundle 740,908 bytes, `madge --circular` 5 cycles, none through `server.ts`.
+bundle 740,908 bytes — a local build, see below — `madge --circular` 5 cycles,
+none through `server.ts`.
 
 **Then the first motion (`f1252c9`).** `ctx_search` and the deduper move out:
 
@@ -881,9 +882,17 @@ Registration stays in the same position, so the tool list order is unchanged.
 | | before | after |
 |---|---|---|
 | `src/server.ts` | 6,276 lines | 5,901 lines |
-| `server.bundle.mjs` | 740,908 B | 741,535 B (+0.08%) |
+| `server.bundle.mjs`, built locally | 740,908 B | 741,535 B (+0.08%) |
 | `madge --circular` | 5 cycles | 5 cycles, none through `server.ts` |
 | `npm test` | — | 5,038 passing |
+
+The bundle row measures a **local build of each commit's source** — the same
+esbuild invocation `npm run bundle` runs, esbuild 0.27.7 — not the artifact
+committed at that point. The two differ: nothing in the split rebuilt the
+bundle, so the committed `server.bundle.mjs` sat at 729,840 B from before
+`f1252c9` until `281049f` regenerated it. Rebuilding each state from its own
+source is what makes the before/after comparable; reading the committed blob
+would have measured when someone last ran the build, not what the split cost.
 
 **Then the second motion (`9f769db`).** `ctx_batch_execute`, `ctx_gather`,
 `ctx_fetch_and_index` and the stats/ops handlers move out the same way:
@@ -891,7 +900,8 @@ Registration stays in the same position, so the tool list order is unchanged.
 (287), and `src/tools/shared/state.ts` (114) for the cross-handler state the
 `ToolDeps` seam does not carry. The table above describes the split up to
 `f1252c9`; measured at `281049f`, `src/server.ts` is down to 4,711 lines from the
-6,276 it started at, and `madge --circular` still reports the same 5 cycles, none
+6,276 it started at, the local bundle build is 752,021 B (+1.5% over the
+pre-split 740,908), and `madge --circular` still reports the same 5 cycles, none
 of them through `server.ts`.
 
 ## 28. Retrieval quality is a number now, and the number is gated
@@ -1197,6 +1207,83 @@ answers `Partially purged source "…": N of M row(s) removed` as an error with
 what to do next. Removing one row of three and calling it done is the same
 silent success as removing none.
 
+## 33. The hook bundle that the build never built
+
+`package.json`, `.gitignore`, `.github/workflows/bundle.yml`,
+`scripts/plugin-cache-integrity.mjs`, `hooks/session-attribution.bundle.mjs`,
+`tests/scripts/bundle-manifest.test.ts`,
+`tests/hooks/attribution-bundle-parity.test.ts`,
+`tests/integration/cross-project-attribution.test.ts`
+
+`270a56f` added per-event project attribution: the source
+(`src/session/project-attribution.ts`), its tests, and a built
+`hooks/session-attribution.bundle.mjs`. It did not touch `package.json`. The
+bundle was produced by hand once and never entered `scripts.bundle`, so the
+build has never rebuilt it — while the source went on to change three times
+(`79e0d7e`, `92997e4`, `2e7a543`).
+
+That matters because the hooks load the bundle, not the source.
+`createSessionLoaders().loadProjectAttribution()`
+(`hooks/session-loaders.mjs:41-53`) resolves bundle first, `build/session/` only
+as a fallback, and five hook entry points go through it — PostToolUse,
+UserPromptSubmit, SessionStart, Stop, PreCompact. Every attribution test, in
+turn, imported `src/`. So the tests and the runtime were reading two different
+files, and nothing compared them.
+
+Rebuilding the source with the same esbuild invocation the other bundles use
+shows what four months of that cost:
+
+| | shipped bundle | rebuilt from source |
+|---|---|---|
+| size | 2,799 B | 3,250 B |
+| sha256 | `3c041cd0…61743` | `a91a10c6…8ec3b` |
+| Bug 8 fix (`2e7a543`) | absent | present |
+| `ATTRIBUTION_CONFIDENCE` | not exported | exported |
+
+Concretely: given a `cwd` event for project B followed by a path-less event in
+the same batch, with the hook's own cwd pointing at project A, the shipped
+bundle attributed the second event to A and the rebuild attributes it to B.
+That is exactly the fix `2e7a543` landed in June — dead in production ever
+since, with a green test suite standing over it.
+
+**None of the three guards could see it.** `npm run assert-bundle` scans an
+explicit list of files and the orphan was not on it. `plugin-cache-integrity`
+misses it twice: it checks existence only, never content, and the file is
+whitelisted into `SOFT_FALLBACK_BUNDLES` *and* absent from the set derived from
+`scripts.bundle` — a file that is not built cannot be required. The CI workflow
+commits bundles by an explicit `git add -f` list, which the orphan was also not
+on. Three mechanisms, each correct in its own terms, none of them asking the one
+question that mattered: is this file still what its source says it is.
+
+Deleting the orphan and living on the `build/` fallback was not an option:
+`build/` is gitignored and untracked, so on a marketplace install — a git clone
+— the bundle is the only copy that exists, and its absence would have made
+`loadProjectAttribution()` throw into the silent `catch` that PostToolUse keeps
+so hooks never block a session. The events would have stopped being recorded
+without a word.
+
+So the bundle joins the build: `scripts.bundle` produces it, `assert-bundle`
+scans it, the CI workflow commits it, `.gitignore` treats it like the other six.
+Two invariants keep it there. `tests/scripts/bundle-manifest.test.ts` asserts
+that every `hooks/*.bundle.mjs` in the tree is produced by `scripts.bundle`,
+scanned by `assert-bundle` and committed by CI — with its first test pinning the
+`--outfile=` parser against known literals, since every later assertion is
+"X is a member of what the parser returned" and a parser returning nothing would
+pass all of them. `tests/hooks/attribution-bundle-parity.test.ts` asserts
+against the built bundle rather than `src`: the Bug 8 case explicitly, then
+parity between bundle and source across five event batches, then that the bundle
+exports everything the source exports. Both were red before the rebuild and
+green after. `tests/integration/cross-project-attribution.test.ts` — the suite
+that should have caught this and could not — now resolves through
+`loadProjectAttribution()`, the way the hooks do; its own comment used to claim
+it was exercising the production path while importing `src/`.
+
+**The correction is not retroactive.** Rows already in `session_events` keep the
+`project_dir` they were written with, so per-project history has a seam at this
+commit: path-less events following a `cd` or `git -C` are attributed to the
+target project after it and to the session's startup cwd before it. Aggregates
+that span the boundary mix both conventions.
+
 ## Merged ahead of upstream: the fetch extraction ladder
 
 `src/fetch/blocks.ts`, `src/fetch/extract.ts`, `src/fetch/page-store.ts`, `src/server.ts`
@@ -1306,8 +1393,8 @@ rely on when handling credentials.
 
 ## Tests
 
-`npm test` — 5,163 passing and 38 skipped across 242 suites, recorded at
-`b005dcb`, the last commit of the P2 series that changes behaviour. New suites:
+`npm test` — 5,175 passing and 38 skipped across 244 suites, recorded at
+`3f1df63`, the last commit that changes behaviour. New suites:
 
 - `tests/cli/fork-info.test.ts` — upgrade-source resolution, fork identity
 - `tests/core/store-delete-source.test.ts` — source eviction
@@ -1341,6 +1428,8 @@ rely on when handling credentials.
 - `tests/store-code-chunking.test.ts` — declaration boundaries, packing, the byte-for-byte opt-out
 - `tests/cli/inventory.test.ts` — label grouping, ordering, empty store, and that the command stays read-only
 - `tests/core/search.test.ts` — also carries the retrieval gate: the 18 named cases plus the aggregate against `retrieval-baseline.json`
+- `tests/scripts/bundle-manifest.test.ts` — every hook bundle is built, scanned and committed; the parser itself is pinned first
+- `tests/hooks/attribution-bundle-parity.test.ts` — the shipped bundle against its source, including the Bug 8 case that the orphan lost
 
 ## Installing this fork in Claude Code
 
