@@ -149,7 +149,7 @@ const SOFT_FALLBACK_BUNDLES = new Set([
  * comparison with SOFT_FALLBACK_BUNDLES. Caller normalizes to
  * `path.join` shape before pluginRoot-relative resolution.
  */
-function extractBundleOutfiles(pkg) {
+export function extractBundleOutfiles(pkg) {
   const script = pkg?.scripts?.bundle;
   if (typeof script !== "string") return [];
   const out = new Set();

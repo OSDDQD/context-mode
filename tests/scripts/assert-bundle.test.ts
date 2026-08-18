@@ -5,6 +5,9 @@ import { mkdtempSync, readFileSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 
+// @ts-expect-error — plain .mjs build script, no type declarations.
+import { extractBundleOutfiles } from "../../scripts/plugin-cache-integrity.mjs";
+
 /**
  * G3 — Post-build bundle invariant guardrail.
  *
@@ -101,15 +104,17 @@ describe("assert-bundle script", () => {
   // Do NOT skip this test — its red state is the *forcing function* that
   // makes the sweep agent's work load-bearing. Skipping it removes the
   // safety net that proves G3 is wired correctly to real bundles.
+  //
+  // The bundle list is derived from `scripts.bundle` rather than hardcoded:
+  // the hardcoded version silently lagged two bundles (security, and the
+  // orphaned session-attribution), which is the same parallel-list trap that
+  // bit Algo-D4 in v1.0.126. See tests/scripts/bundle-manifest.test.ts.
   it("current production bundles pass the assert-bundle clean check", () => {
     const repoRoot = resolve(__dirname, "../..");
-    const bundles = [
-      "server.bundle.mjs",
-      "cli.bundle.mjs",
-      "hooks/session-extract.bundle.mjs",
-      "hooks/session-snapshot.bundle.mjs",
-      "hooks/session-db.bundle.mjs",
-    ].map((p) => join(repoRoot, p));
+    const pkg = JSON.parse(readFileSync(join(repoRoot, "package.json"), "utf-8"));
+    const outfiles: string[] = extractBundleOutfiles(pkg);
+    expect(outfiles.length).toBeGreaterThanOrEqual(7);
+    const bundles = outfiles.map((p) => join(repoRoot, p));
 
     const r = runAssert(...bundles);
     if (r.status !== 0) {

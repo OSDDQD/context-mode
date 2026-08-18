@@ -885,10 +885,14 @@ Registration stays in the same position, so the tool list order is unchanged.
 | `madge --circular` | 5 cycles | 5 cycles, none through `server.ts` |
 | `npm test` | — | 5,038 passing |
 
-**Not finished.** The next wave — `src/tools/batch.ts`, `src/tools/fetch.ts`,
-`src/tools/shared/state.ts` — is in the working tree and not committed as this
-is written. Treat the numbers above as describing the split up to `f1252c9`, not
-its end state.
+**Then the second motion (`9f769db`).** `ctx_batch_execute`, `ctx_gather`,
+`ctx_fetch_and_index` and the stats/ops handlers move out the same way:
+`src/tools/batch.ts` (363 lines), `src/tools/fetch.ts` (911), `src/tools/ops.ts`
+(287), and `src/tools/shared/state.ts` (114) for the cross-handler state the
+`ToolDeps` seam does not carry. The table above describes the split up to
+`f1252c9`; measured at `281049f`, `src/server.ts` is down to 4,711 lines from the
+6,276 it started at, and `madge --circular` still reports the same 5 cycles, none
+of them through `server.ts`.
 
 ## 28. Retrieval quality is a number now, and the number is gated
 
