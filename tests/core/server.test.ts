@@ -2713,9 +2713,14 @@ describe("ctx_purge scoped handler (issue #520)", () => {
   });
 
   // Slice 7 — schema accepts {confirm:true, sessionId:"<uuid>"}.
-  test("slice 7: schema declares optional sessionId and scope", () => {
+  test("slice 7: schema declares optional sessionId, source and scope", () => {
     expect(purgeBody).toMatch(/sessionId:\s*z\.string\(\)\.optional\(\)/);
-    expect(purgeBody).toMatch(/scope:\s*z\.enum\(\[["']session["'],\s*["']project["']\]\)\.optional\(\)/);
+    expect(purgeBody).toMatch(/source:\s*z\.string\(\)\.optional\(\)/);
+    // P2.3c added the targeted third scope; the first two keep their order so
+    // an existing caller's scope value still parses.
+    expect(purgeBody).toMatch(
+      /scope:\s*z\.enum\(\[["']session["'],\s*["']project["'],\s*["']source["']\]\)\.optional\(\)/,
+    );
   });
 
   // Slice 8 — bare {confirm:true} (no sessionId, no scope) emits a
@@ -2767,6 +2772,99 @@ describe("ctx_purge scoped handler (issue #520)", () => {
         "'input_schema does not support fields'. Move cross-field checks into " +
         "the handler body. See issue #563.",
     ).toEqual([]);
+  });
+});
+
+// ─── P2.3c: ctx_purge targeted source delete ────────────────────────────────
+//
+// Before this, ctx_purge could only wipe a whole session or the whole project;
+// dropping one thing you indexed meant destroying everything around it. The
+// third scope deletes exactly one source by label.
+//
+// The guard paths below run the REAL handler, because they all return before
+// the store is ever opened. The delete path itself is pinned at source level:
+// invoking it for real would delete from this project's live content DB.
+
+describe("ctx_purge targeted source delete (P2.3c)", () => {
+  const purgeTool = REGISTERED_CTX_TOOLS.find(t => t.name === "ctx_purge")!;
+  const call = (args: Record<string, unknown>) =>
+    purgeTool.handler(args) as Promise<{ content: Array<{ text: string }>; isError?: boolean }>;
+
+  test("source + sessionId is refused as ambiguous, not resolved by guessing", async () => {
+    const r = await call({ confirm: true, source: "docs", sessionId: "7c8a-1234" });
+    expect(r.isError).toBe(true);
+    expect(r.content[0].text).toMatch(/[Aa]mbiguous/);
+  });
+
+  test("source + scope:'project' is refused as ambiguous", async () => {
+    const r = await call({ confirm: true, source: "docs", scope: "project" });
+    expect(r.isError).toBe(true);
+    expect(r.content[0].text).toMatch(/[Aa]mbiguous/);
+  });
+
+  test("scope:'source' without a label names what is missing", async () => {
+    const r = await call({ confirm: true, scope: "source" });
+    expect(r.isError).toBe(true);
+    expect(r.content[0].text).toContain("source");
+  });
+
+  test("the targeted scope is still gated on confirm", async () => {
+    const r = await call({ confirm: false, source: "docs" });
+    expect(r.isError).toBeFalsy();
+    expect(r.content[0].text).toContain("Purge cancelled");
+  });
+
+  // The primitive the branch is built on: deleting by label removes that
+  // source's chunks and leaves every sibling searchable.
+  test("deleteSource removes only the named source", () => {
+    const tmpPath = join(tmpdir(), `ctx-purge-source-${Date.now()}.db`);
+    const store = new ContentStore(tmpPath);
+    try {
+      store.index({ content: "alpha content about widgets", source: "alpha" });
+      store.index({ content: "beta content about gadgets", source: "beta" });
+
+      expect(store.deleteSource("alpha")).toBe(1);
+      expect(store.listSources().map(s => s.label)).toEqual(["beta"]);
+      expect(store.search("widgets", 5)).toHaveLength(0);
+      expect(store.search("gadgets", 5).length).toBeGreaterThan(0);
+
+      // A label nothing carries deletes nothing — which is exactly why the
+      // handler checks listSources() first instead of trusting the 0.
+      expect(store.deleteSource("alph")).toBe(0);
+    } finally {
+      store.cleanup();
+    }
+  });
+
+  describe("source branch contract (static)", () => {
+    const serverSrc = serverSource();
+    const purgeBody = serverSrc.match(
+      /server\.registerTool\(\s*"ctx_purge"[\s\S]*?^\);/m,
+    )![0];
+    const branchIdx = purgeBody.indexOf('effectiveScope === "source"');
+    const branch = purgeBody.slice(branchIdx, purgeBody.indexOf("Close the persistent FTS5"));
+
+    test("the branch returns before the file-level wipe closes the store", () => {
+      expect(branchIdx).toBeGreaterThan(-1);
+      expect(branchIdx).toBeLessThan(purgeBody.indexOf("openStore.cleanup()"));
+    });
+
+    test("it resolves the label against listSources before deleting", () => {
+      expect(branch).toContain("listSources()");
+      expect(branch).toContain("store.deleteSource(label)");
+    });
+
+    test("an unmatched label returns isError, never a cheerful no-op", () => {
+      const notFound = branch.slice(branch.indexOf("exact.length === 0"));
+      expect(notFound).toContain("Nothing was deleted");
+      expect(notFound).toMatch(/isError:\s*true/);
+    });
+
+    test("it touches neither the deleted list nor the stats", () => {
+      expect(branch).not.toContain("deleted.push");
+      expect(branch).not.toContain("sessionStats.");
+      expect(branch).not.toContain("getStatsFilePath");
+    });
   });
 });
 
