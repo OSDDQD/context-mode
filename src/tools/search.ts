@@ -63,7 +63,7 @@ export function registerCtxSearch(deps: ToolDeps): void {
 
   WHEN NOT:
     - The data you want to query has never been stored in the knowledge base AND no session memory has accumulated around it — capture first (run a gather-and-index call), then come back here to query
-    - You have one ad-hoc question against data that is not in the knowledge base — answer it inline by running code in the sandbox tool; one round-trip instead of capture-then-query
+    - You have one ad-hoc question against data that is not in the knowledge base — answer it inline by running code in ctx_execute; one round-trip instead of capture-then-query
 
   RETURNS:
     Per-query ranked sections with window-extracted snippets. Use 2-4 specific technical terms per query. Common session-memory source labels: \`decision\` (user corrections / preferences), \`error\` and \`error-resolution\` (past failures + their fixes), \`blocker\`, \`plan\`, \`user-prompt\`, \`rejected-approach\`, \`compaction\` (post-compact session guide). See ctx_stats for live category counts. Each response carries a throttle counter (call #N/M in the rolling time window); results taper toward the soft cap and calls block after the hard cap. Tune via CONTEXT_MODE_SEARCH_WINDOW_MS, CONTEXT_MODE_SEARCH_MAX_RESULTS_AFTER, CONTEXT_MODE_SEARCH_BLOCK_AFTER.

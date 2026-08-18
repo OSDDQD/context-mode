@@ -67,7 +67,7 @@ export function registerBatchTools(deps: BatchToolDeps): void {
       },
       description: `Run multiple commands in ONE call. Every command's output is auto-indexed into the knowledge base; if you also pass \`queries\`, the matching sections come back in the same round trip so a follow-up search call is not needed.
 
-Concurrency parallelizes the FETCH phase (run-the-commands). The DERIVATION phase — turning raw output into an answer — still belongs in code: add a processing command that consumes the indexed output and prints only the answer, so the raw bytes never enter your conversation (Think-in-Code, same principle as the sandbox tool).
+Concurrency parallelizes the FETCH phase (run-the-commands). The DERIVATION phase — turning raw output into an answer — still belongs in code: add a processing command that consumes the indexed output and prints only the answer, so the raw bytes never enter your conversation (Think-in-Code, same principle as ctx_execute).
 
 WHEN:
   - You have 3+ related commands you would otherwise run sequentially (multi-issue lookups, git log + git diff + git blame, multi-file reads, multi-region cloud queries)
@@ -76,7 +76,7 @@ WHEN:
   - The combined output is large enough that piping it through ctx_search later would itself be expensive — let auto-index + inline queries do both in one shot
 
 WHEN NOT:
-  - Single command with no follow-up query — run it in the sandbox tool directly
+  - Single command with no follow-up query — run it in ctx_execute directly
   - CPU-bound or stateful commands — keep concurrency at 1 (npm test, build, lint, port-binding servers, lock-file holders, anything that races on the same resource)
 
 RETURNS:
