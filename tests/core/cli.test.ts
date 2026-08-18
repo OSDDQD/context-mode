@@ -1017,7 +1017,9 @@ describe("Bin entry uses cli.bundle.mjs", () => {
 
   it("server.ts ctx_doctor runs diagnostics in-process (no CLI dependency)", () => {
     const src = serverSource();
-    const doctorSection = src.slice(src.indexOf("ctx_doctor"), src.indexOf("ctx_upgrade"));
+    // Anchor on the quoted tool names — the bare names also occur in prose
+    // (section comments naming which tools stayed in src/server.ts).
+    const doctorSection = src.slice(src.indexOf('"ctx_doctor"'), src.indexOf('"ctx_upgrade"'));
     // Must NOT delegate to CLI — runs server-side
     expect(doctorSection).not.toContain('node "');
     // Must run actual checks

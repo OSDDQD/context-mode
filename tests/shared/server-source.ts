@@ -32,6 +32,12 @@ export const SERVER_SOURCE_FILES: readonly string[] = [
   "src/server.ts",
   // Extracted from src/server.ts — see docs/adr and the split commits.
   "src/tools/search.ts",
+  // fetch before batch: assertions that slice "from the ctx_fetch_and_index
+  // registration to the ctx_batch_execute one" rely on that order.
+  "src/tools/fetch.ts",
+  "src/tools/batch.ts",
+  "src/tools/ops.ts",
+  "src/tools/shared/state.ts",
   "src/search/dedup.ts",
 ];
 

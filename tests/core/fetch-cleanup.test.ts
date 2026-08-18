@@ -25,10 +25,9 @@ import { tmpdir } from "node:os";
 import { join, dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, test, expect, beforeAll, afterAll } from "vitest";
-import { serverSourcePath } from "../shared/server-source.js";
+import { serverSource } from "../shared/server-source.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
-const SERVER_TS = serverSourcePath();
 
 // ───────────────────────────────────────────────────────────────────
 // Helpers
@@ -76,7 +75,9 @@ function readAndCleanup(outputPath: string): { content: string | null; error: Er
 
 describe("ctx_fetch_and_index cleanup — static source guard", () => {
   test("fetch path allocates and cleans up the temp file", () => {
-    const src = readFileSync(SERVER_TS, "utf-8");
+    // Whole server source, not just src/server.ts: the fetch path now lives
+    // in src/tools/fetch.ts, and reading one file would pass vacuously.
+    const src = serverSource();
     // The fetch path may live in an extracted helper (runFetchOne) or inline
     // in the registered handler. Either way, the source MUST allocate a
     // ctx-fetch-*.dat path and clean it up in a finally branch.

@@ -30,8 +30,10 @@ describe("ctx_search timeline mode wiring (server.ts)", () => {
   });
 
   it("derives configDir from _detectedAdapter.getConfigDir() (not hardcoded ~/.claude)", () => {
+    // The cell moved to src/tools/shared/state.ts, so the read goes through
+    // its `detectedAdapter()` getter rather than the module-level binding.
     expect(SERVER_SRC).toMatch(
-      /_detectedAdapter\??\.getConfigDir\(\)/,
+      /(?:_detectedAdapter|detectedAdapter\(\))\??\.getConfigDir\(\)/,
     );
   });
 

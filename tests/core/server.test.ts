@@ -55,7 +55,7 @@ import {
 import { ROUTING_BLOCK } from "../../hooks/routing-block.mjs";
 import { sanitizeSchemaForStrictClients, resolveExecTimeout, AGY_DEFAULT_EXEC_TIMEOUT_MS, REGISTERED_CTX_TOOLS } from "../../src/server.js";
 import { stripJsonComments, parseJsonc } from "../../src/util/jsonc.js";
-import { serverSource, serverSourcePath } from "../shared/server-source.js";
+import { serverSource } from "../shared/server-source.js";
 
 // ─── Shared setup ───────────────────────────────────────────────────────────
 const runtimes = detectRuntimes();
@@ -2331,7 +2331,9 @@ describe("ctx_purge is the sole reset/wipe mechanism", () => {
   test("ctx_stats does NOT accept a reset parameter", () => {
     // Extract only the ctx_stats tool registration
     const statsMatch = serverSrc.match(
-      /server\.registerTool\(\s*"ctx_stats"[\s\S]*?^\);/m,
+      // `^ {0,2}\);` rather than `^\);`: ctx_stats registers itself from
+      // src/tools/ops.ts now, so its closing paren sits one indent in.
+      /server\.registerTool\(\s*"ctx_stats"[\s\S]*?^ {0,2}\);/m,
     );
     expect(statsMatch).not.toBeNull();
     const statsBody = statsMatch![0];
@@ -2368,8 +2370,10 @@ describe("ctx_purge is the sole reset/wipe mechanism", () => {
     expect(purgeMatch).not.toBeNull();
     const purgeBody = purgeMatch![0];
     // 1. Closes the FTS5 knowledge base BEFORE wiping (releases Windows lock)
-    expect(purgeBody).toContain("_store.cleanup()");
-    expect(purgeBody).toContain("_store = null");
+    // The cell moved to src/tools/shared/state.ts, so the handler reaches it
+    // through peekStore()/setStore() rather than a module-level `_store`.
+    expect(purgeBody).toContain("openStore.cleanup()");
+    expect(purgeBody).toContain("setStore(null)");
     // 2. Delegates the on-disk wipe to the purgeSession deep module so all
     //    file-kind sweeps (session DB, events.md, cleanup flag, FTS5 store,
     //    legacy content) flow through ONE code path with uniform dual-hash.
@@ -2393,8 +2397,9 @@ describe("Platform-aware session paths via adapter", () => {
   // ── Adapter is stored at startup ──
   test("server stores detected adapter at startup", () => {
     expect(serverSrc).toContain("let _detectedAdapter");
-    // main() must assign the adapter after detection
-    expect(serverSrc).toMatch(/_detectedAdapter\s*=\s*await\s+getAdapter/);
+    // main() must assign the adapter after detection. The cell lives in
+    // src/tools/shared/state.ts now, so the assignment goes through its setter.
+    expect(serverSrc).toMatch(/setDetectedAdapter\(\s*await\s+getAdapter/);
   });
 
   // ── No hardcoded .claude in tool handlers ──
@@ -2408,7 +2413,9 @@ describe("Platform-aware session paths via adapter", () => {
 
   test("ctx_stats has no hardcoded .claude path", () => {
     const statsMatch = serverSrc.match(
-      /server\.registerTool\(\s*"ctx_stats"[\s\S]*?^\);/m,
+      // `^ {0,2}\);` rather than `^\);`: ctx_stats registers itself from
+      // src/tools/ops.ts now, so its closing paren sits one indent in.
+      /server\.registerTool\(\s*"ctx_stats"[\s\S]*?^ {0,2}\);/m,
     );
     expect(statsMatch).not.toBeNull();
     expect(statsMatch![0]).not.toMatch(/["']\.claude["']/);
@@ -2527,7 +2534,9 @@ describe("Project dir hash consistency", () => {
 
   test("ctx_stats uses hashProjectDir, not inline hashing", () => {
     const statsMatch = serverSrc.match(
-      /server\.registerTool\(\s*"ctx_stats"[\s\S]*?^\);/m,
+      // `^ {0,2}\);` rather than `^\);`: ctx_stats registers itself from
+      // src/tools/ops.ts now, so its closing paren sits one indent in.
+      /server\.registerTool\(\s*"ctx_stats"[\s\S]*?^ {0,2}\);/m,
     );
     expect(statsMatch).not.toBeNull();
     expect(statsMatch![0]).toContain("hashProjectDir");
@@ -2556,7 +2565,9 @@ describe("Project dir hash consistency", () => {
   //    bare-call form is correct for that helper.
   test("ctx_stats scopes lifetime aggregation to the active adapter sessionsDir", () => {
     const statsMatch = serverSrc.match(
-      /server\.registerTool\(\s*"ctx_stats"[\s\S]*?^\);/m,
+      // `^ {0,2}\);` rather than `^\);`: ctx_stats registers itself from
+      // src/tools/ops.ts now, so its closing paren sits one indent in.
+      /server\.registerTool\(\s*"ctx_stats"[\s\S]*?^ {0,2}\);/m,
     );
     expect(statsMatch).not.toBeNull();
     const body = statsMatch![0];
@@ -2852,10 +2863,10 @@ describe("ContentStore purge behavior", () => {
       /server\.registerTool\(\s*"ctx_purge"[\s\S]*?^\);/m,
     )![0];
 
-    // Handler resolves storePath BEFORE the optional _store.cleanup() so
-    // the disk wipe runs whether _store was open or not.
+    // Handler resolves storePath BEFORE the optional store cleanup so
+    // the disk wipe runs whether the store was open or not.
     const storePathIdx = purgeBody.indexOf("getStorePath()");
-    const storeCleanupIdx = purgeBody.indexOf("_store.cleanup()");
+    const storeCleanupIdx = purgeBody.indexOf("openStore.cleanup()");
     expect(storePathIdx).toBeGreaterThan(-1);
     expect(storePathIdx).toBeLessThan(storeCleanupIdx === -1 ? Infinity : storeCleanupIdx);
     // Handler always passes storePath into the deep module — that is what
@@ -4200,7 +4211,10 @@ describe("ctx_doctor hook script checks", () => {
   const serverSrc = serverSource();
 
   test("resolves relative hook script paths against pluginRoot", () => {
-    const doctorSection = serverSrc.slice(serverSrc.indexOf("ctx_doctor"), serverSrc.indexOf("ctx_upgrade"));
+    // Anchor on the quoted tool names — the bare names also occur in prose
+    // (section comments naming which tools stayed in src/server.ts), and
+    // slicing between those yields a few characters of comment.
+    const doctorSection = serverSrc.slice(serverSrc.indexOf('"ctx_doctor"'), serverSrc.indexOf('"ctx_upgrade"'));
     expect(doctorSection).toContain("for (const scriptPath of hookScriptPaths)");
     expect(doctorSection).toContain("const hookPath = resolve(pluginRoot, scriptPath)");
     expect(doctorSection).not.toContain("for (const hookPath of hookScriptPaths)");
@@ -4301,8 +4315,10 @@ describe("ctx_fetch_and_index cache key includes URL (Fix 6/10)", () => {
     // single-URL and batch paths). Either location must use composeFetchCacheKey,
     // not the bare label/url variable.
 
-    // composeFetchCacheKey must be imported and referenced
-    expect(serverSrc).toContain('from "./fetch-cache.js"');
+    // composeFetchCacheKey must be imported and referenced. The specifier is
+    // relative to whichever server file imports it — "./" from src/server.ts,
+    // "../" now that the fetch tool lives in src/tools/fetch.ts.
+    expect(serverSrc).toMatch(/from "\.\.?\/fetch-cache\.js"/);
     expect(serverSrc).toContain("composeFetchCacheKey");
 
     // Find ANY getSourceMeta call across the file
@@ -5241,8 +5257,10 @@ test("registerEmptyToolsListHandler responds with {tools:[]} so operators don't 
 // descriptions by design — they are GUI/diagnostic affordances, not routing
 // targets, so the WHEN: structural requirement does not apply.
 describe("tool description style contract (#683 ADR-0002)", () => {
-  const serverTsPath = serverSourcePath();
-  const serverTs = readFileSync(serverTsPath, "utf-8");
+  // Every file the server is built from, not just src/server.ts: the tools
+  // whose registration moved to src/tools/*.ts are still shipped tools, and
+  // reading one file would quietly drop them from the corpus.
+  const serverTs = serverSource();
 
   // Extract every registered tool with its description string.
   // Description is a template literal or "+"-concatenated string literal
@@ -5843,8 +5861,9 @@ describe("hook routing prompt-surface contract (#683 ADR-0002 + ADR-0003)", () =
 // rejected forms (embedded `\n\n` escapes OR multi-line string concat).
 // ──────────────────────────────────────────────────────────────────────────
 describe("tool description source form contract (#683 PR follow-up)", () => {
-  const serverTsPath = serverSourcePath();
-  const serverTs = readFileSync(serverTsPath, "utf-8");
+  // Same reason as the ADR-0002 contract above: the corpus is the whole
+  // server source, so an extracted tool module stays under contract.
+  const serverTs = serverSource();
 
   // Locate every `description: ...,` block under a server.registerTool() call
   // and capture its raw source text. Reuse the same anchor pattern as the
