@@ -2,7 +2,7 @@
 
 Fork of [mksglu/context-mode](https://github.com/mksglu/context-mode) at v1.0.169.
 
-Thirty-three changes, each addressing a gap observed while running the plugin daily in
+Thirty-four changes, each addressing a gap observed while running the plugin daily in
 Claude Code. Every one is backwards compatible, and every behavioural default
 carries an env switch back. Two defaults differ from upstream on purpose: the
 compact tool descriptions (what ships on every request) and the semantic layer,
@@ -1284,6 +1284,151 @@ commit: path-less events following a `cd` or `git -C` are attributed to the
 target project after it and to the session's startup cwd before it. Aggregates
 that span the boundary mix both conventions.
 
+## 34. Three searches become one plugin
+
+Until this wave the agent's context was served by three independent MCP
+servers — fff for lexical file search, codegraph for structure, context-mode
+for memory and the sandbox. Each carried its own index, its own filesystem
+watcher and its own tool surface, and the model chose between them badly
+enough that a global `CLAUDE.md` rule ("use fff to find files") had to exist.
+That rule was a symptom. The signals are orthogonal — names, structure,
+recorded text, meaning — so the fix is to add them, not to pick between them.
+
+### fff runs as a library
+
+`@ff-labs/fff-node` is pinned to exactly `0.10.5` — 0.x API, roughly 290
+releases in five months, so a caret would drift under us. An FFI binary cannot
+be bundled, so it installs through `hooks/ensure-deps.mjs` beside
+better-sqlite3 and the loader assembles its import specifier at runtime;
+esbuild leaves it alone, and `--external:@ff-labs/fff-node` backs that up.
+
+`src/fff/` keeps one native index per project root behind an explicit
+`destroy()` — the index lives in Rust where the garbage collector cannot see
+it — and keys its frecency/history stores by the same project hash the FTS5
+store uses, so the cross-project leak of change 20 cannot reopen through a new
+channel. Two facts the plan did not anticipate, both measured: those stores are
+LMDB directories rather than SQLite (no `busy_timeout` to set; four processes
+writing 200 selections each produced zero failures), and `watch()` refuses
+subscriptions until its first scan completes, so attachment waits for the scan.
+A missing native library degrades to "unavailable"; nothing throws.
+
+### One watcher for the whole plugin
+
+`src/fs-bus/` turns fff's watcher into the plugin's only filesystem event
+source. Three consumers hang off one debounced, coalescing subscription: FTS5
+`code:` chunks are re-indexed on change and evicted on delete, the
+`codegraph sync` queue is fed through the seam `src/graph/daemon.ts` exposes,
+and a `registerPathCache` registry stands ready. That registry ships empty on
+purpose — the plan assumed `ctx_execute_file` had a per-file cache to
+invalidate, and it does not; `executeFile` reads the file inside the sandbox on
+every run. Re-indexing goes through `store.index({path})` without content, so
+the store re-reads, screens and hashes the *screened* bytes; a changed file
+cannot keep a stale hash.
+
+### `ctx_graph` reads the index instead of asking a server
+
+codegraph exposes exactly one MCP tool, while its whole value sits in an open
+SQLite schema. `src/graph/` opens `<project>/.codegraph/codegraph.db`
+read-only — driver flag plus `PRAGMA query_only`, verified by tests that assert
+INSERT/DELETE/CREATE all throw, on a live 235 MB index as well as a synthetic
+one. (`file:…?mode=ro` does not work here: neither better-sqlite3 nor
+`node:sqlite` passes `SQLITE_OPEN_URI`, so the URI would be read as a filename.)
+Schema is pinned to versions 1–8; drift or an incomplete index degrades to
+`codegraph <cmd> -j`, never to a guess. Answers carry a freshness line —
+"index lags N files" — instead of describing yesterday's code silently.
+
+The daemon's lifecycle moves with the tool: it used to be started by the MCP
+host through `serve --mcp`, and is now supervised by the plugin, idempotently
+across sessions, with a debounced fallback that runs `codegraph sync` at
+project level (1.5.0 has no per-file sync). `explore` has no `--json`, so its
+output is handed back whole — and that branch bypasses `ContentStore.#screen`,
+where credential screening lives, so it is run through `redactSecrets` first.
+
+### `ctx_find` — one query, five signals
+
+`fuseRankings` is generalised into `fuseRankedLists`: N weighted lists, one
+identity function, the old two-list call now a spelling of it and numerically
+unchanged. Five lists enter — fff file names, fff grep, FTS5, chunk vectors,
+codegraph adjacency — and every returned row names the signals that produced
+it. The graph list is seeded from the fused lexical rows rather than from the
+query, because adjacency has no opinion about words.
+
+The graph weight ships at 0.5, and that number is measured rather than chosen.
+Against the 74-query retrieval corpus, fed the worst case (ten plausible but
+never-relevant neighbours, which is what a wrong seed produces), P@1 / R@5 /
+MRR stay at 0.662 / 0.770 / 0.699 for weights up to 0.75, R@5 falls to 0.730 at
+1.0, and everything collapses at 2.0. The env override is clamped to 1.
+
+Coverage is reported per signal, and grep's coverage is stated in files scanned
+against files eligible plus a next-page flag: fff pages grep by file and totals
+only the page in hand, so "N of totalMatched" would be a lie.
+
+Ranking now learns across the MCP boundary, which the protocol does not
+otherwise allow: `ctx_find` publishes the candidates it showed, the PostToolUse
+hook records which one was opened, and the next call spends that as
+`trackQuery`. The hook records intent only — no hook bundle carries
+`src/fff/**` — so a selection is learned at the next search, not instantly.
+
+### Honest token accounting
+
+Every ctx_stats number stood on `bytes / 4`. `src/session/tokenizer.ts`
+replaces it with coefficients fitted against OpenAI's published `o200k_base` /
+`cl100k_base` rank tables over 4.1 MB of this repository, real command output,
+machine payloads and prose in fifteen languages. Held-out error per 4 KB chunk:
+4.5 % / 4.7 % versus 18.7 % / 15.3 % for `bytes/4`; on unseen command output,
+6.8 % versus 22.0 %. The old constant understated JSON by 25 %, `ls -laR` by
+45 % and base64 by 61 %, and overstated Russian prose by 59 % — while being
+nearly right on TypeScript, which modern vocabularies encode at ~4.08 bytes per
+token. Sites that hold only an aggregate byte count use the measured 3.487
+bytes/token; `bytesFromTokens` is its exact inverse, so both sides of every
+ratio stay on one basis and all percentages are unchanged. No new dependency:
+an exact BPE encoder is used only if one already happens to be installed.
+
+### Returns are subtracted from the savings
+
+If the model reads a file in full after a compressed answer already covered it,
+that is a loss the report used to count as a saving.
+`src/session/reuse-detector.ts` pairs a compressed delivery naming source X
+with a later full read of X inside both a step window (20 tool turns) and a
+time window (15 minutes) — both, because `created_at` has second resolution and
+every event of one hook fire shares a timestamp, so step distance is the only
+reliable ordering, while step distance alone would pair a search with a read
+three hours later. The returned bytes are deducted from `bytes_avoided` before
+any token conversion, so every downstream consumer inherits the correction with
+no formula change, and ctx_stats prints what was taken off. Above a 30 % return
+rate the search gateway hands back full text instead of snippets: compressing
+into a re-read is a double charge.
+
+### Truncation says what it dropped
+
+`src/truncate.ts` used to end with a bare `... [truncated]`, leaving the model
+unable to tell two lost lines from two thousand. It now carries a footer in the
+same voice `src/search/completeness.ts` uses for search, and `src/compress/`
+adds three samples that each report what they folded: repeated log lines
+(normalised for timestamps and counters), env dumps (screened through the
+existing `redactSecrets`, tail reduced to names) and test-runner output
+(failures and summary kept, green tail folded). The layer is off by default —
+`ctx_batch_execute` indexes command output verbatim into FTS5, and folding
+before indexing would delete lines a later `ctx_search` is expected to find.
+
+### The diagnostics can see all of it
+
+`ctx_doctor` (both the CLI and the MCP tool) gained a search-layers section:
+fff native and package version, LMDB store sizes, watcher and mmap switches,
+live roots; codegraph binary, schema version against the pinned window, daemon
+liveness, index lag, database size; the bus with its consumers and counters;
+tokenizer mode and the compression switch. Every probe degrades to
+"not installed" or "off" rather than failing. `context-mode inventory` folds
+sources by producer, always listing fff and codegraph even at zero — the zero
+is the finding — and reports the footprint that lives outside FTS5.
+`context-mode drain` reaps the orphaned `~/.cache/fff_mcp+<ts>+<pid>.log` files
+the external server left behind. The injected routing block now points file
+search at `ctx_find` instead of an external file-search MCP.
+
+Removing `fff` and `codegraph` from `~/.claude.json` is deliberately left to
+the operator: it is a user-owned config, and it should happen only once the
+daemon is running under plugin supervision on that machine.
+
 ## Merged ahead of upstream: the fetch extraction ladder
 
 `src/fetch/blocks.ts`, `src/fetch/extract.ts`, `src/fetch/page-store.ts`, `src/server.ts`
@@ -1378,8 +1523,40 @@ memory and the code index.
 | `CONTEXT_MODE_SEARCH_EXACT_TOTALS` | off | `1` re-fuses at a wider fetch for an exact total instead of `N+`, capped at 500 |
 | `CONTEXT_MODE_INDEX_REDACT` | on | `0` disables credential screening of indexed text |
 | `CONTEXT_MODE_INDEX_ENTROPY_REDACT` | off | `1` adds the entropy heuristic to that screening |
+| `CONTEXT_MODE_FFF` | on | `0` removes the in-process fff layer entirely |
+| `CONTEXT_MODE_FFF_WATCH` | on | `0` keeps fff search without its filesystem watcher |
+| `CONTEXT_MODE_FFF_MMAP` | on | `off` sets `disableMmapCache` — trades first-grep latency for memory on large monorepos |
+| `CONTEXT_MODE_FFF_MAX_INSTANCES` | `2` | Live native indexes before LRU eviction destroys the oldest |
+| `CONTEXT_MODE_FFF_DIR` | `<config>/context-mode/fff` | Where the frecency and history stores live |
+| `CONTEXT_MODE_FFF_LOG_SWEEP` | on | `0` keeps the orphaned `fff_mcp+<ts>+<pid>.log` files |
+| `CONTEXT_MODE_FFF_LOG_MAX_AGE_DAYS` | `7` | Age gate for that sweep |
+| `CONTEXT_MODE_GRAPH` | on | `0` unregisters `ctx_graph` |
+| `CONTEXT_MODE_GRAPH_DAEMON` | on | `0` stops the plugin supervising `codegraph serve` |
+| `CONTEXT_MODE_GRAPH_EXPLORE_PASSTHROUGH` | on | `0` always indexes `explore` output instead of returning it whole |
+| `CONTEXT_MODE_GRAPH_EXPLORE_BUDGET` | `24000` | Inline byte budget for `explore` |
+| `CONTEXT_MODE_GRAPH_CLI_FALLBACK` | on | `0` refuses to degrade to `codegraph <cmd> -j` on schema drift |
+| `CONTEXT_MODE_GRAPH_SCHEMA_MAX` | `8` | Raises the pinned schema ceiling |
+| `CONTEXT_MODE_GRAPH_FRESHNESS` | on | `0` drops the "index lags N files" sweep |
+| `CONTEXT_MODE_GRAPH_SYNC` | on | `0` disables the fallback sync queue; `_DEBOUNCE_MS` retunes it (1500) |
+| `CONTEXT_MODE_FS_BUS` | on | `0` installs an inert handle — no watcher, no consumers |
+| `CONTEXT_MODE_FS_BUS_INDEX` / `_GRAPH` / `_CACHE` | on | Per-consumer switches: FTS5 invalidation, sync queue, path caches |
+| `CONTEXT_MODE_FS_BUS_MAX_FILES` | `40` | Files per event batch |
+| `CONTEXT_MODE_FIND` | on | `0` unregisters `ctx_find` |
+| `CONTEXT_MODE_FIND_FILENAME` / `_CONTENT` / `_LEXICAL` / `_SEMANTIC` / `_GRAPH` | on | Per-signal switches for the fusion |
+| `CONTEXT_MODE_FIND_GRAPH_WEIGHT` | `0.5` | Weight of the adjacency list, clamped to 0–1 |
+| `CONTEXT_MODE_FIND_TRACK` | on | `0` stops feeding selections back into fff's ranking |
+| `CONTEXT_MODE_TOKENIZER` | `heuristic` | `bytes4` restores the pre-fork numbers; `exact` uses a BPE encoder if one is installed |
+| `CONTEXT_MODE_TOKENIZER_ENCODING` | auto | Pins `o200k_base` or `cl100k_base` instead of detecting from the client |
+| `CONTEXT_MODE_TOKENIZER_BYTES_PER_TOKEN` | measured | Override for operators who measured their own payload mix |
+| `CONTEXT_MODE_REUSE_DETECT` | on | `0` disables returns detection, the deduction and the bypass |
+| `CONTEXT_MODE_REUSE_THRESHOLD` | `30` | Return rate above which the gateway hands back full text |
+| `CONTEXT_MODE_REUSE_STEP_WINDOW` / `_WINDOW_MS` / `_MIN_SAMPLES` | `20` / `900000` / `3` | Pairing windows and the minimum sample before the bypass may fire |
+| `CONTEXT_MODE_TRUNCATE_FOOTER` | on | `0` silences the "showing X of Y, dropped D" footer |
+| `CONTEXT_MODE_EXEC_COMPRESS` | off | `1` enables output folding process-wide; `0` is a kill switch over per-call opt-in |
+| `CONTEXT_MODE_COMPRESS_TESTS` / `_ENV` / `_REPEATS` | on | Individual folding samples within that layer |
+| `CONTEXT_MODE_DOCTOR_LAYERS` | on | `0` drops the search-layers section from doctor and inventory |
 
-The last two switches are read by `src/session/redact.ts` and applied by
+The redaction switches are read by `src/session/redact.ts` and applied by
 `ContentStore` on every path that writes to the index — `index`,
 `indexPlainText`, `indexJSON` — ahead of the content hash, so flipping one
 re-indexes affected sources instead of leaving the cached hash describing bytes

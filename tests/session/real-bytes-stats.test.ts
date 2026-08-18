@@ -39,6 +39,7 @@ import type {
   RealBytesStats,
 } from "../../src/session/analytics.js";
 import { ContentStore } from "../../src/store.js";
+import { tokensFromBytes } from "../../src/session/tokenizer.js";
 
 const cleanups: Array<() => void> = [];
 
@@ -176,9 +177,17 @@ describe("getRealBytesStats (Phase 8 renderer source-of-truth)", () => {
     expect(r.bytesAvoided).toBe(30_000);
     expect(r.bytesReturned).toBe(5_000);
     expect(r.snapshotBytes).toBe(8_000);
-    // totalSavedTokens = (eventDataBytes + bytesAvoided + snapshotBytes) / 4
+    // totalSavedTokens = tokensFromBytes(eventDataBytes + bytesAvoided + snapshotBytes)
     // (bytesReturned is "what the model already paid for" — don't add)
-    const expectedTokens = Math.floor((r.eventDataBytes + r.bytesAvoided + r.snapshotBytes) / 4);
+    //
+    // The divisor is NOT 4: `session/tokenizer.ts` replaced the prose rule of
+    // thumb with the bytes-per-token measured on the payload mix context-mode
+    // actually redirects. Hard-coding /4 here re-introduced the very constant
+    // that module exists to delete, so the expectation goes through the same
+    // function the implementation does.
+    const expectedTokens = Math.floor(
+      tokensFromBytes(r.eventDataBytes + r.bytesAvoided + r.snapshotBytes),
+    );
     expect(r.totalSavedTokens).toBe(expectedTokens);
     expect(r.totalSavedTokens).toBeGreaterThan(9_000); // ≈ 9_500
   });

@@ -17,7 +17,7 @@
  * redirect / latency / rejected marker handshake in posttooluse.mjs.
  */
 
-import { appendFileSync, readFileSync, rmSync } from "node:fs";
+import { appendFileSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
 
@@ -62,4 +62,89 @@ export function consumeRetrievalBytes(sessionDbPath: string, tmpDir?: string): n
     rmSync(path, { force: true });
   } catch { /* no marker — phantom-event guard */ }
   return total;
+}
+
+// ─────────────────────────────────────────────────────────
+// C-02 — reuse verdict marker (hook → server, the other direction)
+// ─────────────────────────────────────────────────────────
+
+/**
+ * What the reuse detector concluded about this session, as the gateway needs
+ * to see it. Deliberately four numbers, not the detection list: the gateway
+ * reads this on the hot path of every retrieval and must not parse a blob.
+ */
+export interface ReuseVerdict {
+  /** Distinct sources a compressing call covered. */
+  covered: number;
+  /** Distinct sources the model then re-read whole. */
+  returned: number;
+  /** `returned / covered`, 0..1. */
+  ratio: number;
+  /** ms epoch the verdict was written — the gateway may treat old ones as stale. */
+  at: number;
+}
+
+/**
+ * Tmp marker path for the reuse verdict. Same basename keying as
+ * {@link retrievalMarkerPath} — the server and the hook both resolve the
+ * session DB path, and neither can rely on CLAUDE_SESSION_ID.
+ */
+export function reuseMarkerPath(sessionDbPath: string, tmpDir: string = tmpdir()): string {
+  return join(tmpDir, `context-mode-reuse-${basename(sessionDbPath)}.json`);
+}
+
+/**
+ * Publish the latest reuse verdict.
+ *
+ * OVERWRITE, not append — unlike the retrieval marker this is a state, not a
+ * ledger: the gateway wants the current ratio, and a stale one must not
+ * accumulate. Best-effort; never throws into a hook or an MCP response.
+ */
+export function writeReuseVerdict(
+  sessionDbPath: string,
+  verdict: Omit<ReuseVerdict, "at"> & { at?: number },
+  tmpDir?: string,
+): void {
+  try {
+    const payload: ReuseVerdict = {
+      covered: Math.max(0, Math.floor(verdict.covered) || 0),
+      returned: Math.max(0, Math.floor(verdict.returned) || 0),
+      ratio: Number.isFinite(verdict.ratio) ? Math.min(1, Math.max(0, verdict.ratio)) : 0,
+      at: verdict.at ?? Date.now(),
+    };
+    writeFileSync(reuseMarkerPath(sessionDbPath, tmpDir), JSON.stringify(payload));
+  } catch { /* best-effort — a missing verdict just means "don't bypass" */ }
+}
+
+/**
+ * Read the current reuse verdict. READ-ONLY — unlike
+ * {@link consumeRetrievalBytes} the marker is NOT deleted, because the gateway
+ * consults it on every retrieval and a consume-once read would make the
+ * bypass fire exactly once and then forget.
+ *
+ * Returns `null` when no verdict has been published (the safe default: no
+ * verdict → no bypass).
+ */
+export function readReuseVerdict(sessionDbPath: string, tmpDir?: string): ReuseVerdict | null {
+  try {
+    const raw = readFileSync(reuseMarkerPath(sessionDbPath, tmpDir), "utf8");
+    const parsed = JSON.parse(raw) as Partial<ReuseVerdict>;
+    if (!parsed || typeof parsed !== "object") return null;
+    const ratio = Number(parsed.ratio);
+    return {
+      covered: Number(parsed.covered) || 0,
+      returned: Number(parsed.returned) || 0,
+      ratio: Number.isFinite(ratio) ? ratio : 0,
+      at: Number(parsed.at) || 0,
+    };
+  } catch {
+    return null;
+  }
+}
+
+/** Drop the verdict — session end, or a purge. Best-effort. */
+export function clearReuseVerdict(sessionDbPath: string, tmpDir?: string): void {
+  try {
+    rmSync(reuseMarkerPath(sessionDbPath, tmpDir), { force: true });
+  } catch { /* best-effort */ }
 }

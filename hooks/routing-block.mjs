@@ -37,6 +37,7 @@ ${toolSearchBootstrap ? `
        - Multiple related questions about anything already indexed (your captures + session memory). Batch every question in one array; the ranking pipeline runs per-query and the round-trip cost is paid once.
     3. PROCESSING: ${t("ctx_execute")}(language, code) | ${t("ctx_execute_file")}(path, language, code)
        - Derive answers FROM data: filter, count, aggregate, parse, transform. Only what you console.log() enters your conversation; the raw bytes stay in the sandbox.
+    4. FIND: ${t("ctx_find")} — one search across file names, file contents, indexed memory and code structure. Use it instead of chaining Glob/Grep or reaching for a separate file-search MCP; it returns ranked paths and snippets, never whole files.
   </tool_selection_hierarchy>
 
   <when_not_to_use>

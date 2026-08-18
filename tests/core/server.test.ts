@@ -5425,6 +5425,12 @@ describe("tool description style contract (#683 ADR-0002)", () => {
   // meets the canonical contract enforced below.
   const EXEMPT_FROM_FORBIDDEN_TOKENS = new Set<string>([]);
 
+  // Empty by design. ctx_graph briefly sat here while its description was a
+  // `+` concat with `•` bullets; it was rewritten as an ADR-0002 template
+  // literal in the same wave. Keep this set empty — a new tool joining the
+  // corpus writes its description to the contract, it does not defer it.
+  const PENDING_DESCRIPTION_REWRITE = new Set<string>([]);
+
   test("at least 11 ctx_* tools are registered", () => {
     // Sanity check that the extractor found the corpus.
     expect(tools.length).toBeGreaterThanOrEqual(11);
@@ -5583,7 +5589,7 @@ describe("tool description style contract (#683 ADR-0002)", () => {
         }
       }
 
-      if (!EXEMPT_FROM_WHEN.has(tool.name)) {
+      if (!EXEMPT_FROM_WHEN.has(tool.name) && !PENDING_DESCRIPTION_REWRITE.has(tool.name)) {
         test("MUST contain a WHEN: section (or WHEN TO USE: legacy)", () => {
           // Per ADR-0002: every routing-target ctx_* tool MUST have a
           // positive selection cue. The legacy alias `WHEN TO USE:` is
@@ -6732,6 +6738,11 @@ describe("ctx_* MCP tool annotations (#846)", () => {
     ctx_execute_file:    { readOnlyHint: false, destructiveHint: true,  idempotentHint: false, openWorldHint: true  },
     ctx_index:           { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
     ctx_search:          { readOnlyHint: true,  destructiveHint: false, idempotentHint: true,  openWorldHint: false },
+    // Fork additions. Both only read: fff's index, FTS5, the vector table and
+    // the codegraph DB. ctx_find writes one tmp marker for the ranking
+    // feedback loop, which is process-local bookkeeping, not a world effect.
+    ctx_find:            { readOnlyHint: true,  destructiveHint: false, idempotentHint: true,  openWorldHint: false },
+    ctx_graph:           { readOnlyHint: true,  destructiveHint: false, idempotentHint: true,  openWorldHint: false },
     ctx_fetch_and_index: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true  },
     ctx_batch_execute:   { readOnlyHint: false, destructiveHint: true,  idempotentHint: false, openWorldHint: true  },
     // #1048: read-only sibling of batch_execute — every command is proven

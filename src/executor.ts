@@ -10,6 +10,7 @@ import {
 } from "./runtime.js";
 export type { ExecResult } from "./types.js";
 import type { ExecResult } from "./types.js";
+import { compressExecResult } from "./compress/index.js";
 
 const isWin = process.platform === "win32";
 
@@ -292,6 +293,16 @@ interface ExecuteOptions {
    * so setting it from inside the script would be too late).
    */
   env?: Record<string, string>;
+  /**
+   * Run stdout through the output-compression layer (`src/compress`) and
+   * append the honest fold footer. Off unless the caller asks or
+   * `CONTEXT_MODE_EXEC_COMPRESS=1` is set; `=0` disables it even here.
+   *
+   * Deliberately not set by `runBatchCommands`: that output is indexed
+   * verbatim into FTS5 and folding it would delete lines a later ctx_search is
+   * expected to find.
+   */
+  compress?: boolean;
 }
 
 interface ExecuteFileOptions extends ExecuteOptions {
@@ -354,7 +365,7 @@ export class PolyglotExecutor {
   }
 
   async execute(opts: ExecuteOptions): Promise<ExecResult> {
-    const { language, code, timeout, background = false, cwd: cwdOverride, env: envOverride } = opts;
+    const { language, code, timeout, background = false, cwd: cwdOverride, env: envOverride, compress } = opts;
     const tmpDir = mkdtempSync(join(OS_TMPDIR, ".ctx-mode-"));
 
     try {
@@ -385,7 +396,9 @@ export class PolyglotExecutor {
         cleanupTmpDir(tmpDir);
       }
 
-      return result;
+      // No-op (same object) unless compression was asked for. See
+      // src/compress/index.ts for why this is opt-in rather than a default.
+      return compressExecResult(result, compress);
     } catch (err) {
       cleanupTmpDir(tmpDir);
       throw err;
@@ -400,7 +413,7 @@ export class PolyglotExecutor {
       language,
       code,
     );
-    return this.execute({ language, code: wrappedCode, timeout });
+    return this.execute({ language, code: wrappedCode, timeout, compress: opts.compress });
   }
 
   #writeScript(tmpDir: string, code: string, language: Language): string {

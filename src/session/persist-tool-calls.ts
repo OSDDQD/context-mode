@@ -20,6 +20,10 @@
 
 import { existsSync } from "node:fs";
 import { SessionDB } from "./db.js";
+import { detectReuse, reuseDetectorEnabled } from "./reuse-detector.js";
+import type { ReuseCandidateEvent } from "./reuse-detector.js";
+import { writeReuseVerdict } from "./retrieval-marker.js";
+import type { ReuseVerdict } from "./retrieval-marker.js";
 
 /**
  * Shape returned by {@link restoreSessionStats}. Subset of the in-memory
@@ -123,6 +127,69 @@ export function restoreSessionStats(
       sdb.close();
     }
   } catch {
+    return null;
+  }
+}
+
+/**
+ * C-02 — recompute the reuse verdict for the latest session and publish it to
+ * the tmp marker the gateway reads.
+ *
+ * The detector's input is the session event stream, which only the hook side
+ * ever writes; the gateway that must act on the verdict lives in the MCP
+ * server process. So the verdict travels the same way the retrieval byte
+ * count travels, through a tmp file keyed by the session DB basename — except
+ * in the opposite direction (hook → server) and as an overwritten state
+ * rather than an appended ledger. See `retrieval-marker.ts`.
+ *
+ * Call this from the PostToolUse hook after the events for a fire are
+ * inserted. Cheap enough for that path: one indexed read of the latest
+ * session's events, capped, then one small write. Best-effort throughout —
+ * a failure here means "no verdict", which means "do not bypass".
+ *
+ * Returns the published verdict, or `null` when nothing was published
+ * (detector off, no DB, no session, no events).
+ */
+export function persistReuseVerdict(
+  sessionDbPath: string,
+  opts?: { tmpDir?: string; limit?: number },
+): ReuseVerdict | null {
+  if (!reuseDetectorEnabled()) return null;
+  try {
+    if (!existsSync(sessionDbPath)) return null;
+    const sdb = new SessionDB({ dbPath: sessionDbPath });
+    try {
+      const sid = sdb.getLatestSessionId();
+      if (!sid) return null;
+
+      const rows = sdb.getEvents(sid, { limit: opts?.limit ?? 4000 });
+      if (!rows || rows.length === 0) return null;
+
+      const events: ReuseCandidateEvent[] = rows.map((r) => ({
+        id: r.id,
+        type: r.type,
+        data: r.data,
+        created_at: r.created_at,
+        project_dir: r.project_dir,
+        bytes_returned: r.bytes_returned,
+      }));
+
+      const report = detectReuse(events);
+      if (report.coveredSources === 0) return null;
+
+      const verdict: ReuseVerdict = {
+        covered: report.coveredSources,
+        returned: report.returnedSources,
+        ratio: report.ratio,
+        at: Date.now(),
+      };
+      writeReuseVerdict(sessionDbPath, verdict, opts?.tmpDir);
+      return verdict;
+    } finally {
+      sdb.close();
+    }
+  } catch {
+    // Best-effort: a stats failure must never break the hook that called it.
     return null;
   }
 }

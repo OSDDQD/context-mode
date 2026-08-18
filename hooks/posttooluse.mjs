@@ -279,6 +279,57 @@ await runHook(async () => {
       }
     } catch { /* best-effort — never block the hook */ }
 
+    // ─── ctx_find ranking feedback: which candidate the caller actually opened ───
+    // fff's ranking learns from `trackQuery(query, selectedFile)`, and MCP
+    // cannot supply the second half: the protocol never tells the server what
+    // the caller did next. So ctx_find publishes what it SHOWED
+    // (`context-mode-find-<db>.json`) and this hook — which does fire for
+    // Read/Edit/Write — records which of those files was then opened. The
+    // server drains the selections on the next ctx_find and performs the
+    // actual trackQuery.
+    //
+    // Why not call trackQuery here: it needs the native fff addon, an acquired
+    // finder and a lock-aware retry. None of that belongs in a <20ms hook, and
+    // no hook bundle carries src/fff/**. Recording intent is two field reads
+    // and one append.
+    //
+    // Path spelling mirrors src/search/query-marker.ts — keep the two in step.
+    try {
+      if (process.env.CONTEXT_MODE_FIND_TRACK !== "0") {
+        const toolName = input.tool_name ?? "";
+        const SELECTING_TOOLS = new Set(["Read", "Edit", "MultiEdit", "Write", "NotebookEdit"]);
+        if (SELECTING_TOOLS.has(toolName)) {
+          const ti = input.tool_input ?? {};
+          const filePath = ti.file_path ?? ti.notebook_path ?? ti.path;
+          if (typeof filePath === "string" && filePath) {
+            const candidatesPath = resolve(tmpdir(), `context-mode-find-${basename(dbPath)}.json`);
+            let records = [];
+            try {
+              records = JSON.parse(readFileSync(candidatesPath, "utf-8"));
+            } catch { /* no marker — no ctx_find has run recently */ }
+            if (Array.isArray(records)) {
+              const ttlRaw = Number.parseInt(process.env.CONTEXT_MODE_FIND_TRACK_TTL_MS ?? "", 10);
+              const ttl = Number.isFinite(ttlRaw) && ttlRaw > 0 ? ttlRaw : 15 * 60_000;
+              const now = Date.now();
+              // Newest matching query wins — the marker is stored newest-first.
+              const hit = records.find(r =>
+                r && Array.isArray(r.paths) && typeof r.query === "string"
+                && now - (Number(r.at) || 0) <= ttl
+                && r.paths.includes(filePath));
+              if (hit) {
+                const { appendFileSync } = await import("node:fs");
+                appendFileSync(
+                  resolve(tmpdir(), `context-mode-find-selected-${basename(dbPath)}.jsonl`),
+                  JSON.stringify({ query: hit.query, path: filePath, at: now }) + "\n",
+                  "utf-8",
+                );
+              }
+            }
+          }
+        }
+      }
+    } catch { /* ranking feedback is best-effort — never block the hook */ }
+
     db.close();
   } catch {
     // PostToolUse must never block the session — silent fallback

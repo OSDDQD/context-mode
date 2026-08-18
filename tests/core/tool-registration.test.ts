@@ -1,5 +1,5 @@
 /**
- * The twelve tools, in the order they register.
+ * The fourteen tools, in the order they register.
  *
  * This is the acceptance harness for splitting `src/server.ts` apart. Moving a
  * handler into its own module is only safe if the same tools still register,
@@ -21,6 +21,11 @@ const EXPECTED_ORDER = [
   "ctx_execute_file",
   "ctx_index",
   "ctx_search",
+  // Fork additions, registered beside ctx_search: fused retrieval and the
+  // structural index. Both self-disable on an env switch, so this list is the
+  // shipped default rather than an invariant of the process.
+  "ctx_find",
+  "ctx_graph",
   "ctx_fetch_and_index",
   "ctx_batch_execute",
   "ctx_gather",
@@ -36,8 +41,8 @@ describe("tool registration", () => {
     expect(REGISTERED_CTX_TOOLS.map(t => t.name)).toEqual([...EXPECTED_ORDER]);
   });
 
-  test("twelve tools — no more, no fewer", () => {
-    expect(REGISTERED_CTX_TOOLS).toHaveLength(12);
+  test("fourteen tools — no more, no fewer", () => {
+    expect(REGISTERED_CTX_TOOLS).toHaveLength(14);
   });
 
   test("each one carries a handler and a description", () => {

@@ -31,6 +31,10 @@ Reading to **Edit** → Read correct. Reading to **analyze/explore/summarize** �
 ### Grep — may flood context
 Use `ctx_execute(language: "javascript", code: "...")` in sandbox for portable filtering/counting.
 
+## File search
+
+`ctx_find` — one search across file names, file contents, indexed memory and code structure. Use it instead of chaining Glob/Grep or reaching for a separate file-search MCP; it returns ranked paths and snippets, never whole files.
+
 ## Tool selection
 
 0. **MEMORY**: `ctx_search(sort: "timeline")` — after resume, check prior context before asking user.

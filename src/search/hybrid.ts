@@ -320,7 +320,69 @@ export function semanticCandidates(
 }
 
 /**
+ * One ranked list entering a fusion.
+ *
+ * `weight` is the only knob a caller needs to say "this signal is a hint, not
+ * an answer". It multiplies the list's RRF contribution, so a list at 0.5
+ * cannot outvote two lists at 1.0 no matter how confident its own ranking is —
+ * which is exactly the property a structural signal needs before it is allowed
+ * anywhere near a lexical ranking.
+ */
+export interface RankedList<T> {
+  rows: T[];
+  /** Multiplier on this list's contribution. Defaults to 1. `<= 0` skips it. */
+  weight?: number;
+  /** Per-list damping override. Defaults to the fusion's `k`. */
+  k?: number;
+}
+
+/**
+ * Fuse any number of ranked lists with weighted RRF.
+ *
+ * This is the one fusion in the codebase; {@link fuseRankings} is the two-list
+ * spelling of it and `ctx_find` is the five-list one. Adding a signal means
+ * appending a list here, never writing a second ranker.
+ *
+ * @param opts.k RRF damping constant. 60 is the value the original RRF paper
+ *   settled on and what the lexical fusion in this codebase already assumes.
+ * @param opts.identity How two rows are recognised as the same thing. Defaults
+ *   to {@link chunkIdentity}. `ctx_find` overrides it so that the same FILE
+ *   found by a filename match, a grep match and a graph edge fuses into one
+ *   row, while indexed chunks stay individually addressable.
+ */
+export function fuseRankedLists<T extends LexicalResult>(
+  lists: Array<RankedList<T>>,
+  opts: { limit: number; k?: number; identity?: (row: T) => string },
+): T[] {
+  const k = opts.k ?? 60;
+  const identity = opts.identity ?? ((row: T) => chunkIdentity(row));
+  const scores = new Map<string, { score: number; row: T }>();
+
+  for (const list of lists) {
+    const weight = list.weight ?? 1;
+    if (!(weight > 0)) continue;
+    const listK = list.k ?? k;
+    list.rows.forEach((row, i) => {
+      const key = identity(row);
+      const contribution = weight / (listK + i + 1);
+      const prev = scores.get(key);
+      if (prev) prev.score += contribution;
+      else scores.set(key, { score: contribution, row });
+    });
+  }
+
+  return [...scores.values()]
+    .sort((a, b) => b.score - a.score)
+    .slice(0, opts.limit)
+    .map(e => e.row);
+}
+
+/**
  * Fuse lexical and semantic rankings with RRF.
+ *
+ * Kept as the two-argument spelling every existing caller uses; the mechanism
+ * itself lives in {@link fuseRankedLists}. Both lists are unweighted, so the
+ * numbers are bit-for-bit what they were before the generalisation.
  *
  * @param k RRF damping constant. 60 is the value the original RRF paper
  *   settled on and what the lexical fusion in this codebase already assumes.
@@ -330,26 +392,7 @@ export function fuseRankings<T extends LexicalResult>(
   semantic: T[],
   opts: { limit: number; k?: number },
 ): T[] {
-  const k = opts.k ?? 60;
-  const scores = new Map<string, { score: number; row: T }>();
-
-  const add = (rows: T[]) => {
-    rows.forEach((row, i) => {
-      const key = chunkIdentity(row);
-      const contribution = 1 / (k + i + 1);
-      const prev = scores.get(key);
-      if (prev) prev.score += contribution;
-      else scores.set(key, { score: contribution, row });
-    });
-  };
-
-  add(lexical);
-  add(semantic);
-
-  return [...scores.values()]
-    .sort((a, b) => b.score - a.score)
-    .slice(0, opts.limit)
-    .map(e => e.row);
+  return fuseRankedLists([{ rows: lexical }, { rows: semantic }], opts);
 }
 
 // ─────────────────────────────────────────────────────────

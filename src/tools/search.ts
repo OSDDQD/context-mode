@@ -28,13 +28,15 @@ import {
 } from "../search/ctx-search-schema.js";
 import { searchAllSources } from "../search/unified.js";
 import { SessionDB, resolveSessionDbPath } from "../session/db.js";
+import { readReuseVerdict } from "../session/retrieval-marker.js";
+import { shouldBypassCompression } from "../session/reuse-detector.js";
 import { resolveClaudeConfigDir } from "../util/claude-config.js";
 import type { ToolDeps } from "./shared/deps.js";
 
 /** Register `ctx_search` on the server carried by `deps`. */
 export function registerCtxSearch(deps: ToolDeps): void {
   const {
-    getStore, getProjectDir, getSessionDir, trackResponse, extractSnippet,
+    getStore, getProjectDir, getSessionDir, getSessionDbPath, trackResponse, extractSnippet,
     semanticStatusHint, detectedAdapter, searchFloodGuard, searchFloodGuardKey,
     SEARCH_MAX_RESULTS_AFTER, SEARCH_BLOCK_AFTER,
   } = deps;
@@ -164,6 +166,13 @@ export function registerCtxSearch(deps: ToolDeps): void {
         // Lives across the whole query loop — the repeats worth cutting are the
         // ones between queries of the same response.
         const deduper = new CrossQueryDeduper();
+        // C-02 — above the returns threshold, compressing is a double charge:
+        // the model re-reads the source in full anyway, so the snippet was
+        // paid for and then paid for again. Hand back full text instead.
+        // Hoisted out of the per-result map: this reads a marker file.
+        const bypassCompression = shouldBypassCompression({
+          stats: readReuseVerdict(getSessionDbPath()),
+        });
         // Relevance mode only. Timeline mode merges three heterogeneous sources
         // (this session, prior sessions, auto-memory) into one list; there is no
         // single pool to be complete with respect to, so it says nothing.
@@ -284,7 +293,9 @@ export function registerCtxSearch(deps: ToolDeps): void {
               const origin = (r as any).origin || "current-session";
               const ts = (r as any).timestamp ? (r as any).timestamp.slice(0, 16).replace("T", " ") : "";
               const header = `--- [${origin}${ts ? " | " + ts : ""} | ${r.source}] ---`;
-              const snippet = extractSnippet(r.content, q, 1500, r.highlighted);
+              const snippet = bypassCompression
+                ? r.content
+                : extractSnippet(r.content, q, 1500, r.highlighted);
               const decision = deduper.consider(r, snippet, q);
               if (decision.kind === "suppress") {
                 // Heading and provenance stay — only the verbatim body goes.

@@ -1,8 +1,9 @@
 /**
  * Shared dependency bootstrap for hooks and start.mjs.
  *
- * Single source of truth — ensures native deps (better-sqlite3) are
- * installed in the plugin cache before any hook or server code runs.
+ * Single source of truth — ensures native deps (better-sqlite3, and the
+ * optional @ff-labs/fff-node search engine) are installed in the plugin cache
+ * before any hook or server code runs.
  *
  * Pattern: same as suppress-stderr.mjs — imported at the top of every
  * hook that needs native modules. Fast path: existsSync check (~0.1ms).
@@ -19,7 +20,7 @@
  * @see https://github.com/mksglu/context-mode/issues/203
  */
 
-import { existsSync, copyFileSync, renameSync, unlinkSync } from "node:fs";
+import { existsSync, copyFileSync, readdirSync, readFileSync, renameSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { execSync } from "node:child_process";
 import { resolve, dirname } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -65,6 +66,10 @@ function hasModernSqlite() {
 }
 
 export async function ensureDeps() {
+  // Runs on every runtime: fff is an ffi wrapper, not a Node-ABI addon, so
+  // Bun needs it too. Fast path is two existsSync calls.
+  await ensureFffNative(root);
+
   // Bun ships bun:sqlite and never needs better-sqlite3
   if (typeof globalThis.Bun !== "undefined") return;
   for (const pkg of NATIVE_DEPS) {
@@ -86,6 +91,109 @@ export async function ensureDeps() {
       // scripts/postinstall.mjs).
       try { await healBetterSqlite3Binding(root); } catch { /* helper already best-effort */ }
     }
+  }
+}
+
+// ─────────────────────────────────────────────────────────
+// fff search layer (@ff-labs/fff-node) — native, OPTIONAL
+// ─────────────────────────────────────────────────────────
+//
+// Unlike better-sqlite3 this is not a node-gyp addon: it is an ffi-rs wrapper
+// around a prebuilt `libfff_c` shipped in a platform-specific optional
+// dependency (`@ff-labs/fff-bin-<triple>`). Nothing to rebuild and no ABI to
+// track — either the shared object is on disk or it is not. It therefore
+// cannot be bundled into server.bundle.mjs, which is why it has to be
+// installed here alongside better-sqlite3.
+//
+// It is also OPTIONAL: the plugin runs fine without it (`src/fff/native.ts`
+// reports "unavailable" and callers degrade). That difference drives two
+// rules below — never install on an unsupported platform, and never retry a
+// failed install on every hook fire.
+
+const FFF_PACKAGE = "@ff-labs/fff-node";
+const FFF_FALLBACK_VERSION = "0.10.5";
+const FFF_SCOPE_DIR = ["node_modules", "@ff-labs"];
+const FFF_BIN_PREFIX = "fff-bin-";
+/** Do not retry a failed install more than once per this window. */
+const FFF_RETRY_COOLDOWN_MS = 6 * 60 * 60 * 1000;
+
+function fffDisabled() {
+  const raw = process.env.CONTEXT_MODE_FFF;
+  if (raw === undefined) return false;
+  const v = String(raw).trim().toLowerCase();
+  return v === "0" || v === "off" || v === "false" || v === "no" || v === "disabled";
+}
+
+/** The upstream package declares os/cpu; installing elsewhere just fails. */
+function fffPlatformSupported() {
+  const osOk = ["darwin", "linux", "win32", "android"].includes(process.platform);
+  const cpuOk = ["x64", "arm64"].includes(process.arch);
+  return osOk && cpuOk;
+}
+
+/**
+ * Pin exactly what package.json pins. The API is 0.x and moves weekly, so a
+ * caret would let a hook-time install drift ahead of the code that calls it.
+ */
+function pinnedFffVersion(pluginRoot) {
+  try {
+    const pkg = JSON.parse(readFileSync(resolve(pluginRoot, "package.json"), "utf8"));
+    const spec = pkg?.dependencies?.[FFF_PACKAGE];
+    if (typeof spec === "string" && spec.trim()) return spec.trim().replace(/^[\^~]/, "");
+  } catch { /* fall through to the compiled-in default */ }
+  return FFF_FALLBACK_VERSION;
+}
+
+/** True when the platform binary package is present with its shared object. */
+function fffBinaryPresent(pluginRoot) {
+  try {
+    const scopeDir = resolve(pluginRoot, ...FFF_SCOPE_DIR);
+    if (!existsSync(scopeDir)) return false;
+    for (const entry of readdirSync(scopeDir)) {
+      if (!entry.startsWith(FFF_BIN_PREFIX)) continue;
+      const binDir = resolve(scopeDir, entry);
+      if (readdirSync(binDir).some((f) => f.includes("fff_c") || f.endsWith(".dll"))) return true;
+    }
+    return false;
+  } catch {
+    return false;
+  }
+}
+
+function fffCooldownActive(markerPath) {
+  try {
+    if (!existsSync(markerPath)) return false;
+    return Date.now() - statSync(markerPath).mtimeMs < FFF_RETRY_COOLDOWN_MS;
+  } catch {
+    return false;
+  }
+}
+
+export async function ensureFffNative(pluginRoot = root) {
+  if (fffDisabled() || !fffPlatformSupported()) return;
+
+  const pkgDir = resolve(pluginRoot, ...FFF_SCOPE_DIR, "fff-node");
+  if (existsSync(pkgDir) && fffBinaryPresent(pluginRoot)) return; // fast path
+
+  // Guard against an install storm: hooks fire on every tool call, and a
+  // package that cannot install here (offline, private registry, unsupported
+  // libc) would otherwise burn 30s of every single one.
+  const marker = resolve(pluginRoot, "node_modules", ".context-mode-fff-install-attempt");
+  if (fffCooldownActive(marker)) return;
+  try { writeFileSync(marker, new Date().toISOString()); } catch { /* marker is advisory */ }
+
+  try {
+    execSync(
+      `${process.platform === "win32" ? "npm.cmd" : "npm"} install ${FFF_PACKAGE}@${pinnedFffVersion(pluginRoot)} --no-package-lock --no-save --silent`,
+      { cwd: pluginRoot, stdio: "pipe", timeout: 120000, shell: true },
+    );
+  } catch {
+    return; // optional dependency — the search layer degrades, nothing breaks
+  }
+
+  // Success: clear the marker so a later version bump can install immediately.
+  if (fffBinaryPresent(pluginRoot)) {
+    try { unlinkSync(marker); } catch { /* best effort */ }
   }
 }
 

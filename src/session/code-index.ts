@@ -298,6 +298,62 @@ function evictCodeSource(store: IndexTarget, label: string): void {
   try { store.deleteSource?.(label); } catch { /* best-effort */ }
 }
 
+/** What {@link invalidateCodeSource} did with a file. */
+export type CodeSourceInvalidation = "indexed" | "unchanged" | "evicted" | "skipped";
+
+/**
+ * Invalidate this file's `code:` source, in response to one filesystem event.
+ *
+ * The queue path above is driven by the PostToolUse hook and only ever sees
+ * files the AGENT touched. A file changed by `git checkout`, by a formatter, by
+ * a build step or by a second editor window never reaches it, so the index
+ * keeps answering from bytes that are gone. `src/fs-bus/` subscribes to fff's
+ * watcher and calls this instead; the policy — what counts as indexable, what
+ * label a file carries, what happens when it disappears — stays here, where
+ * the queue drain already implements it.
+ *
+ * The re-index deliberately goes through `store.index({ path })` with NO
+ * `content`: the store re-reads the file, screens it, and hashes the SCREENED
+ * bytes, so a genuine change misses `#skipUnchanged` and is re-chunked, while a
+ * byte-identical file costs one `indexed_at` touch. Anything that wrote a hash
+ * without rewriting the chunks — or that moved `indexed_at` forward on a
+ * changed file — would pin the source to stale content forever, which is the
+ * one failure mode this function exists to prevent.
+ *
+ * Best-effort throughout: a watcher callback must never throw.
+ */
+export function invalidateCodeSource(opts: {
+  store: IndexTarget;
+  filePath: string;
+  projectDir?: string;
+  /** The event said the file is gone. Non-existence is treated the same way. */
+  removed?: boolean;
+  attribution?: { sessionId?: string; eventId?: string };
+}): CodeSourceInvalidation {
+  const { store, filePath, projectDir, removed, attribution } = opts;
+  if (!isIndexableSource(filePath)) return "skipped";
+  const label = codeSourceLabel(filePath, projectDir);
+  try {
+    if (removed || !existsSync(filePath)) {
+      if (!store.deleteSource) return "skipped";
+      return store.deleteSource(label) > 0 ? "evicted" : "skipped";
+    }
+    if (statSync(filePath).size > MAX_INDEXABLE_BYTES) {
+      // It grew past the cap since it was indexed, so the stored chunks now
+      // describe content that no longer exists. Evicting is the honest move —
+      // no answer beats a confidently wrong one.
+      evictCodeSource(store, label);
+      return "evicted";
+    }
+    const result = store.index({ path: filePath, source: label, attribution }) as
+      | { skipped?: boolean }
+      | undefined;
+    return result?.skipped ? "unchanged" : "indexed";
+  } catch {
+    return "skipped";
+  }
+}
+
 /**
  * Drop `code:` sources whose file no longer exists.
  *

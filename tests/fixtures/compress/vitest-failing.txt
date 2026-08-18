@@ -1,0 +1,79 @@
+
+ RUN  v4.1.10 /home/osddqd/projects/context-mode
+
+ ✓ tests/tmp-compress-fixture.test.ts > fixture suite > passes one 1ms
+ ✓ tests/tmp-compress-fixture.test.ts > fixture suite > passes two 0ms
+ ✓ tests/tmp-compress-fixture.test.ts > fixture suite > passes three 0ms
+ × tests/tmp-compress-fixture.test.ts > fixture suite > fails on purpose 4ms
+   → Expected values to be strictly equal:
+
+1 !== 2
+
+ ✓ tests/truncate.test.ts > truncateJSON > returns full JSON when under the byte cap 1ms
+ ✓ tests/truncate.test.ts > truncateJSON > appends marker when serialized content exceeds maxBytes 0ms
+ ✓ tests/truncate.test.ts > truncateJSON > serializes null when value is undefined 0ms
+ ✓ tests/truncate.test.ts > truncateJSON > respects compact indent=0 0ms
+ ✓ tests/truncate.test.ts > truncateJSON > never exceeds maxBytes, including with 4-byte UTF-8 chars 0ms
+ ✓ tests/truncate.test.ts > truncateJSON > degenerate maxBytes smaller than marker still respects byte cap 0ms
+ ✓ tests/truncate.test.ts > truncateJSON > maxBytes=0 returns empty string 0ms
+ ✓ tests/truncate.test.ts > capBytes > returns input unchanged when within cap 0ms
+ ✓ tests/truncate.test.ts > capBytes > returns input unchanged when exactly at cap 0ms
+ ✓ tests/truncate.test.ts > capBytes > truncates and appends ellipsis when over cap 0ms
+ ✓ tests/truncate.test.ts > capBytes > never splits a multi-byte UTF-8 character 0ms
+ ✓ tests/truncate.test.ts > capBytes > degenerate maxBytes smaller than ellipsis respects byte cap 0ms
+ ✓ tests/truncate.test.ts > capBytes > maxBytes=0 returns empty string 0ms
+ ✓ tests/truncate.test.ts > capBytes > never produces a lone surrogate at the truncation boundary 0ms
+ ✓ tests/truncate.test.ts > escapeXML > escapes all five reserved characters 0ms
+ ✓ tests/truncate.test.ts > escapeXML > ampersand is escaped first to avoid double-escaping 0ms
+ ✓ tests/truncate.test.ts > escapeXML > returns identical string when nothing to escape 0ms
+ ✓ tests/truncate.test.ts > escapeXML > handles empty string 0ms
+ ✓ tests/truncate.test.ts > escapeXML > preserves non-ASCII characters unchanged 0ms
+ ✓ tests/truncate.test.ts > capBytes — codepoint boundary edge cases > byte-safe across 3-byte UTF-8 (CJK) input at every cap 0ms
+ ✓ tests/truncate.test.ts > capBytes — codepoint boundary edge cases > handles ZWJ emoji sequences without splitting surrogate pairs 0ms
+ ✓ tests/truncate.test.ts > capBytes — codepoint boundary edge cases > tolerates a lone low surrogate in input and truncates to ASCII prefix 0ms
+ ✓ tests/truncate.test.ts > capBytes — codepoint boundary edge cases > returns input unchanged when cap >= input byte length (mixed-width sweep) 0ms
+ ✓ tests/truncate.test.ts > capBytes — marker-boundary arithmetic > cap exactly equal to ellipsis marker length returns just the marker 0ms
+ ✓ tests/truncate.test.ts > capBytes — marker-boundary arithmetic > cap one byte above marker length returns one content byte + marker 0ms
+ ✓ tests/truncate.test.ts > escapeXML — consecutive and pre-escaped input > escapes runs of reserved characters independently 0ms
+ ✓ tests/truncate.test.ts > escapeXML — consecutive and pre-escaped input > re-escapes already-escaped input (not idempotent by design) 0ms
+ ✓ tests/truncate.test.ts > truncateJSON — exact-size boundaries > returns full serialization unchanged when cap equals its byte length 0ms
+ ✓ tests/truncate.test.ts > truncateJSON — exact-size boundaries > appends marker and honors cap when cap is one byte below full size 0ms
+ ✓ tests/truncate.test.ts > charSafePrefix > returns input unchanged when length <= maxChars 0ms
+ ✓ tests/truncate.test.ts > charSafePrefix > maxChars <= 0 returns empty string 0ms
+ ✓ tests/truncate.test.ts > charSafePrefix > ASCII input is sliced exactly at maxChars 0ms
+ ✓ tests/truncate.test.ts > charSafePrefix > backs off one code unit when cut splits a surrogate pair 0ms
+ ✓ tests/truncate.test.ts > charSafePrefix > cut after a complete surrogate pair leaves the pair intact 0ms
+ ✓ tests/truncate.test.ts > charSafePrefix > survives JSON.stringify round-trip with emoji at boundary 0ms
+ ✓ tests/truncate.test.ts > charSafePrefix > survives JSON round-trip when used in preview-construction pattern 0ms
+ ✓ tests/truncate.test.ts > charSafePrefix > handles multiple surrogate pairs adjacent to the cut 0ms
+
+⎯⎯⎯⎯⎯⎯⎯ Failed Tests 1 ⎯⎯⎯⎯⎯⎯⎯
+
+ FAIL  tests/tmp-compress-fixture.test.ts > fixture suite > fails on purpose
+AssertionError: Expected values to be strictly equal:
+
+1 !== 2
+
+
+- Expected
++ Received
+
+- 2
++ 1
+
+ ❯ tests/tmp-compress-fixture.test.ts:8:43
+      6|   test("passes two", () => { assert.equal(2, 2); });
+      7|   test("passes three", () => { assert.equal(3, 3); });
+      8|   test("fails on purpose", () => { assert.equal(1, 2); });
+       |                                           ^
+      9| });
+     10|
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[1/1]⎯
+
+
+ Test Files  1 failed | 1 passed (2)
+      Tests  1 failed | 40 passed (41)
+   Start at  08:33:09
+   Duration  166ms (transform 57ms, setup 56ms, import 38ms, tests 12ms, environment 0ms)
+

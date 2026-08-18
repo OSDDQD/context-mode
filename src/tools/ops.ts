@@ -19,6 +19,7 @@ import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { z } from "zod";
 
+import { tokensFromBytes } from "../session/tokenizer.js";
 import {
   AnalyticsEngine,
   formatReport,
@@ -63,8 +64,11 @@ export function registerOpsTools(deps: OpsToolDeps): void {
       }
     } catch { /* never block ctx_stats on stats file I/O */ }
     if (sandboxedBytes > 0) {
-      const rescueTokens = (lifetime.rescueBytes ?? 0) / 4;
-      lifetime.totalEvents = Math.round((sandboxedBytes / 4 + rescueTokens) / 256);
+      // Same basis as analytics.ts: bytes → tokens through the calibrated
+      // counter, never the bytes/4 constant, or this estimate drifts against
+      // every other token number in the report.
+      const rescueTokens = tokensFromBytes(lifetime.rescueBytes ?? 0);
+      lifetime.totalEvents = Math.round((tokensFromBytes(sandboxedBytes) + rescueTokens) / 256);
     }
   }
 

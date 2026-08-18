@@ -43,7 +43,10 @@ import {
 } from "./search/completeness.js";
 import { CrossQueryDeduper } from "./search/dedup.js";
 import { registerCtxSearch } from "./tools/search.js";
+import { registerCtxFind } from "./tools/find.js";
+import { registerCtxGraph } from "./tools/graph.js";
 import { registerBatchTools } from "./tools/batch.js";
+import { installFsWiring, type FsWiringHandle } from "./fs-bus/index.js";
 // classifyIp and classifyExtraction are injected into the fetch subprocess by
 // buildFetchCode below, which is why they travel back across the tool boundary.
 import { registerCtxFetch, classifyIp, classifyExtraction, isProxyAllowed } from "./tools/fetch.js";
@@ -77,7 +80,16 @@ import {
   emitIndexWriteEvent,
   emitSandboxExecuteEvent,
 } from "./session/event-emit.js";
-import { persistToolCallCounter, restoreSessionStats } from "./session/persist-tool-calls.js";
+import {
+  persistReuseVerdict,
+  persistToolCallCounter,
+  restoreSessionStats,
+} from "./session/persist-tool-calls.js";
+import {
+  collectLayerHealth,
+  layerDiagnosticsEnabled,
+  renderLayerHealth,
+} from "./util/layer-health.js";
 import { searchAllSources } from "./search/unified.js";
 import {
   buildCtxSearchInputSchema,
@@ -95,6 +107,7 @@ import { resolveClaudeConfigDir } from "./util/claude-config.js";
 import { resolveProjectDir } from "./util/project-dir.js";
 import { loadDatabase } from "./db-base.js";
 import { getLifetimeStats, pricePerToken } from "./session/analytics.js";
+import { tokensFromBytes } from "./session/tokenizer.js";
 const __pkg_dir = dirname(fileURLToPath(import.meta.url));
 const VERSION: string = (() => {
   for (const rel of ["../package.json", "./package.json"]) {
@@ -1206,6 +1219,15 @@ function healCacheMidSession(): void {
   } catch { /* best effort */ }
 }
 
+/**
+ * How often the returns verdict (C-02) is recomputed. The read is capped at
+ * 4000 events but still opens the session DB, so it pays for itself once a
+ * minute, not once a response — the ratio it publishes moves on the scale of
+ * a working session, never between two consecutive tool calls.
+ */
+const REUSE_VERDICT_INTERVAL_MS = 60_000;
+let lastReuseVerdictAt = 0;
+
 function trackResponse(toolName: string, response: ToolResult): ToolResult {
   // #854: a response is activity too — refresh the bridge-child idle clock so a
   // chatty/streaming call keeps its server alive even between inbound frames.
@@ -1239,6 +1261,20 @@ function trackResponse(toolName: string, response: ToolResult): ToolResult {
   // setImmediate keeps this off the response hot path; the helper itself
   // is best-effort (never throws).
   setImmediate(() => persistToolCallCounter(getSessionDbPath(), toolName, bytes));
+
+  // C-02 — republish the returns verdict the compression gateway reads. The
+  // natural caller is the PostToolUse hook (it fires right after the events
+  // land), but no hook bundle carries reuse-detector.ts, so the server does
+  // it instead: one capped read of the session's events, throttled because
+  // that read is far too heavy for every single response. Best-effort — a
+  // missing verdict means "do not bypass", which is the safe direction.
+  const nowMs = Date.now();
+  if (nowMs - lastReuseVerdictAt >= REUSE_VERDICT_INTERVAL_MS) {
+    lastReuseVerdictAt = nowMs;
+    setImmediate(() => {
+      try { persistReuseVerdict(getSessionDbPath()); } catch { /* best-effort */ }
+    });
+  }
 
   // D2 Phase 5/7 — sandbox-execute event emission. Tracks the bytes the
   // user actually saw from sandboxed runs so getRealBytesStats() can
@@ -1430,7 +1466,7 @@ function persistStats(): void {
       totalProcessed > 0
         ? Math.round((1 - totalReturned / totalProcessed) * 100)
         : 0;
-    const tokensSaved = Math.round(keptOut / 4);
+    const tokensSaved = Math.round(tokensFromBytes(keptOut));
 
     // Lifetime savings — cached separately because getLifetimeStats() scans
     // disk (per-project SessionDBs + auto-memory dirs) and is too expensive
@@ -3142,6 +3178,15 @@ function opsToolDeps(): OpsToolDeps {
 // order, and tests/core/tool-registration.test.ts pins it.
 registerCtxSearch(toolDeps());
 
+// ctx_find (src/tools/find.ts) and ctx_graph (src/tools/graph.ts) register
+// next to ctx_search because they answer the same question at different
+// altitudes — "find it", "recall it", "explain its structure" — and MCP hosts
+// render the list in registration order. Both self-disable on their own env
+// switch (CONTEXT_MODE_FIND=0 / CONTEXT_MODE_GRAPH=0), which is why the guard
+// lives inside each register function rather than here.
+registerCtxFind(toolDeps());
+registerCtxGraph(toolDeps());
+
 // ─────────────────────────────────────────────────────────
 // Turndown path resolution (external dep, like better-sqlite3)
 // ─────────────────────────────────────────────────────────
@@ -3862,6 +3907,20 @@ server.registerTool(
       lines.push("[WARN] Hooks: adapter detection unavailable");
     }
 
+    // Search layers (P3): fff, codegraph, the fs bus, tokenizer, compression.
+    // Same probes the CLI doctor runs — every one of them degrades to a state
+    // ("not installed", "off") rather than a failure, so a plugin without the
+    // optional layers still reports a clean bill of health.
+    if (layerDiagnosticsEnabled()) {
+      try {
+        const layers = await collectLayerHealth({ projectDir: getProjectDir(), pluginRoot });
+        lines.push("[OK] Search layers:");
+        for (const line of renderLayerHealth(layers)) lines.push(`  ${line}`);
+      } catch (e) {
+        lines.push(`[WARN] Search layers: probe unavailable — ${e instanceof Error ? e.message : String(e)}`);
+      }
+    }
+
     // Version
     lines.push(`[OK] Version: v${VERSION}`);
 
@@ -4574,6 +4633,14 @@ async function main() {
   const mcpSentinel = join(mcpSentinelDir, `context-mode-mcp-ready-${process.pid}`);
   // #844: handle to the periodic sentinel refresh timer (started after connect).
   let sentinelRefresh: ReturnType<typeof setInterval> | undefined;
+  // Filesystem event bus (src/fs-bus). Installed AFTER connect — fff's first
+  // scan walks the whole tree, and paying for that before the MCP handshake
+  // would make the server look slow to start for a feature nothing has asked
+  // for yet. `fsWiringWanted` is the shutdown race guard: shutdown can run
+  // before the install promise resolves, and a wiring installed after that
+  // would never be detached.
+  let fsWiring: FsWiringHandle | undefined;
+  let fsWiringWanted = true;
 
   // Clean up own DB + backgrounded processes + preload script on shutdown
   const shutdown = () => {
@@ -4584,6 +4651,9 @@ async function main() {
     try { unlinkSync(mcpSentinel); } catch { /* best effort */ }
     // #844: stop refreshing the sentinel mtime on shutdown.
     if (sentinelRefresh) clearInterval(sentinelRefresh);
+    // Release the fff watcher and the codegraph sync queue.
+    fsWiringWanted = false;
+    try { fsWiring?.detach(); } catch { /* best effort */ }
   };
   const gracefulShutdown = async () => {
     // Final stats flush — bypass throttle so the last 0-500ms of
@@ -4614,6 +4684,21 @@ async function main() {
 
   const transport = new StdioServerTransport();
   await server.connect(transport);
+
+  // Filesystem wiring — fire-and-forget, deliberately AFTER connect. The
+  // installer acquires the fff finder, which triggers the first full scan of
+  // the tree; awaiting it here would hold the handshake open for the length of
+  // that scan. `installFsWiring` never rejects (an unavailable fff comes back
+  // as an inactive handle), so the `.then` is the only place a handle exists.
+  void installFsWiring({
+    projectDir: getProjectDir(),
+    getStore: () => peekStore(),
+  })
+    .then(handle => {
+      if (!fsWiringWanted) { try { handle.detach(); } catch { /* ok */ } return; }
+      fsWiring = handle;
+    })
+    .catch(() => { /* the bus is an optimisation — never fail startup for it */ });
 
   // #854: refresh the bridge-child idle clock on each inbound MCP message so an
   // abandoned bridge child (CONTEXT_MODE_BRIDGE_DEPTH>0) self-terminates instead

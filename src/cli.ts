@@ -40,6 +40,17 @@ import {
   type ResolvedStorageDir,
 } from "./session/db.js";
 import { ContentStore, contentStoreUsage, enforceContentBudget } from "./store.js";
+// Fork layers (fff / codegraph / fs-bus / tokenizer / compression) — the
+// probes live in one module so doctor, inventory and any future MCP surface
+// read the same report. Every collector degrades instead of throwing.
+import {
+  collectLayerHealth,
+  layerDiagnosticsEnabled,
+  renderLayerHealth,
+  shortBytes,
+  type LayerHealth,
+} from "./util/layer-health.js";
+import { sweepFffMcpLogs } from "./util/fff-logs.js";
 import { drainCodeIndexQueue } from "./session/code-index.js";
 import { drainSubagentQueue } from "./session/subagent-capture.js";
 import { readToolDenyPatterns, evaluateFilePath } from "./security.js";
@@ -631,6 +642,14 @@ async function drainCommand(argv: string[]): Promise<number> {
       const reclaimed = store.compact();
       if (reclaimed > 0) console.log(`compacted: ${mb(reclaimed)} reclaimed`);
       reportContentBudget(contentDir, dbPath, boolFlag(parsed.flags, "dry-run"));
+      // Orphaned logs from the external fff-mcp server the library replaced.
+      // Nothing writes them any more, so nothing else would ever remove them.
+      try {
+        const swept = sweepFffMcpLogs();
+        if (swept.removed > 0) {
+          console.log(`fff logs: removed ${swept.removed} orphaned file(s), ${mb(swept.freedBytes)} freed`);
+        }
+      } catch { /* housekeeping never fails a drain */ }
     } finally {
       store.close();
     }
@@ -779,6 +798,21 @@ export interface InventoryTypeGroup {
   chunks: number;
 }
 
+/** One acquisition channel — which layer put these sources in the store. */
+export interface InventoryChannelGroup {
+  channel: string;
+  sources: number;
+  chunks: number;
+}
+
+/** On-disk footprint of the indexes that live OUTSIDE the FTS5 store. */
+export interface InventoryLayers {
+  /** fff frecency + history for this project, when the layer is installed. */
+  fff?: { storageDir: string; frecencyBytes?: number; historyBytes?: number; indexedFiles?: number };
+  /** codegraph's own database for this project, when it has one. */
+  codegraph?: { dbPath: string; bytes?: number; files?: number; nodes?: number; edges?: number };
+}
+
 export interface Inventory {
   project: string;
   db: { path: string; bytes: number; walBytes: number };
@@ -787,7 +821,16 @@ export interface Inventory {
   /** ISO timestamp of the newest indexed source, absent on an empty store. */
   lastIndexedAt?: string;
   byType: InventoryTypeGroup[];
+  /**
+   * The same sources folded by the layer that produced them. `fff` and
+   * `codegraph` are always present, at zero when they contributed nothing —
+   * "that layer is feeding the index nothing" is the answer this block exists
+   * to give.
+   */
+  byChannel: InventoryChannelGroup[];
   largest: Array<{ label: string; chunks: number }>;
+  /** External index footprint, absent when layer probing is switched off. */
+  layers?: InventoryLayers;
 }
 
 /**
@@ -808,6 +851,54 @@ export function inventoryType(label: string): string {
 }
 
 /**
+ * Which layer produced a source of this type.
+ *
+ * The type prefix says what a source *is* (`code:`, `batch:`, `fetch:`); the
+ * channel says who put it there. Two of those channels are the layers this
+ * fork attached — `codegraph:` labels come from the graph tool's explore
+ * overflow, `find:`/`fff:` labels from the unified search layer — and they are
+ * worth seeing on their own line, because "the index is 80% codegraph explore
+ * dumps" is an operational fact that the `by type` block buries.
+ *
+ * Unknown prefixes fall into `capture`, not into `fff`/`codegraph`: this
+ * classification may only ever under-claim for those two.
+ */
+const INVENTORY_CHANNEL_BY_TYPE: Readonly<Record<string, string>> = {
+  // fff — the in-process search layer
+  fff: "fff",
+  find: "fff",
+  // codegraph — the structural index
+  codegraph: "codegraph",
+  graph: "codegraph",
+  symbol: "codegraph",
+  outline: "codegraph",
+  // the file index the fs bus keeps fresh
+  code: "code-index",
+  file: "code-index",
+  project: "code-index",
+  // fetched documentation
+  fetch: "web",
+  url: "web",
+  docs: "web",
+  // session memory
+  memory: "memory",
+  compaction: "memory",
+  "user-prompt": "memory",
+  decision: "memory",
+  "rejected-approach": "memory",
+  constraint: "memory",
+  "session-events": "memory",
+  "prior-session": "memory",
+};
+
+/** Channels always printed, even at zero — the two layers this fork added. */
+export const INVENTORY_TRACKED_CHANNELS = ["fff", "codegraph"] as const;
+
+export function inventoryChannel(type: string): string {
+  return INVENTORY_CHANNEL_BY_TYPE[type] ?? "capture";
+}
+
+/**
  * Fold the store's own accounting into the shape both renderers print.
  *
  * Pure on purpose: everything that talks to SQLite happens in the caller, so
@@ -821,17 +912,32 @@ export function buildInventory(input: {
   sources: Array<{ label: string; chunkCount: number }>;
   indexState: { totalChunks: number; totalSources: number; lastIndexedAt?: string };
   top: number;
+  layers?: InventoryLayers;
 }): Inventory {
   const groups = new Map<string, InventoryTypeGroup>();
+  const channels = new Map<string, InventoryChannelGroup>();
+  for (const c of INVENTORY_TRACKED_CHANNELS) {
+    channels.set(c, { channel: c, sources: 0, chunks: 0 });
+  }
   for (const s of input.sources) {
     const type = inventoryType(s.label);
     const g = groups.get(type) ?? { type, sources: 0, chunks: 0 };
     g.sources++;
     g.chunks += s.chunkCount;
     groups.set(type, g);
+
+    const channel = inventoryChannel(type);
+    const c = channels.get(channel) ?? { channel, sources: 0, chunks: 0 };
+    c.sources++;
+    c.chunks += s.chunkCount;
+    channels.set(channel, c);
   }
 
   return {
+    layers: input.layers,
+    byChannel: [...channels.values()].sort(
+      (a, b) => b.chunks - a.chunks || a.channel.localeCompare(b.channel),
+    ),
     project: input.project,
     db: { path: input.dbPath, bytes: input.dbBytes, walBytes: input.walBytes },
     // From getIndexState() rather than from summing listSources(): it is the
@@ -847,6 +953,60 @@ export function buildInventory(input: {
   };
 }
 
+/**
+ * The two indexes that do NOT live in the FTS5 store.
+ *
+ * `sources`/`chunks` above only ever describe the knowledge base. fff keeps
+ * frecency and history in LMDB, codegraph keeps nodes and edges in its own
+ * SQLite file, and both are part of "what is recorded about this project" —
+ * an inventory that omits them under-reports the real footprint.
+ */
+export function renderInventoryLayers(layers: InventoryLayers | undefined): string[] {
+  if (!layers || (!layers.fff && !layers.codegraph)) return [];
+  const lines = ["", "external indexes:"];
+  // A database nobody has written yet is "none yet", not "n/a" — the same
+  // wording doctor uses, so the two reports do not describe one state twice.
+  const size = (bytes: number | undefined) => (bytes === undefined ? "none yet" : shortBytes(bytes));
+  if (layers.fff) {
+    lines.push(
+      `  fff        ${size(layers.fff.frecencyBytes)} frecency + ` +
+      `${size(layers.fff.historyBytes)} history` +
+      (layers.fff.indexedFiles !== undefined ? `, ${layers.fff.indexedFiles} file(s) scanned` : "") +
+      `  ${layers.fff.storageDir}`,
+    );
+  }
+  if (layers.codegraph) {
+    const counts = layers.codegraph.nodes !== undefined
+      ? `, ${layers.codegraph.files ?? 0} files / ${layers.codegraph.nodes} nodes / ${layers.codegraph.edges ?? 0} edges`
+      : "";
+    lines.push(`  codegraph  ${size(layers.codegraph.bytes)}${counts}  ${layers.codegraph.dbPath}`);
+  }
+  return lines;
+}
+
+/** Fold a layer-health report into the inventory's external-index block. */
+export function inventoryLayersFrom(health: LayerHealth): InventoryLayers {
+  const layers: InventoryLayers = {};
+  if (health.fff.available || health.fff.frecencyBytes !== undefined) {
+    layers.fff = {
+      storageDir: health.fff.storageDir,
+      frecencyBytes: health.fff.frecencyBytes,
+      historyBytes: health.fff.historyBytes,
+      indexedFiles: health.fff.indexedFiles,
+    };
+  }
+  if (health.graph.hasIndex) {
+    layers.codegraph = {
+      dbPath: health.graph.dbPath,
+      bytes: health.graph.dbBytes,
+      files: health.graph.files,
+      nodes: health.graph.nodes,
+      edges: health.graph.edges,
+    };
+  }
+  return layers;
+}
+
 /** Human-readable rendering of an inventory. */
 export function renderInventory(inv: Inventory): string {
   const lines = [
@@ -858,17 +1018,29 @@ export function renderInventory(inv: Inventory): string {
     `sources: ${inv.sources}, chunks: ${inv.chunks}`,
   ];
 
+  const pad = (n: number, w: number) => String(n).padStart(w);
+
   if (inv.sources === 0) {
     lines.push("", "Nothing is indexed for this project yet.");
+    lines.push(...renderInventoryLayers(inv.layers));
     return lines.join("\n");
   }
 
-  const pad = (n: number, w: number) => String(n).padStart(w);
   const typeWidth = Math.max(4, ...inv.byType.map((g) => g.type.length));
   lines.push("", "by type:");
   for (const g of inv.byType) {
     lines.push(`  ${g.type.padEnd(typeWidth)}  ${pad(g.sources, 6)} sources  ${pad(g.chunks, 7)} chunks`);
   }
+
+  // Who fed the index. Printed even when a layer contributed nothing — the
+  // zero IS the finding when fff or codegraph is supposed to be running.
+  const channelWidth = Math.max(4, ...inv.byChannel.map((g) => g.channel.length));
+  lines.push("", "by channel:");
+  for (const g of inv.byChannel) {
+    lines.push(`  ${g.channel.padEnd(channelWidth)}  ${pad(g.sources, 6)} sources  ${pad(g.chunks, 7)} chunks`);
+  }
+
+  lines.push(...renderInventoryLayers(inv.layers));
 
   lines.push("", `largest sources (top ${inv.largest.length}):`);
   const chunkWidth = Math.max(...inv.largest.map((s) => String(s.chunks).length));
@@ -904,6 +1076,16 @@ async function inventoryCommand(argv: string[]): Promise<number> {
         walBytes = contentStoreUsage(contentDir).stores.find((s) => s.dbPath === dbPath)?.walBytes ?? 0;
       } catch { /* accounting is a nicety — never fail the report over it */ }
 
+      // What fff and codegraph hold for this project. Read-only probes, and
+      // the same ones ctx_doctor uses; CONTEXT_MODE_DOCTOR_LAYERS=0 skips them
+      // here too, which also skips loading those modules at all.
+      let layers: InventoryLayers | undefined;
+      if (layerDiagnosticsEnabled()) {
+        try {
+          layers = inventoryLayersFrom(await collectLayerHealth({ projectDir }));
+        } catch { /* an absent layer must never fail the inventory */ }
+      }
+
       const inventory = buildInventory({
         project: projectDir,
         dbPath,
@@ -912,6 +1094,7 @@ async function inventoryCommand(argv: string[]): Promise<number> {
         sources: store.listSources(),
         indexState: store.getIndexState(),
         top: numberFlag(parsed.flags, "top") ?? 10,
+        layers,
       });
 
       console.log(
@@ -1448,6 +1631,32 @@ async function doctor(): Promise<number> {
             color.dim("\n  Try: npm rebuild better-sqlite3"),
         );
       }
+    }
+  }
+
+  // ── Fork layers: fff, codegraph, fs bus, tokenizer, compression ─────
+  // None of these can fail the run. A layer that is absent is a *state* the
+  // user came here to read ("why did search get worse after the upgrade?"),
+  // not a critical issue: the plugin works without every one of them. The
+  // whole block is behind CONTEXT_MODE_DOCTOR_LAYERS=0 for a shorter report.
+  if (layerDiagnosticsEnabled()) {
+    p.log.step("Checking search layers...");
+    try {
+      const layers = await collectLayerHealth({
+        projectDir: process.cwd(),
+        pluginRoot: getPluginRoot(),
+      });
+      // One log line per layer rather than a p.note box: the box wraps at ~78
+      // columns and these lines carry absolute paths, which wrap into
+      // unreadable fragments exactly when a user needs to copy one.
+      p.log.message(renderLayerHealth(layers).map((l) => color.dim(l)).join("\n"));
+    } catch (err) {
+      // collectLayerHealth already absorbs per-layer failures; this only
+      // catches something pathological (module graph missing entirely).
+      p.log.warn(
+        color.yellow("Search layers: SKIP") +
+          color.dim(` — ${err instanceof Error ? err.message : String(err)}`),
+      );
     }
   }
 

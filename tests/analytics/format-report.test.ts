@@ -240,8 +240,10 @@ describe("formatReport", () => {
       });
       const output = formatReport(report);
 
-      // 25MB / 4 bytes per token = 6.25M tokens
-      expect(output).toMatch(/6\.3M/);
+      // 25 MB at the calibrated 3.487 bytes/token (session/tokenizer.ts) =
+      // 7.17M tokens. The old `bytes / 4` guess read 6.25M here — it was
+      // the English-prose ratio applied to redirected tool output.
+      expect(output).toMatch(/7\.2M/);
     });
 
     it("does NOT show Pct column, Tip lines, or category breakdown table", () => {
@@ -572,8 +574,10 @@ describe("formatReport", () => {
       });
       const output = formatReport(report, "1.0.71");
 
-      // Hero metric: tokens saved with percentage
-      expect(output).toMatch(/6\.\d+M tokens saved/);
+      // Hero metric: tokens saved with percentage. Counted at the calibrated
+      // bytes-per-token from session/tokenizer.ts, not the old `bytes / 4`
+      // (which read 6.x M for the same kept-out bytes).
+      expect(output).toMatch(/7\.\d+M tokens saved/);
       expect(output).toContain("reduction");
       expect(output).toContain("5h 6m");
 

@@ -16,6 +16,15 @@ import { join, sep } from "node:path";
 import { loadDatabase as loadDatabaseImpl } from "../db-base.js";
 import { ensureSessionEventsSchema } from "./db.js";
 import { resolveClaudeConfigDir } from "../util/claude-config.js";
+import { tokensFromBytes, bytesFromTokens } from "./tokenizer.js";
+import {
+  REUSE_EVENT_TYPES,
+  detectReuse,
+  reuseDetectorEnabled,
+  reuseThreshold,
+  summarizeReuse,
+} from "./reuse-detector.js";
+import type { ReuseCandidateEvent, ReuseSummary } from "./reuse-detector.js";
 
 function semverNewer(a: string, b: string): boolean {
   const pa = a.split(".").map(Number);
@@ -472,7 +481,7 @@ export class AnalyticsEngine {
       tool,
       calls: runtimeStats.calls[tool] || 0,
       context_kb: Math.round((runtimeStats.bytesReturned[tool] || 0) / 1024 * 10) / 10,
-      tokens: Math.round((runtimeStats.bytesReturned[tool] || 0) / 4),
+      tokens: Math.round(tokensFromBytes(runtimeStats.bytesReturned[tool] || 0)),
     }));
 
     const uptimeMs = Date.now() - runtimeStats.sessionStart;
@@ -1070,13 +1079,18 @@ export function getConversationStats(opts: {
 /**
  * Real-bytes counter the renderer uses to replace the conservative
  * `events × 256` token estimate. Reads four sources from disk and
- * returns the sum the renderer divides by 4 to get tokens.
+ * returns the sum the renderer converts to tokens.
  *
  * - `eventDataBytes`  = SUM(LENGTH(data))      FROM session_events
  * - `bytesAvoided`    = SUM(bytes_avoided)     FROM session_events
  * - `bytesReturned`   = SUM(bytes_returned)    FROM session_events
  * - `snapshotBytes`   = SUM(LENGTH(snapshot))  FROM session_resume
- * - `totalSavedTokens` = (eventDataBytes + bytesAvoided + snapshotBytes) / 4
+ * - `totalSavedTokens` = tokensFromBytes(eventDataBytes + bytesAvoided + snapshotBytes)
+ *
+ * The text behind those sums is long gone by the time we read them, so the
+ * conversion goes through `tokensFromBytes` (session/tokenizer.ts) — the
+ * bytes-per-token measured on the payload mix context-mode redirects,
+ * rather than the prose rule of thumb `bytes / 4` this used to assume.
  *
  * `bytesReturned` is reported but NOT folded into `totalSavedTokens`
  * because it represents bytes the model already paid for — adding it
@@ -1125,6 +1139,23 @@ export interface RealBytesStats {
    * now reported, each under its own name. See ADR-0005.
    */
   sessionKeptOutBytes?: number;
+  /**
+   * C-02: the returns — compressed views the model then re-read whole.
+   *
+   * `bytesAvoided` above is already NET of `reuse.returnedBytes`: the
+   * subtraction happens in bytes, before any token conversion, so
+   * `totalSavedTokens` and every downstream ratio stay on the single basis
+   * `session/tokenizer.ts` established. `keptOutBytesGross` preserves the
+   * pre-deduction figure so the renderer can show what was taken off.
+   *
+   * Undefined when the detector is off (`CONTEXT_MODE_REUSE_DETECT=0`) or
+   * when the tier has no event stream to join.
+   */
+  reuse?: ReuseSummary;
+  /** Kept-out bytes BEFORE the reuse deduction. Equals `bytesAvoided` when no returns. */
+  keptOutBytesGross?: number;
+  /** Bytes actually taken off `bytesAvoided` (≤ `reuse.returnedBytes`, clamped at 0). */
+  reuseDeductedBytes?: number;
 }
 
 /**
@@ -1232,6 +1263,11 @@ export function getContentBytesAllSessions(
  * contract as `getConversationStats` / `getLifetimeStats` so the
  * stats-render path can never crash on a bad sidecar.
  */
+/** `?` placeholders for the `type IN (…)` filter of the reuse-detector SELECT. */
+const REUSE_TYPE_PLACEHOLDERS = REUSE_EVENT_TYPES.map(() => "?").join(", ");
+/** Hard cap on rows pulled for the reuse join, across every DB in one call. */
+const REUSE_ROW_LIMIT = 4000;
+
 export function getRealBytesStats(opts: {
   sessionId?: string;
   sessionsDir?: string;
@@ -1299,6 +1335,31 @@ export function getRealBytesStats(opts: {
   let bytesAvoided = 0;
   let bytesReturned = 0;
   let snapshotBytes = 0;
+  // C-02: the raw event stream the reuse detector joins over. Collected in the
+  // same DB pass as the SUMs (one extra narrow SELECT per file) and capped, so
+  // a 20k-event session cannot drag its whole history through JS just to price
+  // the returns. Left empty when the detector is switched off.
+  const reuseRows: ReuseCandidateEvent[] = [];
+  const wantReuse = reuseDetectorEnabled();
+  const collectReuseRows = (
+    sdb: { prepare(sql: string): { all(...p: unknown[]): unknown } },
+    where: string,
+    params: unknown[],
+  ): void => {
+    if (!wantReuse) return;
+    const room = REUSE_ROW_LIMIT - reuseRows.length;
+    if (room <= 0) return;
+    try {
+      const rows = sdb.prepare(
+        `SELECT id, type, data, created_at, project_dir, bytes_returned
+         FROM session_events
+         WHERE ${where} AND type IN (${REUSE_TYPE_PLACEHOLDERS})
+         ORDER BY created_at, id
+         LIMIT ?`,
+      ).all(...params, ...REUSE_EVENT_TYPES, room) as ReuseCandidateEvent[];
+      for (const r of rows) reuseRows.push(r);
+    } catch { /* old schema / corrupt — the deduction simply stays 0 */ }
+  };
 
   // Each branch returns the tuple in the SAME column order so callers
   // don't need to type-narrow per row.
@@ -1353,6 +1414,7 @@ export function getRealBytesStats(opts: {
             ).get(opts.sessionId) as { bytes: number } | undefined;
             if (tc?.bytes) bytesReturned += Number(tc.bytes);
           } catch { /* old schema: no tool_calls table */ }
+          collectReuseRows(sdb, "session_id = ?", [opts.sessionId]);
         } else if (opts.projectDir) {
           // Bug E+F: META-scoped aggregation. Take every session_id whose
           // session_meta.project_dir matches, then sum ALL of those
@@ -1397,6 +1459,11 @@ export function getRealBytesStats(opts: {
             ).get(opts.projectDir) as { bytes: number } | undefined;
             if (tc?.bytes) bytesReturned += Number(tc.bytes);
           } catch { /* old schema: no tool_calls table */ }
+          collectReuseRows(
+            sdb,
+            "session_id IN (SELECT session_id FROM session_meta WHERE project_dir = ?)",
+            [opts.projectDir],
+          );
         } else {
           const row = sdb.prepare(
             `SELECT
@@ -1425,6 +1492,7 @@ export function getRealBytesStats(opts: {
             ).get() as { bytes: number } | undefined;
             if (tc?.bytes) bytesReturned += Number(tc.bytes);
           } catch { /* old schema: no tool_calls table */ }
+          collectReuseRows(sdb, "1 = 1", []);
         }
       } finally {
         sdb.close();
@@ -1448,11 +1516,43 @@ export function getRealBytesStats(opts: {
     bytesAvoided += contentBytes;
   }
 
+  // ── C-02: deduct the returns ────────────────────────────────────────────
+  //
+  // A compressed view the model then re-read whole never kept anything out:
+  // the full file entered the window anyway, on top of the retrieval response.
+  // Booking it as a saving is the exact overstatement this deduction removes.
+  //
+  //   before:  keptOut = eventDataBytes + bytesAvoided + snapshotBytes
+  //   after:   keptOut = eventDataBytes + max(0, bytesAvoided - returned)
+  //                                     + snapshotBytes
+  //
+  // Subtracted in BYTES, before `tokensFromBytes` — so the "with" and
+  // "without" sides of every ctx_stats ratio keep being computed by the same
+  // function on the same basis, which is the invariant the honest tokenizer
+  // introduced. Clamped at 0: a stale marker must never invert a bar.
+  const keptOutBytesGross = bytesAvoided;
+  let reuse: ReuseSummary | undefined;
+  let reuseDeductedBytes = 0;
+  if (wantReuse && reuseRows.length > 0) {
+    const report = detectReuse(reuseRows, { projectDir: opts.projectDir });
+    reuse = summarizeReuse(report);
+    reuseDeductedBytes = Math.min(bytesAvoided, reuse.returnedBytes);
+    bytesAvoided = Math.max(0, bytesAvoided - reuse.returnedBytes);
+  }
+
   const totalSavedTokens = Math.floor(
-    (eventDataBytes + bytesAvoided + snapshotBytes) / 4,
+    tokensFromBytes(eventDataBytes + bytesAvoided + snapshotBytes),
   );
 
-  return { eventDataBytes, bytesAvoided, bytesReturned, snapshotBytes, contentBytes, totalSavedTokens };
+  return {
+    eventDataBytes,
+    bytesAvoided,
+    bytesReturned,
+    snapshotBytes,
+    contentBytes,
+    totalSavedTokens,
+    ...(reuse ? { reuse, keptOutBytesGross, reuseDeductedBytes } : {}),
+  };
 }
 
 /**
@@ -1511,12 +1611,24 @@ export function getConversationWindowStats(opts: {
     snapshotBytes: pool.snapshotBytes,
     contentBytes: mine.contentBytes,
     totalSavedTokens: Math.floor(
-      (pool.eventDataBytes + keptOut + pool.snapshotBytes) / 4,
+      tokensFromBytes(pool.eventDataBytes + keptOut + pool.snapshotBytes),
     ),
     // The narrow slice, kept separate rather than substituted: every field
     // above is worktree-wide by design (see the comment on this function), so
     // the renderer needs both to label its scopes honestly.
     sessionKeptOutBytes: mine.eventDataBytes + mine.bytesAvoided + mine.snapshotBytes,
+    // C-02: both `pool` and `mine` came back already NET of their own returns
+    // (getRealBytesStats deducts in bytes before any conversion), so `keptOut`
+    // and `sessionKeptOutBytes` above need no further arithmetic here. What is
+    // forwarded is the live window's own summary — the renderer names what was
+    // taken off, and the bypass policy reads its ratio.
+    ...(mine.reuse
+      ? {
+          reuse: mine.reuse,
+          keptOutBytesGross: mine.keptOutBytesGross,
+          reuseDeductedBytes: mine.reuseDeductedBytes,
+        }
+      : {}),
   };
 }
 
@@ -1801,7 +1913,7 @@ export function getMultiAdapterRealBytesStats(opts?: {
     sum.snapshotBytes  += one.snapshotBytes;
   }
   sum.totalSavedTokens = Math.floor(
-    (sum.eventDataBytes + sum.bytesAvoided + sum.snapshotBytes) / 4,
+    tokensFromBytes(sum.eventDataBytes + sum.bytesAvoided + sum.snapshotBytes),
   );
 
   return { ...sum, perAdapter };
@@ -2163,13 +2275,13 @@ function renderNarrative5Section(args: {
 
   // ── Token math (same monotonic-growth invariant as the legacy branch).
   const convEventsTokens = conversation.events * TOKENS_PER_EVENT;
-  const convRescueTokens = Math.round((conversation.snapshotBytes ?? 0) / 4);
+  const convRescueTokens = Math.round(tokensFromBytes(conversation.snapshotBytes ?? 0));
   const convLegacyTokens = convEventsTokens + convRescueTokens;
   const convRealTokens   = realBytes?.conversation?.totalSavedTokens ?? 0;
   const conversationTokens = Math.max(convLegacyTokens, convRealTokens);
 
   const lifetimeEventsTokens = (lifetime?.totalEvents ?? 0) * TOKENS_PER_EVENT;
-  const lifetimeRescueTokens = Math.round((lifetime?.rescueBytes ?? 0) / 4);
+  const lifetimeRescueTokens = Math.round(tokensFromBytes(lifetime?.rescueBytes ?? 0));
   const lifetimeLegacyTokens = lifetimeEventsTokens + lifetimeRescueTokens;
   const lifetimeRealTokens   = realBytes?.lifetime?.totalSavedTokens ?? 0;
   const lifetimeTokensWithout = Math.max(lifetimeLegacyTokens, lifetimeRealTokens);
@@ -2177,22 +2289,24 @@ function renderNarrative5Section(args: {
   // Honest definition (matches conversation bar below):
   //   "with"    = bytes_returned (what the model actually re-saw)
   //   "without" = bytes_returned + bytes_avoided
-  // When the schema has measurement, derive `with` from `bytes_returned/4`.
+  // When the schema has measurement, derive `with` from `bytes_returned`.
   const lifeRet = realBytes?.lifetime?.bytesReturned ?? 0;
   const lifeAv  = realBytes?.lifetime?.bytesAvoided  ?? 0;
   const lifetimeTokensWith = (lifeRet + lifeAv) > 0
-    ? Math.max(1, Math.floor(lifeRet / 4))
+    ? Math.max(1, Math.floor(tokensFromBytes(lifeRet)))
     : Math.max(1, Math.round(lifetimeTokensWithout * 0.02));
 
-  // Bytes from realBytes when present, else derive from tokens (×4 — same
-  // ratio Phase 8 uses everywhere). All-work bytes drives the opener tally
-  // + the section-3 receipt + section-4 cost example.
+  // Bytes from realBytes when present, else derive from tokens. Goes through
+  // `bytesFromTokens` — the exact inverse of the `tokensFromBytes` above — so
+  // both directions stay on one basis and no bar compares two definitions.
+  // All-work bytes drives the opener tally + the section-3 receipt + the
+  // section-4 cost example.
   const lifetimeBytes = (multiAdapter?.totalBytes && multiAdapter.totalBytes > 0)
     ? multiAdapter.totalBytes
-    : lifetimeTokensWithout * 4;
+    : bytesFromTokens(lifetimeTokensWithout);
   const convBytes = realBytes?.conversation
     ? (realBytes.conversation.eventDataBytes + realBytes.conversation.bytesAvoided + realBytes.conversation.snapshotBytes)
-    : conversationTokens * 4;
+    : bytesFromTokens(conversationTokens);
 
   // Three scopes, each labelled for what it actually measures.
   //
@@ -2309,8 +2423,8 @@ function renderNarrative5Section(args: {
   } else {
     const convBytesWithout  = measuredAvoided + measuredReturned;
     const convBytesWith     = Math.max(1, measuredReturned);
-    const convTokensWithout = Math.max(1, Math.floor(convBytesWithout / 4));
-    const convTokensWith    = Math.max(1, Math.floor(convBytesWith    / 4));
+    const convTokensWithout = Math.max(1, Math.floor(tokensFromBytes(convBytesWithout)));
+    const convTokensWith    = Math.max(1, Math.floor(tokensFromBytes(convBytesWith)));
     const withoutBar = dataBar(convTokensWithout, convTokensWithout, 32);
     const withBar    = dataBar(convTokensWith,    convTokensWithout, 32);
     const convPct    = (1 - convTokensWith / convTokensWithout) * 100;
@@ -2404,6 +2518,31 @@ function renderNarrative5Section(args: {
     }
     out.push("    Route these through ctx_execute / ctx_batch_execute, or add them to");
     out.push("    safe-commands.txt if their output really is small.");
+  }
+  // C-02 — the returns. A compressed view the model then read whole is not a
+  // saving, it is a double charge, and the numbers above are already net of it.
+  // Printed only when there is something to report, and always with the amount
+  // deducted, so the receipt says what it took off rather than quietly
+  // shrinking. Above the threshold it also says what to do about it.
+  const reuse = realBytes?.conversation?.reuse;
+  const deducted = realBytes?.conversation?.reuseDeductedBytes ?? 0;
+  if (reuse && reuse.returnedReads > 0) {
+    const pct = Math.round(reuse.ratio * 100);
+    out.push("");
+    out.push(
+      `  Went back to the source: ${reuse.returnedReads} full read${reuse.returnedReads === 1 ? "" : "s"} of ${reuse.returnedSources} file${reuse.returnedSources === 1 ? "" : "s"} already summarised — ${pct}% of the ${reuse.coveredSources} compressed.`,
+    );
+    if (deducted > 0) {
+      out.push(
+        `    ${kb(deducted)} (${fmtNum(Math.round(tokensFromBytes(deducted)))} tokens) deducted from the savings above — that content entered context anyway.`,
+      );
+    }
+    if (reuse.ratio > reuseThreshold()) {
+      out.push(
+        `    Above the ${Math.round(reuseThreshold() * 100)}% line: compression is not paying for itself here — the gateway`,
+      );
+      out.push("    should hand back full text for these sources instead of summarising them.");
+    }
   }
   out.push("");
   out.push("");
@@ -2873,7 +3012,7 @@ function renderConversation(c: ConversationStats, conversationUsd: string, contr
   out.push(`  This conversation contributed ${conversationUsd}  ·  ${pctStr}`);
   out.push(`  ${c.events.toLocaleString("en-US")} events  ·  ${daysStr} alive`);
   if (c.snapshotsConsumed > 0 && c.snapshotBytes > 0) {
-    const rescuedTokens = Math.round(c.snapshotBytes / 4);
+    const rescuedTokens = Math.round(tokensFromBytes(c.snapshotBytes));
     out.push(`  ${c.snapshotsConsumed} compact weathered  ·  ${fmtNum(rescuedTokens)} tokens rescued from a ${(c.snapshotBytes / 1024).toFixed(0)} KB snapshot`);
   }
   out.push("");
@@ -3094,7 +3233,7 @@ export function formatReport(
   const totalCalls = report.savings.total_calls;
   const grandTotal = totalKeptOut + totalReturned;
   const savingsPct = grandTotal > 0 ? (totalKeptOut / grandTotal) * 100 : 0;
-  const tokensSaved = Math.round(totalKeptOut / 4);
+  const tokensSaved = Math.round(tokensFromBytes(totalKeptOut));
   const ratioMultiplier = totalReturned > 0
     ? Math.max(1, Math.round(grandTotal / Math.max(totalReturned, 1)))
     : 0;
