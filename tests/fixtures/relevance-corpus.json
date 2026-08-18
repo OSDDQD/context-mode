@@ -1,0 +1,991 @@
+{
+  "note": "Retrieval-quality corpus. Documents are indexed into one store, so every query is answered under competition from 39 other sources. `relevant` is the ground truth scored by scripts/measure-retrieval.mjs. `gate: true` cases are additionally asserted one by one in tests/core/search.test.ts; `legacy: true` marks the 18 that predate the move out of that file and must keep passing verbatim.",
+  "classes": {
+    "keyword": "terms the document literally contains — lexical search must win",
+    "title": "the query matches a document heading",
+    "cascade": "asserts which search layer answered",
+    "typo": "misspelled query, resolved by fuzzy correction",
+    "negative": "asserts unrelated sources stay out of the top 5",
+    "long-code": "answer sits deep inside a multi-chunk code file",
+    "paraphrase": "intent stated in words the document never uses — lexical is expected to lose",
+    "cross-lingual": "Russian query against an English document — lexical cannot match at all"
+  },
+  "documents": [
+    {
+      "source": "api-auth-handler",
+      "markdown": "# Authentication middleware\n\n## verifyToken\n\n```typescript\nexport async function verifyToken(req: Request): Promise<User> {\n  const header = req.headers.get(\"Authorization\");\n  if (!header?.startsWith(\"Bearer \")) {\n    throw new AuthenticationError(\"Missing or malformed Authorization header\");\n  }\n  const token = header.slice(7);\n  const payload = jwt.verify(token, process.env.JWT_SECRET!);\n  return payload;\n}\n```\n\nThe middleware validates JWT tokens from the Authorization header and returns the decoded user payload."
+    },
+    {
+      "source": "nginx-access-log",
+      "markdown": "# Nginx access log\n\n## Recent requests\n\n```\n192.168.1.42 \"GET /api/auth/callback HTTP/1.1\" 200 1234\n192.168.1.43 \"GET /static/bundle.js HTTP/1.1\" 200 450321\n192.168.1.44 \"POST /api/users HTTP/1.1\" 201 89\n10.0.0.1 \"DELETE /api/sessions HTTP/1.1\" 204 0\n```"
+    },
+    {
+      "source": "react-useeffect-docs",
+      "markdown": "# React useEffect\n\n## Cleanup and dependencies\n\nuseEffect lets you synchronize a component with an external system.\n\n```jsx\nuseEffect(() => {\n  const connection = createConnection(serverUrl, roomId);\n  connection.connect();\n  return () => connection.disconnect();\n}, [serverUrl, roomId]);\n```\n\n## When cleanup runs\n\nThe cleanup function runs before every re-render with changed dependencies, and once more when the component unmounts."
+    },
+    {
+      "source": "vitest-output",
+      "markdown": "# Test results\n\n## Summary\n\nTest Suites: 1 failed, 29 passed, 30 total\nTests: 1 failed, 219 passed, 220 total\n\n## Failed test\n\n```\nFAIL tests/hooks/integration.test.ts\n  PostToolUse hook session capture\n    AssertionError: expected \"ok\" to equal \"captured\"\n    at tests/hooks/integration.test.ts:142:5\n```\n\n## Passed suites\n\n- store.test.ts (34 tests) 1200ms\n- executor.test.ts (55 tests) 3400ms"
+    },
+    {
+      "source": "database-migration",
+      "markdown": "# Database migration 0042\n\n## Add tenant_id column\n\n```sql\nALTER TABLE orders ADD COLUMN tenant_id UUID NOT NULL DEFAULT '00000000';\nCREATE INDEX idx_orders_tenant ON orders(tenant_id);\n```\n\n## Backfill\n\n```sql\nUPDATE orders SET tenant_id = (SELECT org_id FROM users WHERE users.id = orders.user_id);\n```"
+    },
+    {
+      "source": "nextjs-build-output",
+      "markdown": "# Next.js build output\n\n## Warnings\n\n- You have enabled experimental feature (serverActions) in next.config.js\n- Duplicate page detected. pages/api/auth and app/api/auth both resolve to /api/auth\n\n## Routes\n\n| Route | Size | First Load |\n|-------|------|------------|\n| / | 5.2 kB | 89.1 kB |\n| /dashboard | 12.3 kB | 96.2 kB |"
+    },
+    {
+      "source": "python-traceback",
+      "markdown": "# Python error traceback\n\n## Database connection timeout\n\n```\nTraceback (most recent call last):\n  File \"/app/services/sync.py\", line 234, in sync_orders\n    conn = await asyncpg.connect(DATABASE_URL, timeout=30)\nasyncio.TimeoutError\n\nDatabaseConnectionError: Failed to connect after 3 retries\n```\n\nThe sync service could not reach the PostgreSQL database within the 30-second timeout."
+    },
+    {
+      "source": "git-log-recent",
+      "markdown": "# Git log\n\n## Recent commits\n\n- eb36c2e perf: enable mmap_size pragma for FTS5 search\n- 766de41 ci: update server.bundle.mjs\n- 01470ec fix(store): wrap indexPlainText with withRetry\n- c445a12 feat(kiro): add full hook support for Kiro IDE"
+    },
+    {
+      "source": "tailwind-config",
+      "markdown": "# Tailwind CSS configuration\n\n## Custom theme colors\n\n```javascript\nmodule.exports = {\n  theme: {\n    extend: {\n      colors: {\n        brand: { 50: '#f0f9ff', 500: '#0ea5e9', 900: '#0c4a6e' },\n      },\n      fontFamily: { sans: ['Inter', 'system-ui', 'sans-serif'] },\n    },\n  },\n  plugins: [require('@tailwindcss/forms'), require('@tailwindcss/typography')],\n};\n```"
+    },
+    {
+      "source": "dockerfile-prod",
+      "markdown": "# Dockerfile\n\n## Multi-stage production build\n\n```dockerfile\nFROM node:20-alpine AS builder\nWORKDIR /app\nCOPY package.json package-lock.json ./\nRUN npm ci --production=false\nCOPY . .\nRUN npm run build\n\nFROM node:20-alpine AS runner\nENV NODE_ENV=production\nCOPY --from=builder /app/build ./build\nCMD [\"node\", \"build/server.js\"]\n```"
+    },
+    {
+      "source": "k8s-deployment",
+      "markdown": "# Kubernetes deployment\n\n## api-server\n\n```yaml\napiVersion: apps/v1\nkind: Deployment\nmetadata:\n  name: api-server\n  namespace: production\nspec:\n  replicas: 3\n  template:\n    spec:\n      containers:\n        - name: api\n          image: registry.example.com/api:v2.3.1\n          resources:\n            requests: { cpu: \"250m\", memory: \"512Mi\" }\n          readinessProbe:\n            httpGet: { path: /health, port: 3000 }\n```"
+    },
+    {
+      "source": "package-json-deps",
+      "markdown": "# Package dependencies\n\n## Production\n\n- next 14.2.3\n- react 18.3.1\n- @prisma/client 5.14.0\n- zod 3.23.8\n\n## Dev dependencies\n\n- typescript 5.4.5\n- vitest 1.6.0\n- tailwindcss 3.4.3\n- eslint 8.57.0"
+    },
+    {
+      "source": "retry-backoff-util",
+      "markdown": "# Request retry helper\n\n## withBackoff\n\n```typescript\nconst RETRYABLE = new Set([429, 502, 503, 504]);\n\nexport async function withBackoff<T>(\n  fn: () => Promise<T>,\n  opts: { attempts?: number; baseMs?: number; capMs?: number } = {},\n): Promise<T> {\n  const attempts = opts.attempts ?? 5;\n  const base = opts.baseMs ?? 200;\n  const cap = opts.capMs ?? 10_000;\n  let lastError: unknown;\n  for (let i = 0; i < attempts; i++) {\n    try {\n      return await fn();\n    } catch (err) {\n      lastError = err;\n      const status = (err as { status?: number }).status;\n      if (status !== undefined && !RETRYABLE.has(status)) throw err;\n      const jitter = Math.random() * base;\n      await sleep(Math.min(cap, base * 2 ** i + jitter));\n    }\n  }\n  throw lastError;\n}\n```\n\nEach attempt waits twice as long as the previous one, plus jitter, so a\nstruggling upstream is not hit by every client at the same instant. Only 429 and\n5xx statuses are retried; a 400 is a bug in the caller and is rethrown at once."
+    },
+    {
+      "source": "rate-limiter-redis",
+      "markdown": "# Token bucket rate limiter\n\n## Redis Lua script\n\n```lua\nlocal key = KEYS[1]\nlocal capacity = tonumber(ARGV[1])\nlocal refill = tonumber(ARGV[2])\nlocal now = tonumber(ARGV[3])\n\nlocal bucket = redis.call('HMGET', key, 'tokens', 'ts')\nlocal tokens = tonumber(bucket[1]) or capacity\nlocal ts = tonumber(bucket[2]) or now\ntokens = math.min(capacity, tokens + (now - ts) * refill)\nif tokens < 1 then return 0 end\nredis.call('HMSET', key, 'tokens', tokens - 1, 'ts', now)\nredis.call('EXPIRE', key, 3600)\nreturn 1\n```\n\nCallers over quota get HTTP 429 with a Retry-After header. The bucket refills\ncontinuously rather than resetting on a window boundary, so a client cannot\nburst twice by straddling the edge of a fixed window."
+    },
+    {
+      "source": "stripe-webhook-handler",
+      "markdown": "# Payment webhook endpoint\n\n## Signature check and idempotency\n\n```typescript\nexport async function handleStripeWebhook(req: Request): Promise<Response> {\n  const signature = req.headers.get(\"stripe-signature\");\n  const raw = await req.text();\n  let event: Stripe.Event;\n  try {\n    event = stripe.webhooks.constructEvent(raw, signature!, WEBHOOK_SECRET);\n  } catch {\n    return new Response(\"bad signature\", { status: 400 });\n  }\n\n  const seen = await db.get(\"SELECT 1 FROM processed_events WHERE id = ?\", event.id);\n  if (seen) return new Response(\"duplicate\", { status: 200 });\n\n  switch (event.type) {\n    case \"checkout.session.completed\":\n      await fulfillOrder(event.data.object as Stripe.Checkout.Session);\n      break;\n    case \"invoice.payment_failed\":\n      await flagDelinquent(event.data.object as Stripe.Invoice);\n      break;\n  }\n  await db.run(\"INSERT INTO processed_events (id, at) VALUES (?, ?)\", event.id, Date.now());\n  return new Response(\"ok\");\n}\n```\n\nStripe delivers the same event more than once whenever an endpoint is slow to\nanswer, so every event id is recorded and a repeat delivery is answered without\nrunning the side effect a second time."
+    },
+    {
+      "source": "s3-presigned-upload",
+      "markdown": "# Direct-to-storage uploads\n\n## Presigned PUT\n\n```typescript\nimport { S3Client, PutObjectCommand } from \"@aws-sdk/client-s3\";\nimport { getSignedUrl } from \"@aws-sdk/s3-request-presigner\";\n\nconst s3 = new S3Client({ region: \"eu-central-1\" });\n\nexport async function uploadTicket(userId: string, contentType: string) {\n  const key = `uploads/${userId}/${crypto.randomUUID()}`;\n  const url = await getSignedUrl(\n    s3,\n    new PutObjectCommand({ Bucket: \"user-media\", Key: key, ContentType: contentType }),\n    { expiresIn: 900 },\n  );\n  return { url, key };\n}\n```\n\nThe browser sends the bytes to object storage itself; the API never holds the\nfile in memory and never proxies it. The signed URL expires after 15 minutes and\nis bound to the exact content type the client declared."
+    },
+    {
+      "source": "graphql-resolver-users",
+      "markdown": "# GraphQL user resolvers\n\n## Batched lookups\n\n```typescript\nconst userLoader = new DataLoader<string, User>(async (ids) => {\n  const rows = await db.all(\"SELECT * FROM users WHERE id IN (\" + ids.map(() => \"?\").join(\",\") + \")\", ...ids);\n  const byId = new Map(rows.map((r) => [r.id, r]));\n  return ids.map((id) => byId.get(id) ?? new Error(\"not found\"));\n});\n\nexport const resolvers = {\n  Query: {\n    user: (_: unknown, { id }: { id: string }) => userLoader.load(id),\n  },\n  Order: {\n    customer: (order: Order) => userLoader.load(order.userId),\n  },\n};\n```\n\nWithout the loader a list of 50 orders issues 51 queries. DataLoader collects\nevery load call made during one tick and turns them into a single IN query."
+    },
+    {
+      "source": "terraform-s3-bucket",
+      "markdown": "# Terraform storage module\n\n## Versioned private bucket\n\n```hcl\nresource \"aws_s3_bucket\" \"media\" {\n  bucket = \"${var.project}-user-media\"\n  tags   = { Environment = var.environment, ManagedBy = \"terraform\" }\n}\n\nresource \"aws_s3_bucket_versioning\" \"media\" {\n  bucket = aws_s3_bucket.media.id\n  versioning_configuration { status = \"Enabled\" }\n}\n\nresource \"aws_s3_bucket_public_access_block\" \"media\" {\n  bucket                  = aws_s3_bucket.media.id\n  block_public_acls       = true\n  block_public_policy     = true\n  ignore_public_acls      = true\n  restrict_public_buckets = true\n}\n```\n\nState lives in a locked DynamoDB table, so two engineers cannot apply at once."
+    },
+    {
+      "source": "github-actions-ci",
+      "markdown": "# CI workflow\n\n## .github/workflows/test.yml\n\n```yaml\nname: test\non:\n  pull_request:\n  push: { branches: [main] }\n\njobs:\n  test:\n    runs-on: ${{ matrix.os }}\n    strategy:\n      fail-fast: false\n      matrix:\n        os: [ubuntu-latest, macos-latest, windows-latest]\n        node: [18, 20, 22]\n    steps:\n      - uses: actions/checkout@v4\n      - uses: actions/setup-node@v4\n        with: { node-version: \"${{ matrix.node }}\", cache: npm }\n      - run: npm ci\n      - run: npm run build\n      - run: npm test -- --reporter=verbose\n```\n\nThe matrix is nine jobs; fail-fast is off so one flaky Windows run does not hide\na real Linux failure."
+    },
+    {
+      "source": "postgres-slow-query-log",
+      "markdown": "# PostgreSQL slow query log\n\n## Statements over 1s\n\n```\n2026-08-17 04:11:52 UTC LOG:  duration: 4128.442 ms  statement:\n\tSELECT o.*, u.email FROM orders o JOIN users u ON u.id = o.user_id\n\tWHERE o.created_at > now() - interval '30 days' ORDER BY o.total DESC;\n2026-08-17 04:12:10 UTC LOG:  duration: 2210.907 ms  statement:\n\tSELECT count(*) FROM events WHERE payload @> '{\"kind\":\"click\"}';\n2026-08-17 04:12:44 UTC LOG:  temporary file: path \"base/pgsql_tmp/pgsql_tmp4212.0\", size 268435456\n```\n\n## EXPLAIN\n\n```\nSeq Scan on orders o  (cost=0.00..184213.00 rows=1200000 width=210)\n  Filter: (created_at > (now() - '30 days'::interval))\nPlanning Time: 0.214 ms\nExecution Time: 4127.998 ms\n```\n\nThere is no index on orders.created_at, so the planner reads the whole table and\nspills the sort to a 256 MB temporary file."
+    },
+    {
+      "source": "redis-memory-warning",
+      "markdown": "# Redis server log\n\n## Eviction pressure\n\n```\n1:M 17 Aug 2026 03:58:01.221 # WARNING Memory overcommit must be enabled\n1:M 17 Aug 2026 04:02:19.884 * 10000 changes in 60 seconds. Saving...\n1:M 17 Aug 2026 04:02:20.113 # Background saving started by pid 4471\n1:M 17 Aug 2026 04:07:41.002 # maxmemory 4gb reached, policy allkeys-lru\n1:M 17 Aug 2026 04:07:41.003 # Evicted 128441 keys in the last minute\n1:M 17 Aug 2026 04:09:02.550 # Client id=88213 scheduled to be closed ASAP for overcoming of output buffer limits\n```\n\nCache hit rate fell from 0.94 to 0.61 during the eviction storm; the session\nkeys have no TTL and are competing with the fragment cache for the same 4 GB."
+    },
+    {
+      "source": "kafka-consumer-lag",
+      "markdown": "# Kafka consumer group report\n\n## orders-indexer\n\n```\nGROUP           TOPIC            PARTITION  CURRENT-OFFSET  LOG-END-OFFSET  LAG\norders-indexer  orders.v2        0          8814221         8814230         9\norders-indexer  orders.v2        1          8790114         9204887         414773\norders-indexer  orders.v2        2          8811900         8811944         44\norders-indexer  orders.v2        3          8802119         8802140         21\n```\n\nPartition 1 is 414k messages behind and growing. The consumer on that partition\nrebalanced four times in the last hour; each rebalance replays the uncommitted\nwindow, so throughput on it is a fraction of the other three."
+    },
+    {
+      "source": "rust-borrow-error",
+      "markdown": "# Rust compiler output\n\n## cargo build\n\n```\nerror[E0502]: cannot borrow `buffer` as mutable because it is also borrowed as immutable\n  --> src/parser.rs:88:9\n   |\n86 |     let first = &buffer[0];\n   |                  ------ immutable borrow occurs here\n87 |\n88 |     buffer.push(next_token);\n   |     ^^^^^^^^^^^^^^^^^^^^^^^ mutable borrow occurs here\n89 |\n90 |     println!(\"{first:?}\");\n   |               ------- immutable borrow later used here\n\nerror: could not compile `parser` (bin \"parser\") due to 1 previous error\n```\n\nThe fix is to copy the token out of the slice before pushing, or to restructure\nthe loop so the read and the write do not overlap."
+    },
+    {
+      "source": "go-race-detector",
+      "markdown": "# Go race detector output\n\n## go test -race ./internal/cache\n\n```\nWARNING: DATA RACE\nWrite at 0x00c000122018 by goroutine 19:\n  internal/cache.(*LRU).Put()\n      /src/internal/cache/lru.go:71 +0x104\n  internal/cache.(*Warmer).run()\n      /src/internal/cache/warm.go:33 +0x8c\n\nPrevious read at 0x00c000122018 by goroutine 12:\n  internal/cache.(*LRU).Get()\n      /src/internal/cache/lru.go:52 +0x64\n\nFound 1 data race(s)\nFAIL\tinternal/cache\t2.418s\n```\n\nLRU.Put mutates the eviction list without holding the mutex that Get takes."
+    },
+    {
+      "source": "eslint-report",
+      "markdown": "# Lint report\n\n## npx eslint src --format stylish\n\n```\n/src/api/orders.ts\n  14:7   error    'total' is assigned a value but never used   @typescript-eslint/no-unused-vars\n  41:1   warning  Unexpected console statement                 no-console\n  88:11  error    Promise returned in function argument where a void return was expected  @typescript-eslint/no-misused-promises\n\n/src/ui/Chart.tsx\n  22:6   warning  React Hook useEffect has a missing dependency: 'series'  react-hooks/exhaustive-deps\n\n✖ 4 problems (2 errors, 2 warnings)\n```"
+    },
+    {
+      "source": "npm-audit-report",
+      "markdown": "# Dependency audit\n\n## npm audit --production\n\n```\n# npm audit report\n\ntar  <6.2.1\nSeverity: high\nArbitrary File Creation/Overwrite - https://github.com/advisories/GHSA-f5x3-32g6-xq36\nfix available via `npm audit fix`\n\nsemver  7.0.0 - 7.5.1\nSeverity: moderate\nRegular Expression Denial of Service - https://github.com/advisories/GHSA-c2qf-rxjj-qqgw\n\n2 vulnerabilities (1 moderate, 1 high)\n```\n\nBoth are transitive through the build toolchain and neither reaches runtime\ncode, but the high one blocks the release gate until the lockfile is bumped."
+    },
+    {
+      "source": "webpack-bundle-analysis",
+      "markdown": "# Bundle size report\n\n## Largest chunks after the 4.2 release\n\n| chunk | parsed | gzipped | delta vs 4.1 |\n|---|---|---|---|\n| vendors~main | 1.42 MB | 402 kB | +186 kB |\n| main | 318 kB | 96 kB | +4 kB |\n| dashboard | 244 kB | 71 kB | +2 kB |\n\nThe growth is one import: `moment` with all locales was pulled in by the new\ninvoice formatter. Swapping it for `date-fns` and dropping the locale bundle\nreturns 180 kB of the 186."
+    },
+    {
+      "source": "sentry-error-group",
+      "markdown": "# Error tracking digest\n\n## Top issues, last 24h\n\n```\n12,410  TypeError: Cannot read properties of undefined (reading 'id')\n        app/checkout/CartSummary.tsx in renderLine\n   882  AbortError: The user aborted a request\n   431  DatabaseConnectionError: Failed to connect after 3 retries\n        services/sync.py in sync_orders\n    77  ChunkLoadError: Loading chunk 42 failed\n```\n\nThe first issue started 40 minutes after the 4.2 deploy and is confined to users\nwhose cart contains a gift card line, which has no product id."
+    },
+    {
+      "source": "prometheus-alert-rules",
+      "markdown": "# Alerting rules\n\n## api.rules.yml\n\n```yaml\ngroups:\n  - name: api\n    rules:\n      - alert: HighErrorRate\n        expr: sum(rate(http_requests_total{status=~\"5..\"}[5m]))\n             / sum(rate(http_requests_total[5m])) > 0.05\n        for: 10m\n        labels: { severity: page }\n        annotations:\n          summary: \"5xx rate above 5% for 10 minutes\"\n      - alert: LatencyBudgetBurn\n        expr: histogram_quantile(0.99, sum by (le) (rate(http_request_duration_seconds_bucket[5m]))) > 1.5\n        for: 15m\n        labels: { severity: ticket }\n```\n\n`for: 10m` is what keeps a single bad deploy minute from paging anyone."
+    },
+    {
+      "source": "nginx-config-proxy",
+      "markdown": "# Nginx site configuration\n\n## Reverse proxy with TLS termination\n\n```nginx\nupstream api {\n    server 127.0.0.1:3000 max_fails=3 fail_timeout=15s;\n    server 127.0.0.1:3001 backup;\n    keepalive 32;\n}\n\nserver {\n    listen 443 ssl http2;\n    server_name api.example.com;\n\n    ssl_certificate     /etc/letsencrypt/live/api.example.com/fullchain.pem;\n    ssl_certificate_key /etc/letsencrypt/live/api.example.com/privkey.pem;\n\n    client_max_body_size 25m;\n\n    location / {\n        proxy_pass http://api;\n        proxy_set_header Host $host;\n        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;\n        proxy_read_timeout 60s;\n    }\n}\n```"
+    },
+    {
+      "source": "systemd-unit-service",
+      "markdown": "# systemd unit\n\n## /etc/systemd/system/indexer.service\n\n```ini\n[Unit]\nDescription=Order indexer\nAfter=network-online.target\nWants=network-online.target\n\n[Service]\nType=simple\nUser=indexer\nExecStart=/usr/local/bin/indexer --config /etc/indexer.toml\nRestart=on-failure\nRestartSec=5\nStartLimitBurst=5\nStartLimitIntervalSec=120\nMemoryMax=1G\nStandardOutput=journal\n\n[Install]\nWantedBy=multi-user.target\n```\n\n`Restart=on-failure` brings the process back after a crash; the burst limit\nstops a crash loop from spinning forever."
+    },
+    {
+      "source": "makefile-targets",
+      "markdown": "# Makefile\n\n## Common targets\n\n```makefile\n.PHONY: dev test lint migrate clean\n\ndev:\n\tdocker compose up -d postgres redis\n\tnpm run dev\n\ntest:\n\tnpm run build\n\tnpx vitest run\n\nmigrate:\n\tnpx prisma migrate deploy\n\nclean:\n\trm -rf build node_modules/.cache coverage\n```"
+    },
+    {
+      "source": "changelog-release",
+      "markdown": "# Changelog\n\n## 4.2.0 — 2026-08-14\n\n### Added\n- Invoice PDF export for annual plans\n- Gift card lines in the cart summary\n\n### Fixed\n- Session cookie was not cleared on logout in Safari\n- Duplicate webhook deliveries no longer double-charge\n\n### Changed\n- Minimum Node version is now 18.18\n\n## 4.1.3 — 2026-07-30\n\n### Fixed\n- Retry budget was consumed by non-retryable 4xx responses"
+    },
+    {
+      "source": "adr-caching-decision",
+      "markdown": "# ADR-0011: cache rendered invoices on disk\n\n**Status:** accepted\n**Date:** 2026-06-02\n\n## Context\n\nRendering one invoice costs 400-900 ms of headless Chrome, and the same invoice\nis fetched on average 6 times: once by the customer, once by finance, and four\ntimes by the reconciliation job that re-reads the whole month.\n\n## Decision\n\nRendered PDFs are written to the object store under a key derived from the\ninvoice id and its version, and served from there on every later request. The\nrenderer is only entered on a miss.\n\n## Consequences\n\nReconciliation drops from 40 minutes to under 3. Invalidation is not a problem\nbecause the key contains the version — a corrected invoice is a new key, and the\nold object is kept for the audit trail rather than overwritten."
+    },
+    {
+      "source": "openapi-spec-orders",
+      "markdown": "# Orders API specification\n\n## openapi.yaml\n\n```yaml\nopenapi: 3.1.0\ninfo: { title: Orders API, version: \"2.3.1\" }\npaths:\n  /orders:\n    get:\n      summary: List orders\n      parameters:\n        - { name: cursor, in: query, schema: { type: string } }\n        - { name: limit, in: query, schema: { type: integer, maximum: 100 } }\n      responses:\n        \"200\":\n          description: A page of orders\n        \"429\":\n          description: Rate limit exceeded\n    post:\n      summary: Create an order\n      requestBody:\n        required: true\n      responses:\n        \"201\": { description: Created }\n        \"409\": { description: Idempotency key already used }\n```\n\nPagination is cursor based; offsets were dropped in 2.0 because deletions made\npage boundaries shift under the reader."
+    },
+    {
+      "source": "oauth-device-flow-doc",
+      "markdown": "# Signing in from a device without a browser\n\n## The device authorization grant\n\nA CLI or a TV app cannot host a redirect URI, so it asks the authorization\nserver for a device code and shows the user a short code to type on their phone.\n\n1. The client posts to `/device/code` with its client id and scopes.\n2. The server answers with `device_code`, `user_code`, `verification_uri`\n   and an `interval`.\n3. The client prints the user code and polls `/token` every `interval`\n   seconds with `grant_type=urn:ietf:params:oauth:grant-type:device_code`.\n4. Until the user finishes, the token endpoint answers\n   `authorization_pending`; polling faster than `interval` earns\n   `slow_down` and the client must add five seconds.\n\nThe device code is single use and expires in 15 minutes. Refresh tokens issued\nthis way are rotated on every use, so a stolen refresh token is detectable: the\nold one is invalidated and its reuse revokes the whole grant family."
+    },
+    {
+      "source": "grafana-dashboard-json",
+      "markdown": "# Grafana dashboard export\n\n## api-overview.json\n\n```json\n{\n  \"title\": \"API overview\",\n  \"refresh\": \"30s\",\n  \"panels\": [\n    { \"id\": 1, \"type\": \"timeseries\", \"title\": \"Requests per second\",\n      \"targets\": [{ \"expr\": \"sum by (route) (rate(http_requests_total[1m]))\" }] },\n    { \"id\": 2, \"type\": \"stat\", \"title\": \"p99 latency\",\n      \"targets\": [{ \"expr\": \"histogram_quantile(0.99, sum by (le) (rate(http_request_duration_seconds_bucket[5m])))\" }] },\n    { \"id\": 3, \"type\": \"timeseries\", \"title\": \"Consumer lag\",\n      \"targets\": [{ \"expr\": \"max by (topic) (kafka_consumergroup_lag)\" }] }\n  ]\n}\n```"
+    },
+    {
+      "source": "long-store-module",
+      "markdown": "# ContentStore internals\n\n## src/store.ts (excerpt)\n\n```typescript\nconst MAX_CHUNK_BYTES = 4096;\nconst BUSY_RETRIES = 5;\nconst BUSY_BASE_MS = 25;\n\nexport interface Chunk {\n  title: string;\n  content: string;\n  contentType: \"code\" | \"prose\";\n}\n\nexport interface IndexResult {\n  chunks: number;\n  skipped: boolean;\n  source: string;\n}\n\n/** Open the database and put it in the shape every other method assumes. */\nfunction openDatabase(path: string): DatabaseInstance {\n  const db = new Database(path);\n  db.pragma(\"journal_mode = WAL\");\n  db.pragma(\"synchronous = NORMAL\");\n  db.pragma(\"busy_timeout = 5000\");\n  db.pragma(\"mmap_size = 268435456\");\n  return db;\n}\n\nfunction createSchema(db: DatabaseInstance): void {\n  db.exec(`\n    CREATE VIRTUAL TABLE IF NOT EXISTS chunks USING fts5(\n      source, title, content, tokenize = 'porter unicode61'\n    );\n    CREATE VIRTUAL TABLE IF NOT EXISTS chunks_trigram USING fts5(\n      source, title, content, tokenize = 'trigram'\n    );\n    CREATE TABLE IF NOT EXISTS sources (\n      label TEXT PRIMARY KEY,\n      file_path TEXT,\n      content_hash TEXT,\n      indexed_at INTEGER\n    );\n    CREATE TABLE IF NOT EXISTS vocabulary (\n      term TEXT PRIMARY KEY,\n      df INTEGER NOT NULL\n    );\n  `);\n}\n\nfunction normalizeSourceLabel(label: string): string {\n  return label.trim().replace(/\\s+/g, \"-\").slice(0, 120);\n}\n\nfunction hashContent(content: string): string {\n  return createHash(\"sha256\").update(content).digest(\"hex\").slice(0, 32);\n}\n\nfunction splitFrontMatter(text: string): { body: string; title?: string } {\n  if (!text.startsWith(\"---\\n\")) return { body: text };\n  const end = text.indexOf(\"\\n---\", 4);\n  if (end === -1) return { body: text };\n  const head = text.slice(4, end);\n  const match = /^title:\\s*(.+)$/m.exec(head);\n  return { body: text.slice(end + 4), title: match?.[1]?.trim() };\n}\n\nfunction detectContentType(chunk: string): \"code\" | \"prose\" {\n  const fenced = /^```/m.test(chunk);\n  const punctuationHeavy = (chunk.match(/[{}();=<>]/g)?.length ?? 0) / Math.max(1, chunk.length);\n  return fenced || punctuationHeavy > 0.02 ? \"code\" : \"prose\";\n}\n\nfunction sanitizeQuery(query: string): string {\n  return query\n    .replace(/[\"*^]/g, \" \")\n    .split(/\\s+/)\n    .filter((w) => w.length > 0 && !STOPWORDS.has(w.toLowerCase()))\n    .map((w) => `\"${w}\"`)\n    .join(\" OR \");\n}\n\nfunction bm25Weights(contentType?: \"code\" | \"prose\"): [number, number, number] {\n  // source, title, content — a title hit is worth roughly three content hits,\n  // but only for prose: code chunk titles are often just a file path.\n  return contentType === \"code\" ? [0.5, 2.0, 1.0] : [0.5, 3.0, 1.0];\n}\n\nfunction reciprocalRankFusion(lists: string[][], k = 60): Map<string, number> {\n  const scores = new Map<string, number>();\n  for (const list of lists) {\n    list.forEach((id, i) => {\n      scores.set(id, (scores.get(id) ?? 0) + 1 / (k + i + 1));\n    });\n  }\n  return scores;\n}\n\nfunction levenshtein(a: string, b: string, cutoff: number): number {\n  if (Math.abs(a.length - b.length) > cutoff) return cutoff + 1;\n  let prev = Array.from({ length: b.length + 1 }, (_, i) => i);\n  for (let i = 1; i <= a.length; i++) {\n    const row = [i];\n    for (let j = 1; j <= b.length; j++) {\n      row[j] = Math.min(\n        prev[j] + 1,\n        row[j - 1] + 1,\n        prev[j - 1] + (a[i - 1] === b[j - 1] ? 0 : 1),\n      );\n    }\n    prev = row;\n  }\n  return prev[b.length];\n}\n\nfunction proximityBonus(content: string, terms: string[]): number {\n  const positions = terms.map((t) => content.toLowerCase().indexOf(t.toLowerCase()));\n  if (positions.some((p) => p === -1)) return 0;\n  const span = Math.max(...positions) - Math.min(...positions);\n  return span === 0 ? 0 : 1 / Math.log2(2 + span);\n}\n\n/**\n * Run a write against SQLite, retrying the transient lock errors.\n *\n * SQLITE_BUSY and SQLITE_LOCKED mean another connection holds the write lock;\n * both clear on their own. Every other SQLite error is a real fault and is\n * rethrown immediately rather than retried into a five-fold delay.\n */\nexport function withRetry<T>(fn: () => T, retries = BUSY_RETRIES): T {\n  let waited = 0;\n  for (let attempt = 0; ; attempt++) {\n    try {\n      return fn();\n    } catch (err) {\n      const code = (err as { code?: string }).code ?? \"\";\n      const transient = code === \"SQLITE_BUSY\" || code === \"SQLITE_LOCKED\";\n      if (!transient || attempt >= retries) throw err;\n      waited = BUSY_BASE_MS * 2 ** attempt;\n      Atomics.wait(SLEEP_ARRAY, 0, 0, waited);\n    }\n  }\n}\n\nexport function pruneVocabulary(db: DatabaseInstance, minDf = 2): number {\n  return withRetry(() => db.prepare(\"DELETE FROM vocabulary WHERE df < ?\").run(minDf).changes);\n}\n```"
+    },
+    {
+      "source": "long-executor-module",
+      "markdown": "# Sandbox executor internals\n\n## src/executor.ts (excerpt)\n\n```typescript\nconst DEFAULT_TIMEOUT_MS = 120_000;\nconst MAX_OUTPUT_BYTES = 2 * 1024 * 1024;\n\nexport type Language =\n  | \"javascript\" | \"typescript\" | \"python\" | \"shell\" | \"ruby\"\n  | \"go\" | \"rust\" | \"php\" | \"perl\" | \"r\" | \"elixir\" | \"csharp\";\n\ninterface RuntimeSpec {\n  probe: string[];\n  extension: string;\n  run: (file: string) => { cmd: string; args: string[] };\n}\n\nconst RUNTIMES: Record<Language, RuntimeSpec> = {\n  javascript: { probe: [\"node\", \"--version\"], extension: \".mjs\", run: (f) => ({ cmd: \"node\", args: [f] }) },\n  typescript: { probe: [\"npx\", \"tsx\", \"--version\"], extension: \".ts\", run: (f) => ({ cmd: \"npx\", args: [\"tsx\", f] }) },\n  python: { probe: [\"python3\", \"--version\"], extension: \".py\", run: (f) => ({ cmd: \"python3\", args: [f] }) },\n  shell: { probe: [\"bash\", \"--version\"], extension: \".sh\", run: (f) => ({ cmd: \"bash\", args: [f] }) },\n  ruby: { probe: [\"ruby\", \"--version\"], extension: \".rb\", run: (f) => ({ cmd: \"ruby\", args: [f] }) },\n  go: { probe: [\"go\", \"version\"], extension: \".go\", run: (f) => ({ cmd: \"go\", args: [\"run\", f] }) },\n  rust: { probe: [\"rustc\", \"--version\"], extension: \".rs\", run: (f) => ({ cmd: \"rust-script\", args: [f] }) },\n  php: { probe: [\"php\", \"--version\"], extension: \".php\", run: (f) => ({ cmd: \"php\", args: [f] }) },\n  perl: { probe: [\"perl\", \"--version\"], extension: \".pl\", run: (f) => ({ cmd: \"perl\", args: [f] }) },\n  r: { probe: [\"Rscript\", \"--version\"], extension: \".R\", run: (f) => ({ cmd: \"Rscript\", args: [f] }) },\n  elixir: { probe: [\"elixir\", \"--version\"], extension: \".exs\", run: (f) => ({ cmd: \"elixir\", args: [f] }) },\n  csharp: { probe: [\"dotnet\", \"--version\"], extension: \".csx\", run: (f) => ({ cmd: \"dotnet\", args: [\"script\", f] }) },\n};\n\nconst runtimeCache = new Map<Language, boolean>();\n\nexport function isRuntimeAvailable(language: Language): boolean {\n  const cached = runtimeCache.get(language);\n  if (cached !== undefined) return cached;\n  const spec = RUNTIMES[language];\n  try {\n    execFileSync(spec.probe[0], spec.probe.slice(1), { stdio: \"ignore\", timeout: 5000 });\n    runtimeCache.set(language, true);\n    return true;\n  } catch {\n    runtimeCache.set(language, false);\n    return false;\n  }\n}\n\nfunction workDir(): string {\n  return mkdtempSync(join(tmpdir(), \"ctx-exec-\"));\n}\n\nfunction writeProgram(dir: string, language: Language, code: string): string {\n  const file = join(dir, `program${RUNTIMES[language].extension}`);\n  writeFileSync(file, code, \"utf-8\");\n  return file;\n}\n\nfunction truncateOutput(buf: string): { text: string; truncated: boolean } {\n  if (Buffer.byteLength(buf) <= MAX_OUTPUT_BYTES) return { text: buf, truncated: false };\n  return { text: buf.slice(0, MAX_OUTPUT_BYTES) + \"\\n… output truncated\", truncated: true };\n}\n\nfunction scrubEnvironment(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {\n  const copy = { ...env };\n  for (const key of Object.keys(copy)) {\n    if (/(TOKEN|SECRET|PASSWORD|API_KEY)$/i.test(key)) delete copy[key];\n  }\n  copy.NO_COLOR = \"1\";\n  copy.CI = \"1\";\n  return copy;\n}\n\n/**\n * Guess the language of a program that arrived without one.\n *\n * The shebang wins when there is one — it is the author's own declaration and\n * is never ambiguous. Only when there is none does the heuristic fall back to\n * looking at syntax, which mistakes a Ruby script for Perl often enough that it\n * is not worth trusting on its own.\n */\nexport function detectLanguageFromShebang(code: string): Language | null {\n  const first = code.split(\"\\n\", 1)[0] ?? \"\";\n  if (!first.startsWith(\"#!\")) return null;\n  if (/\\bnode\\b/.test(first)) return \"javascript\";\n  if (/\\bpython3?\\b/.test(first)) return \"python\";\n  if (/\\b(bash|sh|zsh)\\b/.test(first)) return \"shell\";\n  if (/\\bruby\\b/.test(first)) return \"ruby\";\n  if (/\\bperl\\b/.test(first)) return \"perl\";\n  if (/\\bRscript\\b/.test(first)) return \"r\";\n  if (/\\belixir\\b/.test(first)) return \"elixir\";\n  return null;\n}\n\nexport async function execute(opts: {\n  language: Language;\n  code: string;\n  cwd?: string;\n  timeoutMs?: number;\n}): Promise<{ stdout: string; stderr: string; exitCode: number; timedOut: boolean }> {\n  const dir = workDir();\n  try {\n    const file = writeProgram(dir, opts.language, opts.code);\n    const { cmd, args } = RUNTIMES[opts.language].run(file);\n    const child = spawn(cmd, args, {\n      cwd: opts.cwd ?? dir,\n      env: scrubEnvironment(process.env),\n      timeout: opts.timeoutMs ?? DEFAULT_TIMEOUT_MS,\n    });\n    let stdout = \"\", stderr = \"\";\n    child.stdout.on(\"data\", (d) => { stdout += d; });\n    child.stderr.on(\"data\", (d) => { stderr += d; });\n    const exitCode = await once(child, \"close\").then(([c]) => c as number);\n    return {\n      stdout: truncateOutput(stdout).text,\n      stderr: truncateOutput(stderr).text,\n      exitCode,\n      timedOut: child.killed && exitCode === null,\n    };\n  } finally {\n    rmSync(dir, { recursive: true, force: true });\n  }\n}\n```"
+    },
+    {
+      "source": "long-hybrid-module",
+      "markdown": "# Hybrid search internals\n\n## src/search/hybrid.ts (excerpt)\n\n```typescript\nconst RRF_K = 60;\nconst INT8_SCALE = 127;\n\nexport interface ChunkRow {\n  source: string;\n  title: string;\n  content: string;\n  score?: number;\n}\n\nexport function ensureVectorTable(db: HybridDb): boolean {\n  try {\n    db.exec(`\n      CREATE TABLE IF NOT EXISTS chunk_vectors (\n        chunk_rowid INTEGER PRIMARY KEY,\n        model TEXT NOT NULL,\n        dim INTEGER NOT NULL,\n        vec BLOB NOT NULL\n      );\n      CREATE INDEX IF NOT EXISTS idx_chunk_vectors_model ON chunk_vectors(model);\n    `);\n    return true;\n  } catch {\n    return false;\n  }\n}\n\nexport function encodeVectorInt8(vec: number[]): Buffer {\n  const out = Buffer.alloc(vec.length);\n  for (let i = 0; i < vec.length; i++) {\n    out.writeInt8(Math.max(-128, Math.min(127, Math.round(vec[i] * INT8_SCALE))), i);\n  }\n  return out;\n}\n\nexport function decodeVectorInt8(buf: Buffer): number[] {\n  const out = new Array<number>(buf.length);\n  for (let i = 0; i < buf.length; i++) out[i] = buf.readInt8(i) / INT8_SCALE;\n  return out;\n}\n\nexport function cosineSimilarity(a: number[], b: number[]): number {\n  if (a.length !== b.length || a.length === 0) return 0;\n  let dot = 0, na = 0, nb = 0;\n  for (let i = 0; i < a.length; i++) {\n    dot += a[i] * b[i];\n    na += a[i] * a[i];\n    nb += b[i] * b[i];\n  }\n  const denom = Math.sqrt(na) * Math.sqrt(nb);\n  return denom === 0 ? 0 : dot / denom;\n}\n\nexport function fuseRankings<T extends ChunkRow>(\n  lexical: T[],\n  semantic: T[],\n  opts: { limit: number },\n): T[] {\n  const key = (r: ChunkRow) => `${r.source}\\u0000${r.title}\\u0000${r.content.slice(0, 64)}`;\n  const scores = new Map<string, { row: T; score: number }>();\n  const add = (rows: T[]) => rows.forEach((row, i) => {\n    const k = key(row);\n    const prev = scores.get(k);\n    const inc = 1 / (RRF_K + i + 1);\n    if (prev) prev.score += inc;\n    else scores.set(k, { row, score: inc });\n  });\n  add(lexical);\n  add(semantic);\n  return [...scores.values()]\n    .sort((a, b) => b.score - a.score)\n    .slice(0, opts.limit)\n    .map((e) => e.row);\n}\n\nexport function vectorCoverage(db: HybridDb) {\n  if (!ensureVectorTable(db)) return { chunks: 0, vectors: 0, models: [], bytes: 0 };\n  const chunks = db.prepare(\"SELECT count(*) AS n FROM chunks\").get().n as number;\n  const vectors = db.prepare(\"SELECT count(*) AS n FROM chunk_vectors\").get().n as number;\n  const models = db.prepare(\"SELECT DISTINCT model FROM chunk_vectors\").all().map((r) => r.model);\n  const bytes = db.prepare(\"SELECT coalesce(sum(length(vec)), 0) AS n FROM chunk_vectors\").get().n as number;\n  return { chunks, vectors, models, bytes };\n}\n\nexport function pruneOrphanVectors(db: HybridDb): number {\n  try {\n    if (!ensureVectorTable(db)) return 0;\n    return db.prepare(\n      \"DELETE FROM chunk_vectors WHERE chunk_rowid NOT IN (SELECT rowid FROM chunks)\",\n    ).run().changes;\n  } catch {\n    return 0;\n  }\n}\n\n/**\n * Drop every vector that was written by a model other than the current one.\n *\n * Vectors from two embedding models share no geometry: a cosine between a\n * bge-m3 vector and a nomic-embed-text vector is a number with no meaning, and\n * mixing them silently poisons the ranking. Switching models therefore has to\n * invalidate the whole index rather than let it converge on a blend of two.\n */\nexport function pruneStaleModelVectors(db: HybridDb, currentModel: string): number {\n  try {\n    if (!ensureVectorTable(db)) return 0;\n    return db.prepare(\"DELETE FROM chunk_vectors WHERE model <> ?\").run(currentModel).changes;\n  } catch {\n    return 0;\n  }\n}\n\nexport function semanticCandidates(\n  db: HybridDb,\n  queryVec: number[],\n  opts: { limit: number; sourceFilter?: string },\n): ChunkRow[] {\n  if (!ensureVectorTable(db)) return [];\n  const rows = db.prepare(`\n    SELECT c.source, c.title, c.content, v.vec, v.dim\n    FROM chunk_vectors v JOIN chunks c ON c.rowid = v.chunk_rowid\n    ${opts.sourceFilter ? \"WHERE c.source LIKE ?\" : \"\"}\n  `).all(...(opts.sourceFilter ? [`%${opts.sourceFilter}%`] : []));\n  return rows\n    .map((r) => ({ ...r, score: cosineSimilarity(queryVec, decodeStoredVector(r.vec, r.dim)) }))\n    .sort((a, b) => (b.score ?? 0) - (a.score ?? 0))\n    .slice(0, opts.limit);\n}\n```"
+    }
+  ],
+  "queries": [
+    {
+      "expectAbsent": [],
+      "gate": true,
+      "id": "auth-jwt",
+      "query": "authentication middleware JWT",
+      "cls": "keyword",
+      "mode": "topOne",
+      "expectTop": "api-auth-handler",
+      "legacy": true,
+      "relevant": [
+        "api-auth-handler"
+      ]
+    },
+    {
+      "expectAbsent": [],
+      "gate": true,
+      "id": "db-timeout",
+      "query": "database connection timeout",
+      "cls": "keyword",
+      "mode": "topOne",
+      "expectTop": "python-traceback",
+      "legacy": true,
+      "relevant": [
+        "python-traceback"
+      ]
+    },
+    {
+      "expectAbsent": [],
+      "gate": true,
+      "id": "useeffect-cleanup",
+      "query": "useEffect cleanup",
+      "cls": "keyword",
+      "mode": "topOne",
+      "expectTop": "react-useeffect-docs",
+      "legacy": true,
+      "relevant": [
+        "react-useeffect-docs"
+      ]
+    },
+    {
+      "expectAbsent": [],
+      "gate": true,
+      "id": "tenant-migration",
+      "query": "tenant_id migration ALTER TABLE",
+      "cls": "keyword",
+      "mode": "topOne",
+      "expectTop": "database-migration",
+      "legacy": true,
+      "relevant": [
+        "database-migration"
+      ]
+    },
+    {
+      "expectAbsent": [],
+      "gate": true,
+      "id": "dockerfile-multistage",
+      "query": "Dockerfile multi-stage build",
+      "cls": "keyword",
+      "mode": "topOne",
+      "expectTop": "dockerfile-prod",
+      "legacy": true,
+      "relevant": [
+        "dockerfile-prod"
+      ]
+    },
+    {
+      "expectAbsent": [],
+      "gate": true,
+      "id": "k8s-replicas",
+      "query": "Kubernetes deployment replicas",
+      "cls": "keyword",
+      "mode": "topOne",
+      "expectTop": "k8s-deployment",
+      "legacy": true,
+      "relevant": [
+        "k8s-deployment"
+      ]
+    },
+    {
+      "expectAbsent": [],
+      "gate": true,
+      "id": "tailwind-brand",
+      "query": "tailwind theme colors brand",
+      "cls": "keyword",
+      "mode": "topOne",
+      "expectTop": "tailwind-config",
+      "legacy": true,
+      "relevant": [
+        "tailwind-config"
+      ]
+    },
+    {
+      "expectAbsent": [],
+      "gate": true,
+      "id": "vitest-fail",
+      "query": "test failed assertion FAIL",
+      "cls": "keyword",
+      "mode": "topOne",
+      "expectTop": "vitest-output",
+      "legacy": true,
+      "relevant": [
+        "vitest-output"
+      ]
+    },
+    {
+      "expectAbsent": [
+        "tailwind-config",
+        "git-log-recent"
+      ],
+      "gate": true,
+      "id": "error-timeout",
+      "query": "error timeout",
+      "cls": "keyword",
+      "mode": "ranking",
+      "expectTop": "python-traceback",
+      "legacy": true,
+      "relevant": [
+        "python-traceback"
+      ]
+    },
+    {
+      "expectAbsent": [],
+      "gate": true,
+      "id": "next-serveractions",
+      "query": "build warning experimental serverActions",
+      "cls": "keyword",
+      "mode": "ranking",
+      "expectTop": "nextjs-build-output",
+      "legacy": true,
+      "relevant": [
+        "nextjs-build-output"
+      ]
+    },
+    {
+      "expectAbsent": [],
+      "gate": true,
+      "id": "deps-react-vitest",
+      "query": "react dependencies vitest typescript",
+      "cls": "keyword",
+      "mode": "ranking",
+      "expectTop": "package-json-deps",
+      "legacy": true,
+      "relevant": [
+        "package-json-deps"
+      ]
+    },
+    {
+      "expectAbsent": [],
+      "gate": true,
+      "id": "mmap-fts5",
+      "query": "mmap pragma perf FTS5",
+      "cls": "keyword",
+      "mode": "ranking",
+      "expectTop": "git-log-recent",
+      "legacy": true,
+      "relevant": [
+        "git-log-recent"
+      ]
+    },
+    {
+      "expectAbsent": [],
+      "gate": true,
+      "id": "k8s-title",
+      "query": "Kubernetes deployment",
+      "cls": "title",
+      "mode": "topOne",
+      "expectTop": "k8s-deployment",
+      "legacy": true,
+      "relevant": [
+        "k8s-deployment"
+      ]
+    },
+    {
+      "expectAbsent": [],
+      "gate": true,
+      "id": "dockerfile-title",
+      "query": "Dockerfile",
+      "cls": "title",
+      "mode": "topOne",
+      "expectTop": "dockerfile-prod",
+      "legacy": true,
+      "relevant": [
+        "dockerfile-prod"
+      ]
+    },
+    {
+      "expectAbsent": [],
+      "gate": true,
+      "id": "cascade-rrf",
+      "query": "useEffect cleanup",
+      "cls": "cascade",
+      "mode": "ranking",
+      "expectTop": "react-useeffect-docs",
+      "layer": "rrf",
+      "legacy": true,
+      "relevant": [
+        "react-useeffect-docs"
+      ]
+    },
+    {
+      "expectAbsent": [],
+      "gate": true,
+      "id": "cascade-typo",
+      "query": "authenticaton middlewar",
+      "cls": "typo",
+      "mode": "ranking",
+      "expectTop": "api-auth-handler",
+      "legacy": true,
+      "relevant": [
+        "api-auth-handler"
+      ]
+    },
+    {
+      "expectAbsent": [
+        "database-migration",
+        "python-traceback"
+      ],
+      "gate": true,
+      "id": "neg-tailwind",
+      "query": "tailwind colors",
+      "cls": "negative",
+      "mode": "ranking",
+      "expectTop": "tailwind-config",
+      "legacy": true,
+      "relevant": [
+        "tailwind-config"
+      ]
+    },
+    {
+      "expectAbsent": [
+        "nginx-access-log",
+        "react-useeffect-docs"
+      ],
+      "gate": true,
+      "id": "neg-sql",
+      "query": "SQL ALTER TABLE",
+      "cls": "negative",
+      "mode": "ranking",
+      "expectTop": "database-migration",
+      "legacy": true,
+      "relevant": [
+        "database-migration"
+      ]
+    },
+    {
+      "expectAbsent": [],
+      "gate": false,
+      "id": "kw-backoff",
+      "query": "exponential backoff jitter retry attempts",
+      "cls": "keyword",
+      "relevant": [
+        "retry-backoff-util"
+      ]
+    },
+    {
+      "expectAbsent": [],
+      "gate": false,
+      "id": "kw-token-bucket",
+      "query": "token bucket redis lua capacity refill",
+      "cls": "keyword",
+      "relevant": [
+        "rate-limiter-redis"
+      ]
+    },
+    {
+      "expectAbsent": [],
+      "gate": false,
+      "id": "kw-stripe-sig",
+      "query": "stripe signature constructEvent webhook secret",
+      "cls": "keyword",
+      "relevant": [
+        "stripe-webhook-handler"
+      ]
+    },
+    {
+      "expectAbsent": [],
+      "gate": false,
+      "id": "kw-presigned",
+      "query": "getSignedUrl PutObjectCommand expiresIn",
+      "cls": "keyword",
+      "relevant": [
+        "s3-presigned-upload"
+      ]
+    },
+    {
+      "expectAbsent": [],
+      "gate": false,
+      "id": "kw-dataloader",
+      "query": "DataLoader batched resolver N+1",
+      "cls": "keyword",
+      "relevant": [
+        "graphql-resolver-users"
+      ]
+    },
+    {
+      "expectAbsent": [],
+      "gate": false,
+      "id": "kw-terraform",
+      "query": "aws_s3_bucket_versioning block_public_acls",
+      "cls": "keyword",
+      "relevant": [
+        "terraform-s3-bucket"
+      ]
+    },
+    {
+      "expectAbsent": [],
+      "gate": false,
+      "id": "kw-matrix",
+      "query": "workflow matrix fail-fast runs-on ubuntu macos",
+      "cls": "keyword",
+      "relevant": [
+        "github-actions-ci"
+      ]
+    },
+    {
+      "expectAbsent": [],
+      "gate": false,
+      "id": "kw-seqscan",
+      "query": "Seq Scan temporary file duration statement",
+      "cls": "keyword",
+      "relevant": [
+        "postgres-slow-query-log"
+      ]
+    },
+    {
+      "expectAbsent": [],
+      "gate": false,
+      "id": "kw-evicted",
+      "query": "maxmemory allkeys-lru evicted keys",
+      "cls": "keyword",
+      "relevant": [
+        "redis-memory-warning"
+      ]
+    },
+    {
+      "expectAbsent": [],
+      "gate": false,
+      "id": "kw-lag",
+      "query": "consumer group LOG-END-OFFSET partition LAG",
+      "cls": "keyword",
+      "relevant": [
+        "kafka-consumer-lag"
+      ]
+    },
+    {
+      "expectAbsent": [],
+      "gate": false,
+      "id": "kw-borrow",
+      "query": "cannot borrow as mutable immutable borrow E0502",
+      "cls": "keyword",
+      "relevant": [
+        "rust-borrow-error"
+      ]
+    },
+    {
+      "expectAbsent": [],
+      "gate": false,
+      "id": "kw-datarace",
+      "query": "WARNING DATA RACE goroutine previous read",
+      "cls": "keyword",
+      "relevant": [
+        "go-race-detector"
+      ]
+    },
+    {
+      "expectAbsent": [],
+      "gate": false,
+      "id": "kw-eslint",
+      "query": "no-unused-vars exhaustive-deps stylish problems",
+      "cls": "keyword",
+      "relevant": [
+        "eslint-report"
+      ]
+    },
+    {
+      "expectAbsent": [],
+      "gate": false,
+      "id": "kw-audit",
+      "query": "npm audit advisories severity high semver tar",
+      "cls": "keyword",
+      "relevant": [
+        "npm-audit-report"
+      ]
+    },
+    {
+      "expectAbsent": [],
+      "gate": false,
+      "id": "kw-alertrules",
+      "query": "alert HighErrorRate histogram_quantile severity page",
+      "cls": "keyword",
+      "relevant": [
+        "prometheus-alert-rules"
+      ]
+    },
+    {
+      "expectAbsent": [],
+      "gate": false,
+      "id": "kw-nginxproxy",
+      "query": "proxy_pass upstream keepalive X-Forwarded-For",
+      "cls": "keyword",
+      "relevant": [
+        "nginx-config-proxy"
+      ]
+    },
+    {
+      "expectAbsent": [],
+      "gate": false,
+      "id": "kw-systemd",
+      "query": "ExecStart Restart on-failure WantedBy multi-user",
+      "cls": "keyword",
+      "relevant": [
+        "systemd-unit-service"
+      ]
+    },
+    {
+      "expectAbsent": [],
+      "gate": false,
+      "id": "kw-openapi",
+      "query": "openapi paths cursor pagination 409 idempotency",
+      "cls": "keyword",
+      "relevant": [
+        "openapi-spec-orders"
+      ]
+    },
+    {
+      "expectAbsent": [],
+      "gate": false,
+      "id": "kw-devicecode",
+      "query": "device_code user_code verification_uri authorization_pending",
+      "cls": "keyword",
+      "relevant": [
+        "oauth-device-flow-doc"
+      ]
+    },
+    {
+      "expectAbsent": [],
+      "gate": false,
+      "id": "kw-changelog",
+      "query": "changelog 4.2.0 added fixed changed minimum node",
+      "cls": "keyword",
+      "relevant": [
+        "changelog-release"
+      ]
+    },
+    {
+      "expectAbsent": [],
+      "gate": false,
+      "id": "long-withretry",
+      "query": "withRetry SQLITE_BUSY SQLITE_LOCKED transient lock",
+      "cls": "long-code",
+      "relevant": [
+        "long-store-module"
+      ]
+    },
+    {
+      "expectAbsent": [],
+      "gate": false,
+      "id": "long-bm25",
+      "query": "bm25Weights title hit worth three content hits",
+      "cls": "long-code",
+      "relevant": [
+        "long-store-module"
+      ]
+    },
+    {
+      "expectAbsent": [],
+      "gate": false,
+      "id": "long-shebang",
+      "query": "detectLanguageFromShebang first line declaration",
+      "cls": "long-code",
+      "relevant": [
+        "long-executor-module"
+      ]
+    },
+    {
+      "expectAbsent": [],
+      "gate": false,
+      "id": "long-scrubenv",
+      "query": "scrubEnvironment delete TOKEN SECRET API_KEY",
+      "cls": "long-code",
+      "relevant": [
+        "long-executor-module"
+      ]
+    },
+    {
+      "expectAbsent": [],
+      "gate": false,
+      "id": "long-stalemodel",
+      "query": "pruneStaleModelVectors delete vectors from another model",
+      "cls": "long-code",
+      "relevant": [
+        "long-hybrid-module"
+      ]
+    },
+    {
+      "expectAbsent": [],
+      "gate": false,
+      "id": "long-int8",
+      "query": "encodeVectorInt8 quantisation INT8_SCALE writeInt8",
+      "cls": "long-code",
+      "relevant": [
+        "long-hybrid-module"
+      ]
+    },
+    {
+      "expectAbsent": [],
+      "gate": false,
+      "id": "para-hammer",
+      "query": "stop hammering a service that keeps failing",
+      "cls": "paraphrase",
+      "relevant": [
+        "retry-backoff-util"
+      ]
+    },
+    {
+      "expectAbsent": [],
+      "gate": false,
+      "id": "para-quota",
+      "query": "cap how many calls one customer may make per second",
+      "cls": "paraphrase",
+      "relevant": [
+        "rate-limiter-redis"
+      ]
+    },
+    {
+      "expectAbsent": [],
+      "gate": false,
+      "id": "para-doublecharge",
+      "query": "the same payment notification arrives twice and charges twice",
+      "cls": "paraphrase",
+      "relevant": [
+        "stripe-webhook-handler"
+      ]
+    },
+    {
+      "expectAbsent": [],
+      "gate": false,
+      "id": "para-browserupload",
+      "query": "let the browser send a big file straight to object storage",
+      "cls": "paraphrase",
+      "relevant": [
+        "s3-presigned-upload"
+      ]
+    },
+    {
+      "expectAbsent": [],
+      "gate": false,
+      "id": "para-nplusone",
+      "query": "one query per row is killing the list endpoint",
+      "cls": "paraphrase",
+      "relevant": [
+        "graphql-resolver-users"
+      ]
+    },
+    {
+      "expectAbsent": [],
+      "gate": false,
+      "id": "para-behind",
+      "query": "the queue is falling behind and never catches up",
+      "cls": "paraphrase",
+      "relevant": [
+        "kafka-consumer-lag"
+      ]
+    },
+    {
+      "expectAbsent": [],
+      "gate": false,
+      "id": "para-fullscan",
+      "query": "the report reads the entire table instead of using an index",
+      "cls": "paraphrase",
+      "relevant": [
+        "postgres-slow-query-log"
+      ]
+    },
+    {
+      "expectAbsent": [],
+      "gate": false,
+      "id": "para-cachefull",
+      "query": "cache is throwing entries away because it ran out of room",
+      "cls": "paraphrase",
+      "relevant": [
+        "redis-memory-warning"
+      ]
+    },
+    {
+      "expectAbsent": [],
+      "gate": false,
+      "id": "para-restart",
+      "query": "make the machine bring the process back after a crash",
+      "cls": "paraphrase",
+      "relevant": [
+        "systemd-unit-service"
+      ]
+    },
+    {
+      "expectAbsent": [],
+      "gate": false,
+      "id": "para-bigger",
+      "query": "why did the javascript we ship to users get so much bigger",
+      "cls": "paraphrase",
+      "relevant": [
+        "webpack-bundle-analysis"
+      ]
+    },
+    {
+      "expectAbsent": [],
+      "gate": false,
+      "id": "para-precompute",
+      "query": "stop re-rendering the same document over and over",
+      "cls": "paraphrase",
+      "relevant": [
+        "adr-caching-decision"
+      ]
+    },
+    {
+      "expectAbsent": [],
+      "gate": false,
+      "id": "para-signin-tv",
+      "query": "sign in on a screen that has no keyboard or browser",
+      "cls": "paraphrase",
+      "relevant": [
+        "oauth-device-flow-doc"
+      ]
+    },
+    {
+      "expectAbsent": [],
+      "gate": false,
+      "id": "para-resubscribe",
+      "query": "the component keeps opening a new connection on every render",
+      "cls": "paraphrase",
+      "relevant": [
+        "react-useeffect-docs"
+      ]
+    },
+    {
+      "expectAbsent": [],
+      "gate": false,
+      "id": "para-page-oncall",
+      "query": "wake somebody up when failures spike for ten minutes",
+      "cls": "paraphrase",
+      "relevant": [
+        "prometheus-alert-rules"
+      ]
+    },
+    {
+      "expectAbsent": [],
+      "gate": false,
+      "id": "ru-retry",
+      "query": "повторить запрос после ошибки с растущей задержкой",
+      "cls": "cross-lingual",
+      "relevant": [
+        "retry-backoff-util"
+      ]
+    },
+    {
+      "expectAbsent": [],
+      "gate": false,
+      "id": "ru-ratelimit",
+      "query": "ограничение частоты запросов к API",
+      "cls": "cross-lingual",
+      "relevant": [
+        "rate-limiter-redis"
+      ]
+    },
+    {
+      "expectAbsent": [],
+      "gate": false,
+      "id": "ru-auth",
+      "query": "проверка токена авторизации в заголовке запроса",
+      "cls": "cross-lingual",
+      "relevant": [
+        "api-auth-handler"
+      ]
+    },
+    {
+      "expectAbsent": [],
+      "gate": false,
+      "id": "ru-migration",
+      "query": "миграция базы данных добавить колонку и индекс",
+      "cls": "cross-lingual",
+      "relevant": [
+        "database-migration"
+      ]
+    },
+    {
+      "expectAbsent": [],
+      "gate": false,
+      "id": "ru-timeout",
+      "query": "таймаут подключения к базе данных",
+      "cls": "cross-lingual",
+      "relevant": [
+        "python-traceback"
+      ]
+    },
+    {
+      "expectAbsent": [],
+      "gate": false,
+      "id": "ru-docker",
+      "query": "многоэтапная сборка образа контейнера",
+      "cls": "cross-lingual",
+      "relevant": [
+        "dockerfile-prod"
+      ]
+    },
+    {
+      "expectAbsent": [],
+      "gate": false,
+      "id": "ru-k8s",
+      "query": "сколько реплик у сервиса в кластере",
+      "cls": "cross-lingual",
+      "relevant": [
+        "k8s-deployment"
+      ]
+    },
+    {
+      "expectAbsent": [],
+      "gate": false,
+      "id": "ru-redis",
+      "query": "закончилась память кеша и ключи вытесняются",
+      "cls": "cross-lingual",
+      "relevant": [
+        "redis-memory-warning"
+      ]
+    },
+    {
+      "expectAbsent": [],
+      "gate": false,
+      "id": "ru-kafka",
+      "query": "отставание консьюмера по партиции",
+      "cls": "cross-lingual",
+      "relevant": [
+        "kafka-consumer-lag"
+      ]
+    },
+    {
+      "expectAbsent": [],
+      "gate": false,
+      "id": "ru-race",
+      "query": "гонка данных между горутинами",
+      "cls": "cross-lingual",
+      "relevant": [
+        "go-race-detector"
+      ]
+    },
+    {
+      "expectAbsent": [],
+      "gate": false,
+      "id": "ru-borrow",
+      "query": "ошибка заимствования при изменении вектора",
+      "cls": "cross-lingual",
+      "relevant": [
+        "rust-borrow-error"
+      ]
+    },
+    {
+      "expectAbsent": [],
+      "gate": false,
+      "id": "ru-slowquery",
+      "query": "медленный запрос читает всю таблицу целиком",
+      "cls": "cross-lingual",
+      "relevant": [
+        "postgres-slow-query-log"
+      ]
+    },
+    {
+      "expectAbsent": [],
+      "gate": false,
+      "id": "ru-proxy",
+      "query": "настройка обратного прокси и терминация TLS",
+      "cls": "cross-lingual",
+      "relevant": [
+        "nginx-config-proxy"
+      ]
+    },
+    {
+      "expectAbsent": [],
+      "gate": false,
+      "id": "ru-vuln",
+      "query": "уязвимости в зависимостях проекта",
+      "cls": "cross-lingual",
+      "relevant": [
+        "npm-audit-report"
+      ]
+    },
+    {
+      "expectAbsent": [
+        "tailwind-config",
+        "changelog-release"
+      ],
+      "gate": false,
+      "id": "neg-rust",
+      "query": "cargo borrow checker",
+      "cls": "negative",
+      "mode": "ranking",
+      "expectTop": "rust-borrow-error",
+      "relevant": [
+        "rust-borrow-error"
+      ]
+    },
+    {
+      "expectAbsent": [
+        "react-useeffect-docs",
+        "vitest-output"
+      ],
+      "gate": false,
+      "id": "neg-terraform",
+      "query": "terraform bucket versioning",
+      "cls": "negative",
+      "mode": "ranking",
+      "expectTop": "terraform-s3-bucket",
+      "relevant": [
+        "terraform-s3-bucket"
+      ]
+    }
+  ]
+}

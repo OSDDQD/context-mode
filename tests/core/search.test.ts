@@ -11,17 +11,20 @@
  *   7. Extract Snippet (positionsFromHighlight, extractSnippet, store integration)
  */
 
-import { describe, test, expect, it, beforeEach, afterEach } from "vitest";
+import { describe, test, expect, it, beforeAll, afterAll, beforeEach, afterEach } from "vitest";
 import { strict as assert } from "node:assert";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { mkdirSync, writeFileSync, rmSync } from "node:fs";
+import { mkdirSync, readFileSync, writeFileSync, rmSync } from "node:fs";
 import { randomUUID } from "node:crypto";
 import { ContentStore } from "../../src/store.js";
 import { SessionDB, hashProjectDirCanonical } from "../../src/session/db.js";
 import { searchAllSources, type UnifiedSearchResult } from "../../src/search/unified.js";
 import { searchAutoMemory } from "../../src/search/auto-memory.js";
 import { extractSnippet, formatBatchQueryResults, positionsFromHighlight } from "../../src/server.js";
+// Same scorer the measurement harness records the baseline with — see
+// scripts/lib/retrieval-metrics.mjs for why there is only one copy of it.
+import { byClass, misses, score } from "../../scripts/lib/retrieval-metrics.mjs";
 
 // ─────────────────────────────────────────────────────────
 // Shared helpers
@@ -2687,67 +2690,61 @@ describe("Phrase-frequency reward in reranking", () => {
 // ═══════════════════════════════════════════════════════════════════════════
 // 9. Search Relevance Eval — ranking quality under competitive conditions
 //
-// Indexes 12 heterogeneous markdown sources into a single store and asserts
-// ranking correctness (precision@1, recall@5, title boost, cascade, negatives).
-// Guards BM25 weights, RRF K, proximity formula, and title boost weights
-// against silent regression.
+// Indexes 40 heterogeneous sources into a single store and asserts ranking
+// correctness two ways: case by case (precision@1, recall@5, title boost,
+// cascade, negatives) and in aggregate against a recorded baseline. Guards BM25
+// weights, RRF K, proximity formula, and title boost weights against silent
+// regression — the per-case tests catch a named ranking flipping, the aggregate
+// catches a change that trades wins for losses without touching any of them.
+//
+// Corpus and expectations live in tests/fixtures/relevance-corpus.json; the
+// baseline in tests/fixtures/retrieval-baseline.json is produced by
+// `node scripts/measure-retrieval.mjs --write-baseline`. Only the lexical arm
+// is gated here: the semantic arm needs a live embedding endpoint, and a gate
+// that fails when a model is unreachable is worse than no gate.
 // ═══════════════════════════════════════════════════════════════════════════
 
-const RELEVANCE_CORPUS: Array<{ source: string; markdown: string }> = [
-  {
-    source: "api-auth-handler",
-    markdown: `# Authentication middleware\n\n## verifyToken\n\n\`\`\`typescript\nexport async function verifyToken(req: Request): Promise<User> {\n  const header = req.headers.get("Authorization");\n  if (!header?.startsWith("Bearer ")) {\n    throw new AuthenticationError("Missing or malformed Authorization header");\n  }\n  const token = header.slice(7);\n  const payload = jwt.verify(token, process.env.JWT_SECRET!);\n  return payload;\n}\n\`\`\`\n\nThe middleware validates JWT tokens from the Authorization header and returns the decoded user payload.`,
-  },
-  {
-    source: "nginx-access-log",
-    markdown: `# Nginx access log\n\n## Recent requests\n\n\`\`\`\n192.168.1.42 "GET /api/auth/callback HTTP/1.1" 200 1234\n192.168.1.43 "GET /static/bundle.js HTTP/1.1" 200 450321\n192.168.1.44 "POST /api/users HTTP/1.1" 201 89\n10.0.0.1 "DELETE /api/sessions HTTP/1.1" 204 0\n\`\`\``,
-  },
-  {
-    source: "react-useeffect-docs",
-    markdown: `# React useEffect\n\n## Cleanup and dependencies\n\nuseEffect lets you synchronize a component with an external system.\n\n\`\`\`jsx\nuseEffect(() => {\n  const connection = createConnection(serverUrl, roomId);\n  connection.connect();\n  return () => connection.disconnect();\n}, [serverUrl, roomId]);\n\`\`\`\n\n## When cleanup runs\n\nThe cleanup function runs before every re-render with changed dependencies, and once more when the component unmounts.`,
-  },
-  {
-    source: "vitest-output",
-    markdown: `# Test results\n\n## Summary\n\nTest Suites: 1 failed, 29 passed, 30 total\nTests: 1 failed, 219 passed, 220 total\n\n## Failed test\n\n\`\`\`\nFAIL tests/hooks/integration.test.ts\n  PostToolUse hook session capture\n    AssertionError: expected "ok" to equal "captured"\n    at tests/hooks/integration.test.ts:142:5\n\`\`\`\n\n## Passed suites\n\n- store.test.ts (34 tests) 1200ms\n- executor.test.ts (55 tests) 3400ms`,
-  },
-  {
-    source: "database-migration",
-    markdown: `# Database migration 0042\n\n## Add tenant_id column\n\n\`\`\`sql\nALTER TABLE orders ADD COLUMN tenant_id UUID NOT NULL DEFAULT '00000000';\nCREATE INDEX idx_orders_tenant ON orders(tenant_id);\n\`\`\`\n\n## Backfill\n\n\`\`\`sql\nUPDATE orders SET tenant_id = (SELECT org_id FROM users WHERE users.id = orders.user_id);\n\`\`\``,
-  },
-  {
-    source: "nextjs-build-output",
-    markdown: `# Next.js build output\n\n## Warnings\n\n- You have enabled experimental feature (serverActions) in next.config.js\n- Duplicate page detected. pages/api/auth and app/api/auth both resolve to /api/auth\n\n## Routes\n\n| Route | Size | First Load |\n|-------|------|------------|\n| / | 5.2 kB | 89.1 kB |\n| /dashboard | 12.3 kB | 96.2 kB |`,
-  },
-  {
-    source: "python-traceback",
-    markdown: `# Python error traceback\n\n## Database connection timeout\n\n\`\`\`\nTraceback (most recent call last):\n  File "/app/services/sync.py", line 234, in sync_orders\n    conn = await asyncpg.connect(DATABASE_URL, timeout=30)\nasyncio.TimeoutError\n\nDatabaseConnectionError: Failed to connect after 3 retries\n\`\`\`\n\nThe sync service could not reach the PostgreSQL database within the 30-second timeout.`,
-  },
-  {
-    source: "git-log-recent",
-    markdown: `# Git log\n\n## Recent commits\n\n- eb36c2e perf: enable mmap_size pragma for FTS5 search\n- 766de41 ci: update server.bundle.mjs\n- 01470ec fix(store): wrap indexPlainText with withRetry\n- c445a12 feat(kiro): add full hook support for Kiro IDE`,
-  },
-  {
-    source: "tailwind-config",
-    markdown: `# Tailwind CSS configuration\n\n## Custom theme colors\n\n\`\`\`javascript\nmodule.exports = {\n  theme: {\n    extend: {\n      colors: {\n        brand: { 50: '#f0f9ff', 500: '#0ea5e9', 900: '#0c4a6e' },\n      },\n      fontFamily: { sans: ['Inter', 'system-ui', 'sans-serif'] },\n    },\n  },\n  plugins: [require('@tailwindcss/forms'), require('@tailwindcss/typography')],\n};\n\`\`\``,
-  },
-  {
-    source: "dockerfile-prod",
-    markdown: `# Dockerfile\n\n## Multi-stage production build\n\n\`\`\`dockerfile\nFROM node:20-alpine AS builder\nWORKDIR /app\nCOPY package.json package-lock.json ./\nRUN npm ci --production=false\nCOPY . .\nRUN npm run build\n\nFROM node:20-alpine AS runner\nENV NODE_ENV=production\nCOPY --from=builder /app/build ./build\nCMD ["node", "build/server.js"]\n\`\`\``,
-  },
-  {
-    source: "k8s-deployment",
-    markdown: `# Kubernetes deployment\n\n## api-server\n\n\`\`\`yaml\napiVersion: apps/v1\nkind: Deployment\nmetadata:\n  name: api-server\n  namespace: production\nspec:\n  replicas: 3\n  template:\n    spec:\n      containers:\n        - name: api\n          image: registry.example.com/api:v2.3.1\n          resources:\n            requests: { cpu: "250m", memory: "512Mi" }\n          readinessProbe:\n            httpGet: { path: /health, port: 3000 }\n\`\`\``,
-  },
-  {
-    source: "package-json-deps",
-    markdown: `# Package dependencies\n\n## Production\n\n- next 14.2.3\n- react 18.3.1\n- @prisma/client 5.14.0\n- zod 3.23.8\n\n## Dev dependencies\n\n- typescript 5.4.5\n- vitest 1.6.0\n- tailwindcss 3.4.3\n- eslint 8.57.0`,
-  },
-];
+interface RelevanceCase {
+  id: string;
+  query: string;
+  /** Query class — see `classes` in the fixture. */
+  cls: string;
+  /** Ground truth: the sources that answer this query. */
+  relevant: string[];
+  /** Present only on cases asserted individually. */
+  mode?: "topOne" | "ranking";
+  expectTop?: string | string[];
+  expectAbsent: string[];
+  layer?: string;
+  gate: boolean;
+  legacy?: boolean;
+}
+
+interface RelevanceFixture {
+  documents: Array<{ source: string; markdown: string }>;
+  queries: RelevanceCase[];
+}
+
+interface RetrievalBaseline {
+  tolerance: number;
+  corpus: { documents: number; queries: number; limit: number };
+  lexical: { queries: number; precisionAt1: number; recallAt5: number; mrr: number; missesAt5: number };
+  lexicalByClass: Record<string, { precisionAt1: number; recallAt5: number; mrr: number }>;
+}
+
+const readFixture = <T>(name: string): T =>
+  JSON.parse(readFileSync(new URL(`../fixtures/${name}`, import.meta.url), "utf-8")) as T;
+
+const RELEVANCE_FIXTURE = readFixture<RelevanceFixture>("relevance-corpus.json");
+const RETRIEVAL_BASELINE = readFixture<RetrievalBaseline>("retrieval-baseline.json");
+const RELEVANCE_CORPUS = RELEVANCE_FIXTURE.documents;
 
 describe("Search relevance eval — competitive corpus", () => {
   let relevanceStore: ContentStore;
 
-  beforeEach(() => {
+  // Indexed once rather than per test: 40 documents is enough that per-test
+  // re-indexing dominates the suite, and nothing here writes to the store.
+  beforeAll(() => {
     const path = join(tmpdir(), `ctx-relevance-${Date.now()}-${Math.random().toString(36).slice(2)}.db`);
     relevanceStore = new ContentStore(path);
     for (const doc of RELEVANCE_CORPUS) {
@@ -2755,7 +2752,7 @@ describe("Search relevance eval — competitive corpus", () => {
     }
   });
 
-  afterEach(() => {
+  afterAll(() => {
     relevanceStore.cleanup();
   });
 
@@ -2774,33 +2771,90 @@ describe("Search relevance eval — competitive corpus", () => {
     if (layer) expect(results[0]?.matchLayer, `"${query}" should hit ${layer} layer`).toBe(layer);
   }
 
-  // precision@1
-  test("'authentication middleware JWT' → api-auth-handler", () => topOne("authentication middleware JWT", "api-auth-handler"));
-  test("'database connection timeout' → python-traceback", () => topOne("database connection timeout", "python-traceback"));
-  test("'useEffect cleanup' → react-useeffect-docs", () => topOne("useEffect cleanup", "react-useeffect-docs"));
-  test("'tenant_id migration ALTER TABLE' → database-migration", () => topOne("tenant_id migration ALTER TABLE", "database-migration"));
-  test("'Dockerfile multi-stage build' → dockerfile-prod", () => topOne("Dockerfile multi-stage build", "dockerfile-prod"));
-  test("'Kubernetes deployment replicas' → k8s-deployment", () => topOne("Kubernetes deployment replicas", "k8s-deployment"));
-  test("'tailwind theme colors brand' → tailwind-config", () => topOne("tailwind theme colors brand", "tailwind-config"));
-  test("'test failed assertion FAIL' → vitest-output", () => topOne("test failed assertion FAIL", "vitest-output"));
+  // ── per-case assertions, driven by the fixture ──────────────────────────
+  const gated = RELEVANCE_FIXTURE.queries.filter((c) => c.gate);
 
-  // recall@5
-  test("'error timeout' finds python-traceback", () => ranking("error timeout", "python-traceback", ["tailwind-config", "git-log-recent"]));
-  test("'build warning experimental serverActions' finds nextjs output", () => ranking("build warning experimental serverActions", "nextjs-build-output"));
-  test("'react dependencies vitest typescript' finds package.json", () => ranking("react dependencies vitest typescript", "package-json-deps"));
-  test("'mmap pragma perf FTS5' finds git log", () => ranking("mmap pragma perf FTS5", "git-log-recent"));
+  test("the fixture still carries every case this suite used to inline", () => {
+    // The 18 legacy cases predate the corpus moving into a fixture. Deleting
+    // one is how a ranking regression gets "fixed", so their count is asserted
+    // rather than merely iterated.
+    expect(RELEVANCE_FIXTURE.queries.filter((c) => c.legacy).length).toBe(18);
+    expect(gated.length).toBeGreaterThanOrEqual(18);
+    expect(RELEVANCE_CORPUS.length).toBe(RETRIEVAL_BASELINE.corpus.documents);
+    expect(RELEVANCE_FIXTURE.queries.length).toBe(RETRIEVAL_BASELINE.corpus.queries);
+  });
 
-  // title boost
-  test("'Kubernetes deployment' title match ranks k8s-deployment first", () => topOne("Kubernetes deployment", "k8s-deployment"));
-  test("'Dockerfile' title match ranks dockerfile-prod first", () => topOne("Dockerfile", "dockerfile-prod"));
+  for (const c of gated) {
+    const expected = Array.isArray(c.expectTop) ? c.expectTop.join(", ") : c.expectTop;
+    test(`[${c.cls}] '${c.query}' → ${expected}`, () => {
+      if (c.mode === "topOne") {
+        topOne(c.query, c.expectTop as string);
+      } else {
+        ranking(c.query, c.expectTop!, c.expectAbsent.length > 0 ? c.expectAbsent : undefined, c.layer);
+      }
+    });
+  }
 
-  // cascade
-  test("exact terms hit RRF layer", () => ranking("useEffect cleanup", "react-useeffect-docs", undefined, "rrf"));
-  test("typo still resolves to correct doc", () => ranking("authenticaton middlewar", "api-auth-handler"));
+  // ── aggregate gate ──────────────────────────────────────────────────────
+  //
+  // Lexical only. `paraphrase` and `cross-lingual` queries are in the corpus
+  // precisely because lexical search cannot answer them — they are the headroom
+  // the semantic path exists to close — so the aggregate is well below 1 by
+  // design and the baseline records where it actually stands.
+  describe("aggregate quality vs recorded baseline", () => {
+    const limit = RETRIEVAL_BASELINE.corpus.limit;
+    let rows: Array<{ id: string; cls: string; relevant: string[]; sources: string[] }>;
+    let measured: { precisionAt1: number; recallAt5: number; mrr: number };
 
-  // negatives
-  test("'tailwind colors' excludes unrelated sources", () => ranking("tailwind colors", "tailwind-config", ["database-migration", "python-traceback"]));
-  test("'SQL ALTER TABLE' excludes non-DB sources", () => ranking("SQL ALTER TABLE", "database-migration", ["nginx-access-log", "react-useeffect-docs"]));
+    beforeAll(() => {
+      rows = RELEVANCE_FIXTURE.queries.map((c) => ({
+        id: c.id,
+        cls: c.cls,
+        relevant: c.relevant,
+        sources: relevanceStore.searchWithFallback(c.query, limit).map((r) => r.source),
+      }));
+      measured = score(rows, limit);
+    });
+
+    const tol = RETRIEVAL_BASELINE.tolerance;
+    const notWorse = (name: "precisionAt1" | "recallAt5" | "mrr") => {
+      const floor = RETRIEVAL_BASELINE.lexical[name] - tol;
+      expect(
+        measured[name],
+        `lexical ${name} is ${measured[name].toFixed(3)}, baseline ${RETRIEVAL_BASELINE.lexical[name]} ` +
+        `(floor ${floor.toFixed(3)}, tolerance ${tol}). ` +
+        `Re-measure with \`node scripts/measure-retrieval.mjs\` and, if the drop is intended, ` +
+        `record it with \`--write-baseline\`.`,
+      ).toBeGreaterThanOrEqual(floor);
+    };
+
+    test("precision@1 is not below baseline minus tolerance", () => notWorse("precisionAt1"));
+    test("recall@5 is not below baseline minus tolerance", () => notWorse("recallAt5"));
+    test("MRR@5 is not below baseline minus tolerance", () => notWorse("mrr"));
+
+    test("no query class collapses on its own", () => {
+      // The aggregate can hide a class going to zero if another improves. Each
+      // class carries its own floor for that reason.
+      const perClass = byClass(rows, limit) as Record<string, { precisionAt1: number }>;
+      for (const [cls, base] of Object.entries(RETRIEVAL_BASELINE.lexicalByClass)) {
+        expect(
+          perClass[cls]?.precisionAt1,
+          `class "${cls}" precision@1 fell from ${base.precisionAt1} to ${perClass[cls]?.precisionAt1}`,
+        ).toBeGreaterThanOrEqual(base.precisionAt1 - tol);
+      }
+    });
+
+    test("the set of queries lexical cannot answer has not grown", () => {
+      // A miss is a query with nothing relevant anywhere in the top `limit`.
+      // Compared as a count, not a list: which queries miss is tuning, how many
+      // do is quality. The slack matches the tolerance — 3% of 74 queries.
+      const slack = Math.ceil(tol * RELEVANCE_FIXTURE.queries.length);
+      expect(
+        misses(rows, limit).length,
+        `baseline missed ${RETRIEVAL_BASELINE.lexical.missesAt5} queries, tolerance allows ${slack} more`,
+      ).toBeLessThanOrEqual(RETRIEVAL_BASELINE.lexical.missesAt5 + slack);
+    });
+  });
 });
 
 // ═══════════════════════════════════════════════════════════

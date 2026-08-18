@@ -1,0 +1,69 @@
+{
+  "note": "Lexical retrieval baseline for the gate in tests/core/search.test.ts. Regenerate with `node scripts/measure-retrieval.mjs --write-baseline`. Only the lexical arm is recorded: it is deterministic given the corpus, while the hybrid arm needs a live embedding endpoint and is measured by the script alone.",
+  "measuredAt": "2026-08-18",
+  "harness": "node scripts/measure-retrieval.mjs --write-baseline",
+  "corpus": {
+    "path": "tests/fixtures/relevance-corpus.json",
+    "documents": 40,
+    "queries": 74,
+    "limit": 5
+  },
+  "tolerance": 0.03,
+  "lexical": {
+    "queries": 74,
+    "precisionAt1": 0.662,
+    "recallAt5": 0.77,
+    "mrr": 0.699,
+    "missesAt5": 17
+  },
+  "lexicalByClass": {
+    "cascade": {
+      "queries": 1,
+      "precisionAt1": 1,
+      "recallAt5": 1,
+      "mrr": 1
+    },
+    "cross-lingual": {
+      "queries": 14,
+      "precisionAt1": 0.071,
+      "recallAt5": 0.071,
+      "mrr": 0.071
+    },
+    "keyword": {
+      "queries": 32,
+      "precisionAt1": 0.969,
+      "recallAt5": 1,
+      "mrr": 0.984
+    },
+    "long-code": {
+      "queries": 6,
+      "precisionAt1": 0.833,
+      "recallAt5": 1,
+      "mrr": 0.917
+    },
+    "negative": {
+      "queries": 4,
+      "precisionAt1": 1,
+      "recallAt5": 1,
+      "mrr": 1
+    },
+    "paraphrase": {
+      "queries": 14,
+      "precisionAt1": 0.286,
+      "recallAt5": 0.714,
+      "mrr": 0.407
+    },
+    "title": {
+      "queries": 2,
+      "precisionAt1": 1,
+      "recallAt5": 1,
+      "mrr": 1
+    },
+    "typo": {
+      "queries": 1,
+      "precisionAt1": 1,
+      "recallAt5": 1,
+      "mrr": 1
+    }
+  }
+}
