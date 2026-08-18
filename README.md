@@ -104,7 +104,7 @@ Restart Claude Code (or run `/reload-plugins`).
 
 All checks should show `[x]`. The doctor validates runtimes, hooks, FTS5, and plugin registration.
 
-**Routing:** Automatic. The SessionStart hook injects routing instructions at runtime — no file is written to your project. The plugin registers all hooks (PreToolUse, PostToolUse, UserPromptSubmit, PreCompact, SessionStart, Stop) and 11 MCP tools — six sandbox tools (`ctx_batch_execute`, `ctx_execute`, `ctx_execute_file`, `ctx_index`, `ctx_search`, `ctx_fetch_and_index`) plus five meta-tools (`ctx_stats`, `ctx_doctor`, `ctx_upgrade`, `ctx_purge`, `ctx_insight`).
+**Routing:** Automatic. The SessionStart hook injects routing instructions at runtime — no file is written to your project. The plugin registers all hooks (PreToolUse, PostToolUse, UserPromptSubmit, PreCompact, SessionStart, Stop, SubagentStop, SessionEnd) and 12 MCP tools — seven execution and retrieval tools (`ctx_batch_execute`, `ctx_gather`, `ctx_execute`, `ctx_execute_file`, `ctx_index`, `ctx_search`, `ctx_fetch_and_index`) plus five meta-tools (`ctx_stats`, `ctx_doctor`, `ctx_upgrade`, `ctx_purge`, `ctx_insight`).
 
 | Slash Command | What it does |
 |---|---|
@@ -138,7 +138,7 @@ After saving, restart Claude Code. The bar shows `$ saved this session · $ save
 claude mcp add context-mode -- npx -y context-mode
 ```
 
-This gives you all 11 MCP tools without automatic routing. The model can still use them — it just won't be nudged to prefer them over raw Bash/Read/WebFetch. Good for trying it out before committing to the full plugin.
+This gives you all 12 MCP tools without automatic routing. The model can still use them — it just won't be nudged to prefer them over raw Bash/Read/WebFetch. Good for trying it out before committing to the full plugin.
 
 </details>
 
@@ -502,7 +502,7 @@ Full configs: [`configs/cursor/hooks.json`](configs/cursor/hooks.json) | [`confi
    }
    ```
 
-   The `plugin` entry registers all 11 `ctx_*` tools natively and enables hooks — OpenCode calls context-mode's TypeScript plugin in-process, so there is no redundant stdio MCP child per session.
+   The `plugin` entry registers all 12 `ctx_*` tools natively and enables hooks — OpenCode calls context-mode's TypeScript plugin in-process, so there is no redundant stdio MCP child per session.
 
 2. *(Optional)* Copy the routing rules file. The model needs an `AGENTS.md` file for routing awareness:
 
@@ -542,7 +542,7 @@ Full configs: [`configs/opencode/opencode.json`](configs/opencode/opencode.json)
    }
    ```
 
-   The `plugin` entry registers all 11 `ctx_*` tools natively and enables hooks — KiloCode calls context-mode's TypeScript plugin in-process, so there is no redundant stdio MCP child per session.
+   The `plugin` entry registers all 12 `ctx_*` tools natively and enables hooks — KiloCode calls context-mode's TypeScript plugin in-process, so there is no redundant stdio MCP child per session.
 
 2. *(Optional)* Copy the routing rules file. KiloCode shares the OpenCode plugin architecture, so the model needs an `AGENTS.md` file for routing awareness:
 
@@ -591,7 +591,7 @@ context-mode runs as a native [OpenClaw](https://github.com/openclaw) gateway pl
 
 2. Open a Pi Agent session.
 
-**Verify:** The plugin registers 8 hooks via [`api.on()`](https://docs.openclaw.ai/tools/plugin) (lifecycle) and [`api.registerHook()`](https://docs.openclaw.ai/tools/plugin) (commands). Type `ctx stats` to confirm tools are loaded.
+**Verify:** The plugin registers 10 lifecycle handlers via [`api.on()`](https://docs.openclaw.ai/tools/plugin) — nine distinct events, `before_prompt_build` twice — plus command hooks via [`api.registerHook()`](https://docs.openclaw.ai/tools/plugin). Type `ctx stats` to confirm tools are loaded.
 
 **Routing:** Automatic. All tool interception, session tracking, and compaction recovery hooks activate automatically — no manual hook configuration or routing file needed.
 
@@ -1088,7 +1088,7 @@ Full configs: [`configs/kiro/mcp.json`](configs/kiro/mcp.json) | [`configs/kiro/
 
    Both should show `context-mode` as `enabled`.
 
-   > The plugin self-registers its MCP server in `~/.omp/agent/mcp.json` on first load (spawned as `node <plugin>/server.bundle.mjs`, since the plugin-install package directory is not on `PATH`), so the 11 `ctx_*` tools become reachable after the restart in step 2 — no manual `mcp.json` edit needed ([#677](https://github.com/mksglu/context-mode/issues/677)). An existing `context-mode` entry is never overwritten; remove it if you want the plugin to re-register the bundled path.
+   > The plugin self-registers its MCP server in `~/.omp/agent/mcp.json` on first load (spawned as `node <plugin>/server.bundle.mjs`, since the plugin-install package directory is not on `PATH`), so the 12 `ctx_*` tools become reachable after the restart in step 2 — no manual `mcp.json` edit needed ([#677](https://github.com/mksglu/context-mode/issues/677)). An existing `context-mode` entry is never overwritten; remove it if you want the plugin to re-register the bundled path.
 
 **Install — manual plugin path (if `omp plugin install` is unavailable):**
 
@@ -1184,8 +1184,9 @@ npm install -g context-mode
 | Tool | What it does | Context saved |
 |---|---|---|
 | `ctx_batch_execute` | Run multiple commands + search multiple queries in ONE call. Opt-in `concurrency: 1-8` for I/O-bound batches. | 986 KB → 62 KB |
+| `ctx_gather` | The same engine behind `readOnlyHint: true`, with every command proved read-only first — usable in plan mode. | Same as `ctx_batch_execute` |
 | `ctx_execute` | Run code in 12 languages. Only stdout enters context. | 56 KB → 299 B |
-| `ctx_execute_file` | Process files in sandbox. Raw content never leaves. | 45 KB → 155 B |
+| `ctx_execute_file` | Process files in a separate subprocess. Raw content never leaves. | 45 KB → 155 B |
 | `ctx_index` | Chunk markdown into FTS5 with BM25 ranking. | 60 KB → 40 B |
 | `ctx_search` | Query indexed content with multiple queries in one call. | On-demand retrieval |
 | `ctx_fetch_and_index` | Fetch URL, chunk and index. Cache reuses content within TTL (default 24h, override per-call with `ttl: <ms>`). `ttl: 0` or `force: true` to bypass. Pass `requests: [{url, source}, ...]` + `concurrency: 1-8` for parallel multi-URL. | 60 KB → 40 B |
@@ -1193,8 +1194,9 @@ npm install -g context-mode
 | `ctx_doctor` | Diagnose installation: runtimes, hooks, FTS5, versions. | — |
 | `ctx_upgrade` | Upgrade to latest version from GitHub, rebuild, reconfigure hooks. | — |
 | `ctx_purge` | Permanently deletes all indexed content from the knowledge base. | — |
+| `ctx_insight` | Open the hosted Insight dashboard in the default browser. | — |
 
-## How the Sandbox Works
+## How the Subprocess Boundary Works
 
 Each `ctx_execute` call spawns a separate subprocess with its own process boundary. Scripts can't access each other's memory or state. The subprocess runs your code, captures stdout, and only that stdout enters the conversation context. The raw data — log files, API responses, snapshots — never enters your conversation.
 
@@ -1418,7 +1420,7 @@ Tool call output can be collapsed/expanded with the default Pi's default keybind
 >
 > **Kiro** supports native `preToolUse` and `postToolUse` hooks for routing enforcement and tool event capture. `agentSpawn` (SessionStart equivalent) and `stop` are not yet wired. Requires manually copying `KIRO.md` to your project root. Kiro is auto-detected via MCP protocol handshake (`clientInfo.name`).
 >
-> **Pi Coding Agent** runs context-mode as an extension with full hook support. The extension registers `tool_call`, `tool_result`, `session_start`, and `session_before_compact` events, providing high session continuity coverage. The MCP server provides all 11 MCP tools.
+> **Pi Coding Agent** runs context-mode as an extension with full hook support. The extension registers `tool_call`, `tool_result`, `session_start`, and `session_before_compact` events, providing high session continuity coverage. The MCP server provides all 12 MCP tools.
 >
 > **OMP (Oh My Pi)** runs context-mode as a plugin via `omp plugin install context-mode`. The plugin registers `tool_call`, `tool_result`, `session_start`, and `session_before_compact` events for hard-block routing and full session continuity. Storage isolated under `~/.omp/context-mode/` so OMP and Pi never share state. Auto-detected via `PI_CODING_AGENT_DIR` (default agent dir `~/.omp/agent`) or `~/.omp/` directory. See [issue #473](https://github.com/mksglu/context-mode/issues/473) for the storage-isolation history.
 

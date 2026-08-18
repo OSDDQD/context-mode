@@ -150,7 +150,7 @@ context-mode hook gemini-cli sessionstart
 
 **Hook Paradigm:** TS Plugin
 
-OpenCode uses a TypeScript plugin paradigm instead of JSON stdin/stdout. Hooks and the 11 `ctx_*` tools are registered via the `plugin` array in `opencode.json`; no separate `mcp` block or stdio MCP child is required.
+OpenCode uses a TypeScript plugin paradigm instead of JSON stdin/stdout. Hooks and the 12 `ctx_*` tools are registered via the `plugin` array in `opencode.json`; no separate `mcp` block or stdio MCP child is required.
 
 **Hook Names:**
 - `tool.execute.before` -- equivalent to PreToolUse

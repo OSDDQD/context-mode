@@ -2,7 +2,7 @@
 
 Fork of [mksglu/context-mode](https://github.com/mksglu/context-mode) at v1.0.169.
 
-Twenty-two changes, each addressing a gap observed while running the plugin daily in
+Thirty-two changes, each addressing a gap observed while running the plugin daily in
 Claude Code. Every one is backwards compatible, and every behavioural default
 carries an env switch back. Two defaults differ from upstream on purpose: the
 compact tool descriptions (what ships on every request) and the semantic layer,
@@ -693,6 +693,506 @@ into spawned hooks whose tests then look under their own HOME. Measured per run:
 13 stray content DBs before, 1 after; the remainder comes from suites that spawn
 children with a HOME of their own, which already isolate their own writes.
 
+## 23. The execution watchdog watches for silence, not for elapsed time
+
+`src/executor.ts`, `src/types.ts`
+
+A wall clock cannot tell a long build from a hung one — issue #406 is the whole
+design constraint here, not a footnote: a 30-minute Gradle build prints
+continuously and a wedged process prints nothing, and only one of them should be
+killed. So the limit added here is **silence**. Every byte of output resets it,
+it arms only when the caller passed no timeout of its own, and never in
+background mode, where being quiet is the job.
+
+**It ships off.** `CONTEXT_MODE_EXEC_IDLE_TIMEOUT_MS` defaults to `0`. The
+mechanism lands a revision ahead of the default deliberately: a watchdog that
+kills honest work is worse than no watchdog, and real use is the only thing that
+can show which it is. `CONTEXT_MODE_EXEC_WALL_TIMEOUT_MS` (also `0`) exists for
+callers who do want an absolute cap and know what #406 cost.
+
+Four things changed alongside it:
+
+- **`ExecResult.killedBy` says which limit fired** — `timeout`, `idle`, `wall`
+  or `output-cap`. `timedOut` stays true for all four, so no existing consumer
+  has to know the difference until it wants to.
+- **A killed process gets to clean up.** `killTree` sends SIGTERM and escalates
+  to SIGKILL after `CONTEXT_MODE_EXEC_KILL_GRACE_MS` (2000), so a killed build
+  can flush its output and drop its lock files. The one exception is the
+  output-cap path: that process is drowning the host in bytes and must stop now.
+- **The output cap drops from 100 MB to 32 MB**
+  (`CONTEXT_MODE_EXEC_MAX_OUTPUT_BYTES`). The parent buffers this; a cap that
+  large protects nothing.
+- **`CONTEXT_MODE_EXEC_ENV_MODE=allowlist` inverts the environment filter.** A
+  denylist can only remove what it has heard of, and today `AWS_*`, tokens and
+  connection strings all reach a script the model wrote. Opt-in, because
+  inverting it also breaks any command that legitimately reads a credential from
+  the environment. The allowlist names the runtime settings the executor already
+  relies on (`PYTHONUNBUFFERED`, `PYTHONDONTWRITEBYTECODE`, `PYTHONUTF8`, …) so
+  they survive the inversion.
+
+## 24. Re-indexing unchanged content stops rewriting the index
+
+`src/store.ts`, `src/types.ts`, [ADR-0007](adr/0007-content-hash-index-cache.md)
+
+`index()` rewrote a source unconditionally — delete every chunk, re-chunk,
+re-insert — while already writing the SHA-256 that would have told it not to.
+The column existed only for the staleness check and was never read on the write
+path.
+
+Measured over 120 tracked files of this repository, 831 chunks
+(`scripts/measure-index-skip.mjs`,
+`docs/research/index-skip-2026-08-18.md`):
+
+| pass | ms/file | skipped | orphaned vectors |
+|---|---|---|---|
+| first index (cold) | 5.30 | 0 | — |
+| re-index, cache on | **0.11** | 120 | **0** |
+| re-index, cache off | 6.76 | 0 | **831** |
+
+**63.5× on unchanged files**, against a bootstrap budget of ~12.5 ms/file. The
+orphan column is the larger result: `chunk_vectors` is keyed on `chunks.rowid`
+and an FTS5 delete/insert hands out new rowids, so every re-index of an
+unchanged file threw away all 831 embeddings and made the backfill compute them
+again.
+
+It also closes a re-read that ran forever. `#refreshStaleSources` gates on
+`mtime > indexed_at`, so a file whose mtime moved without its bytes changing was
+re-read and re-hashed on **every single search**. Both the skip and the
+hash-match branch now move `indexed_at` forward.
+
+The hash is computed for every source, not only file-backed ones: command
+captures dominate this index, and a repeated capture is exactly as skippable as
+an unchanged file.
+
+**The trade, stated in the ADR rather than discovered later:** a skipped chunk
+keeps the `session_id` of the session that first indexed it. Re-attributing
+means an UPDATE on an FTS5 column, which changes the rowid and destroys the very
+saving this exists for. First writer wins;
+`CONTEXT_MODE_INDEX_HASH_SKIP_REATTRIBUTE=1` forces the rewrite for anyone who
+needs per-session attribution more. `CONTEXT_MODE_INDEX_HASH_SKIP=0` restores
+the old behaviour. A skipped call returns `IndexResult.skipped` with
+`sourceId: -1` and the counts already stored.
+
+## 25. Search says how much of the match set the caller is seeing
+
+`src/search/completeness.ts`, `src/store.ts`, `src/server.ts`
+
+Three results say nothing about whether three was all there was or the first
+three of forty — and that difference decides whether the reader searches again
+or stops. The retrieval layer already knew: RRF builds a score map over every
+candidate before slicing to the limit, then threw the size away.
+
+```
+> Showing 3 of 17+ matching section(s). More: ctx_search(queries: ["retry"], limit: 6)
+> Complete: all 2 matching section(s) shown.
+> 2 query(s) had more matches than shown. Raise `limit`, scope with `source: "<label>"`, or ask a narrower question.
+```
+
+- `searchWithFallbackMeta()` returns the results plus `{shown, poolSize,
+  saturated}`. The old signature delegates to it, so no call site and no test
+  had to move.
+- **"Complete" is claimed only when the pool is provably untruncated** — no
+  layer hit its fetch limit and no post-filter ran. Everywhere else the total is
+  `N+`. The error always points at "there may be more": erring that way costs a
+  character, erring the other way tells the reader to stop looking when there
+  was more to find.
+- One line per query, one escalation block per response, both before the
+  throttle line. Timeline mode says nothing at all — it merges this session,
+  prior sessions and auto-memory into one list, so there is no single pool to be
+  complete with respect to.
+- Rows added by hybrid fusion or auto-memory are counted separately as
+  `(+N from memory/semantic)` rather than silently inflating the denominator.
+
+`CONTEXT_MODE_SEARCH_COMPLETENESS=0` and `CONTEXT_MODE_SEARCH_ESCALATION=0` turn
+the two halves off independently. `CONTEXT_MODE_SEARCH_EXACT_TOTALS=1` replaces
+the lower bound with a real count by re-fusing at a wider fetch — off by
+default, because it is real work on a large index in exchange for a nicer
+number, and it is still capped at 500.
+
+## 26. "Sandbox" was the wrong word for it
+
+`src/server.ts`, `README.md`, `hooks/routing-block.mjs`, `skills/`, `agents/`,
+[ADR-0006](adr/0006-execution-isolation-posture.md)
+
+The tool descriptions promised a "sandboxed subprocess" and the README promised
+"complete isolation". Probed with `scripts/measure-sandbox-wording.mjs`
+(`docs/research/sandbox-wording-2026-08-18.md`), **five of the six implied
+properties are false**: the subprocess runs in the user's real project root, can
+read their home directory, inherits every environment variable the denylist has
+not heard of, and has unrestricted network.
+
+The sixth holds exactly, and it is the one the plugin exists for — in the same
+probe a script read 5,823 bytes and the conversation received one line.
+
+So the word is now "separate subprocess", in the tool descriptions, the approval
+titles, the routing block, the README, the skills and the agent definition. The
+sentence that actually drives routing — "only what you print enters the
+conversation" — is unchanged word for word, because the probe confirms it.
+Internal identifiers (`bytesSandboxed`, `bytes_sandboxed`, `sandbox-execute`
+events) keep their names: they are columns and event types in databases already
+on disk.
+
+ADR-0006 records the posture, including why bwrap/landlock/seccomp are not being
+added — a three-OS CI matrix, a host that already gates the tool behind an
+approval prompt, and the observation that a sandbox which must allow project
+reads, temp writes and network restricts little of what matters — and why the
+execution watchdog (#23) is idle-based. The README now tells users to sandbox
+the host if they want an OS sandbox, instead of implying this already did.
+
+## 27. Splitting `src/server.ts`
+
+`tests/shared/server-source.ts`, `tests/core/tool-registration.test.ts`,
+`src/tools/shared/deps.ts`, `src/tools/search.ts`, `src/search/dedup.ts`
+
+A 6,276-line module is where every `sync-upstream` conflict lands. Splitting it
+is ordinary work; doing it without silently breaking the tests that guard it is
+not, because **40 call sites across 8 suites read `server.ts` as text** and
+assert on what they find — and a `not.toContain` over a shrinking file always
+passes.
+
+**First, the safety net (`8e01616`, deliberately a no-op).**
+`tests/shared/server-source.ts` becomes the only place that knows which files
+make up "the server"; when a region moves out, its new home joins
+`SERVER_SOURCE_FILES` and every assertion keeps meaning what it meant.
+`tests/core/tool-registration.test.ts` is the acceptance gate: the same twelve
+tools, the same names, the same registration order (MCP hosts render the list in
+that order), each with a handler and a description. It also greps the combined
+source for `registerTool` names, so a handler moved into a file the helper does
+not list fails loudly instead of vanishing. Baselines recorded for the move:
+bundle 740,908 bytes, `madge --circular` 5 cycles, none through `server.ts`.
+
+**Then the first motion (`f1252c9`).** `ctx_search` and the deduper move out:
+
+- `src/tools/shared/deps.ts` — the `ToolDeps` seam. Everything a tool module
+  needs from `server.ts` arrives as data instead of an import, because importing
+  `getStore` or `trackResponse` back would close a cycle that resolves by
+  evaluating one side half-initialised — a bug that shows up only in the bundle,
+  only at startup, only sometimes. The interface is short on purpose: it is the
+  honest record of how much state a handler touches.
+- `src/tools/search.ts` — the 331-line `ctx_search` registration, moved
+  verbatim. The one behavioural difference: the host adapter is read through a
+  getter, since detection finishes after the module is imported.
+- `src/search/dedup.ts` — `CrossQueryDeduper`, so a tool module can use it
+  without reaching back into `server.ts`. Re-exported from `server.ts`, which is
+  where its tests import it from.
+
+Registration stays in the same position, so the tool list order is unchanged.
+
+| | before | after |
+|---|---|---|
+| `src/server.ts` | 6,276 lines | 5,901 lines |
+| `server.bundle.mjs` | 740,908 B | 741,535 B (+0.08%) |
+| `madge --circular` | 5 cycles | 5 cycles, none through `server.ts` |
+| `npm test` | — | 5,038 passing |
+
+**Not finished.** The next wave — `src/tools/batch.ts`, `src/tools/fetch.ts`,
+`src/tools/shared/state.ts` — is in the working tree and not committed as this
+is written. Treat the numbers above as describing the split up to `f1252c9`, not
+its end state.
+
+## 28. Retrieval quality is a number now, and the number is gated
+
+`tests/fixtures/relevance-corpus.json`, `tests/fixtures/retrieval-baseline.json`,
+`scripts/measure-retrieval.mjs`, `scripts/lib/retrieval-metrics.mjs`,
+`tests/core/search.test.ts`
+
+The suite asserted individual rankings — "this query returns that source first"
+— which catches a named ranking flipping and nothing else. A change that trades
+five wins for four losses touches no assertion and passes.
+
+40 competing documents and 74 labelled queries now live in a fixture, and every
+query is answered twice at top-5: through the lexical path alone
+(`searchWithFallback`) and through the hybrid path the server actually runs
+(`hybridSearch` re-fusing the lexical top-5 with semantic candidates). Both
+arms come out of one throwaway store under the OS temp directory; nothing
+touches the user's knowledge base.
+
+| metric | lexical | hybrid |
+|---|---|---|
+| precision@1 | 66.2% | 87.8% |
+| recall@5 | 77.0% | 97.3% |
+| MRR@5 | 0.699 | 0.910 |
+
+**Two of the eight query classes exist to be lost by lexical search.**
+`paraphrase` states the intent in words the document never uses;
+`cross-lingual` asks in Russian about English documents. They drag the lexical
+aggregate down on purpose, and they are where the semantic path earns its round
+trip — cross-lingual precision@1 goes 7.1% → 85.7%, paraphrase 28.6% → 57.1%,
+`long-code` (the answer buried inside a multi-chunk file) 83.3% → 100%. On the
+`keyword`, `title` and `negative` classes the two arms score identically: the
+semantic layer changes nothing where lexical already wins.
+
+Lexical search finds nothing relevant at all in the top 5 for **17 of the 74
+queries** — 13 of the 14 Russian ones and 4 paraphrases. That is the honest size
+of the gap, and it is recorded rather than argued about.
+
+**The gate is lexical only.** `npm test` compares a fresh run against
+`retrieval-baseline.json` minus a tolerance of **0.03** — on all three
+aggregates, on per-class precision@1, and on the count of queries answered by
+nothing relevant. The lexical arm is deterministic (same corpus, same index
+order, same ranking, run after run), so the tolerance is not there to absorb
+noise; it is there so a deliberate tuning change that trades one ranking for
+another does not have to be accompanied by a baseline rewrite. Three points is
+roughly two of the 74 queries, and a real regression — a search layer dropping
+out, a weight inverted — moves these numbers by tens of points.
+
+The hybrid arm stays out of CI: it needs a live embedding endpoint, and a gate
+that fails when a model is unreachable is worse than no gate. The 18 individual
+cases the suite had before the corpus moved into a fixture are still asserted
+one by one, and a test asserts their count so that "fixing" a regression by
+deleting a case fails instead.
+
+The metric code has one implementation (`scripts/lib/retrieval-metrics.mjs`),
+shared by the harness that records the baseline and the test that checks it —
+two copies of "what precision@1 means" would drift, which is the failure a
+baseline gate exists to catch. Full report:
+`docs/research/retrieval-2026-08-18.md`.
+
+**The report is protected from the harness that writes it**, which is a rule
+that exists because the harness destroyed it once. The script wrote the
+research note by default, so someone running it to check a number — with no
+embedding endpoint configured — rewrote the file with eight rows of `—` where
+the hybrid measurements had been. The run that could measure them had already
+finished.
+
+Two things came out of that, and the first alone would not have been enough:
+
+- Writing is now explicit — `--report`, or `--report <path>`. Without it the
+  harness only prints, like `measure-index-skip.mjs` and
+  `measure-search-dedup.mjs` next to it. Writing by default was the deviation
+  from the neighbouring convention, and it is what turned "look at a number"
+  into "overwrite a document".
+- **A run with fewer arms will not replace a run with more** unless `--force`
+  is passed. `scripts/lib/report-guard.mjs` reads the file it is about to
+  replace — parsing the rendered metric row, not consulting the environment,
+  because whoever overwrites may be configured differently from whoever wrote,
+  which is precisely how the column was lost. The refusal names the arm that
+  would be discarded and the three ways forward, and exits non-zero with the
+  file untouched; the run's numbers are on stdout either way, so nothing is
+  lost by refusing. A run with the same arms, or more, still overwrites without
+  a flag — demanding `--force` for ordinary re-measurement would make passing
+  it a reflex, and the guard would be gone.
+
+`tests/scripts/measure-retrieval-report.test.ts` asserts the rule by running
+the real script with `--lexical-only`, which is exactly the configuration that
+caused the loss.
+
+## 29. Source files chunk at declaration boundaries
+
+`src/store.ts`, `scripts/measure-code-chunking.mjs`,
+`scripts/lib/code-chunk-boundary.mjs`, `tests/store-code-chunking.test.ts`
+
+`index()` sent every file through `#chunkMarkdown`, whatever it was. That
+function looks for `#` headings and blank-line paragraphs; a `.ts` file has
+neither, so the whole file arrived as one section and was then cut at paragraph
+boundaries until each piece fit the 4 KB cap — landing the cut wherever the byte
+budget ran out, usually mid-function. Two things pay for that: BM25, because a
+chunk's title is its first line and the title carries five times the body's
+weight, and embeddings, because half a function embeds as half a thought.
+
+Files with a source extension now go through `#chunkCode`, which cuts at
+declarations and packs consecutive small ones until a chunk reaches
+`CODE_CHUNK_MIN_BYTES` (1 024). A file the heuristic cannot read falls through
+to `#chunkPlainText`, which caps properly.
+
+Measured over 120 tracked files, corpus selected by rule rather than by hand
+(`docs/research/code-chunking-2026-08-18.md`):
+
+| | before (flat) | after (code-aware) |
+|---|---|---|
+| chunks | 485 | 1 022 |
+| **starts at a declaration** | **337 (69.5%)** | **891 (87.2%)** |
+| chunks titled `Untitled…` | 455 of 485 (93.8%) | **0** |
+| median chunk | 3 705 B | 1 299 B |
+| largest chunk | 6 522 B | 4 096 B |
+
+On TypeScript alone, 77.5% → **92.2%**.
+
+**The title column is probably the larger result, and no ratio captures it.**
+Every chunk of every source file used to be titled `Untitled (7)` — a heading
+stack over a file with no headings. Chunks are now titled
+`export function drainCodeIndexQueue(opts…`, `#insertChunks(`,
+`class TokenResolver`, against a title weight of 5.0 in `bm25()`.
+
+**The measurement argues with itself, which is why it is worth reading.** A
+second, stricter boundary test — top-level declarations only — *falls* as a
+ratio, 39.2% → 36.2%, while rising in absolute terms from 190 to 370 chunks: a
+100 KB class that used to arrive as 25 byte-capped slabs now arrives as one
+chunk per method, and every one of those is indented and invisible to the strict
+test. And the 69.5% baseline is far above the 30.5% the plan assumed — the old
+chunker cuts after blank lines, and programmers put blank lines between
+functions, so it landed on a declaration by accident a good part of the time. It
+just could not do so on purpose, which is the same reason it produced the
+6 522 B chunk and the 455 `Untitled` titles.
+
+**Cost: 2.1× the FTS5 rows and 2.1× the vectors** for the same bytes of content.
+`CODE_CHUNK_MIN_BYTES` is the dial — 512 gives 89.2% at 824 B median, 2 048
+gives 84.0% at 2 223 B. Every setting clears the 80% target, so the choice is
+about chunk size, not about the metric; 1 024 B is roughly one documented
+function.
+
+`CONTEXT_MODE_CODE_CHUNKING=0` restores the old behaviour **byte for byte**, and
+that was verified rather than assumed: `src/store.ts` from `HEAD` was compiled
+into a scratch tree, run over the same 120 files, and the SHA-256 of the full
+chunk dump (485 chunks; file, title, content, content type) matches the new
+build's output with the flag set — `cb2d7dc7c78d237a…` both ways.
+
+The P2.1 harness (#28) reports **0.662 / 0.770 / 0.699 with the change on, with
+it off, and at the baseline** — identical to three decimal places, per class as
+well as in aggregate. Expected, and worth stating: the relevance corpus is
+indexed from strings with no file path, and the extension gate never opens for
+content without one.
+
+Not measured: the plan named `.py` and `.php`, and this repository contains
+neither. Those are covered by `tests/store-code-chunking.test.ts` on
+representative sources, which is weaker evidence than a real corpus and is not
+counted in the numbers above.
+
+## 30. `context-mode inventory` — what is recorded about this project
+
+`src/cli.ts`
+
+The knowledge base could not answer the first question anyone asks of it: what
+is in there about me? `ctx_stats` reports savings, `ctx_search` needs a query,
+and neither lists what is stored.
+
+```
+$ context-mode inventory
+project: /home/osddqd/projects/context-mode
+db: /home/osddqd/.claude/context-mode/content/c2c6ef653d394742.db
+size: 45.4 MB (+ 3.9 MB WAL)
+last indexed: 2026-08-17 23:45:23
+
+sources: 319, chunks: 2027
+
+by type:
+  code          265 sources     1471 chunks
+  batch          52 sources      539 chunks
+  smoke-spa       1 sources       11 chunks
+
+largest sources (top 10):
+  83 chunks  code:docs/plan-progress.md
+  83 chunks  code:tests/core/server.test.ts
+  72 chunks  code:src/server.ts
+```
+
+`--project <path>` switches project, `--top <n>` sizes the largest-sources list,
+`--json` emits the same model as JSON. Read-only: no `index`, no `deleteSource`,
+no `compact`, no budget eviction — a test asserts the command body contains none
+of them. The one side effect it cannot avoid is `ContentStore`'s constructor
+creating the database file for a project that never had one; there is no
+read-only store API to open instead.
+
+Grouping is by the prefix of the source label (`code:`, `batch:`, `execute:`,
+`fetch:`), and only when that prefix reads like a kind — lowercase letters,
+digits and dashes. Otherwise the source counts as `other`. That rule is what
+stops a Windows path indexed under its own name (`C:\src\app.ts`) from inventing
+a type called `C`, and stops free-form user labels from each becoming a type of
+their own. Totals come from the store's own `getIndexState()` rather than from
+re-summing `listSources()`: if the two ever disagree, that is a fact about the
+store and the report should show the store's answer.
+
+## 31. Credentials are screened on the way into the index
+
+`src/session/redact.ts`, `src/store.ts`, `src/types.ts`
+
+The index is a durable, searchable copy of whatever passed through a tool. A
+`.env` pasted into a batch command, an `aws configure` transcript, a PEM cat'ed
+by mistake — all of it lands in SQLite and stays there, answering searches, long
+after the terminal scrollback is gone. `isSensitivePath()` (#5) already keeps
+whole files out by name; this keeps credentials out of the files nobody would
+think to exclude.
+
+`redactSecrets()` is line-oriented and pure — no env reads, no I/O, no store
+dependency — and replaces what it finds with `[redacted:<type>]`. Rules: `sk-`,
+`gh[pousr]_`, `A[KS]IA`+16, `xox[baprs]-`, and assignments whose key matches the
+same `SENSITIVE_NAME_HINT` that `isSensitivePath` uses. A PEM header on a line
+of its own opens a block that collapses, header through footer, into one marker
+— redacting only the header would leave the secret, which is the body.
+
+**The interesting half is what it refuses to touch.** A false positive here
+silently corrupts indexed source code, and nobody finds out until a search
+returns `[redacted:…]` where a function used to be. The first version of the
+assignment rule produced **nine false positives across this repository's 136
+source files** — every one an ordinary expression assigned to a name containing
+"token": `const input_tokens = toNum(u.input_tokens)`, `tokens: Math.round(…)`,
+`const tokens = tokenizeCommand(cmd)`. The rule was tightened against those
+until the value has to look like a literal rather than like code: one unbroken
+opaque run, no bare numbers, no paths or URLs, and — when unquoted — a digit
+among the letters and an assignment that starts the line. It now scores **zero
+redactions over those 136 files and over the 25 captured fixtures** (logs, JSON
+payloads, diffs, transcripts, Playwright snapshots), and both sweeps are tests,
+so a future loosening fails with the file and the rule named.
+
+Also left alone, each with a test: base64 inline assets, minified bundles,
+UUIDs, git object ids, `sha512-…` integrity hashes, long paths, `sk-` inside
+`task-manager`, and the word `Bearer` in documentation.
+
+**Cost: 13.4 ms/MB** on the default path (22.7 with the entropy layer on, and an
+early return when screening is disabled) — 0.035 ms for a 4 KB payload, 0.70 ms
+for 64 KB. Against a cold index of ~5.3 ms/file (#24), that is a few percent.
+Cheap because every rule is gated behind an `indexOf` for its literal marker, so
+the regexes almost never run.
+
+Screening happens in one place, called by `index()`, `indexPlainText()` and
+`indexJSON()` exactly once each, and always **before the content hash**. That
+ordering is what keeps the P1.2 cache honest: the stored hash describes the
+bytes that were actually stored, so flipping `CONTEXT_MODE_INDEX_REDACT`
+invalidates the row and re-indexes the source instead of leaving a stale hash
+pointing at differently-screened content. `IndexResult.redactions` reports the
+count, and only when there was one.
+
+**The entropy layer is off by default and stays that way.**
+`CONTEXT_MODE_INDEX_ENTROPY_REDACT=1` turns on a Shannon-entropy heuristic over
+long opaque runs. It is a heuristic, and the documentation says so rather than
+implying otherwise: on real code it fires on base64-inlined assets and minified
+bundles — content that is not secret and that the index exists to make
+searchable — and a credential with no recognisable marker passes both layers
+regardless. This reduces accidental capture. It is not a control to rely on when
+handling credentials.
+
+## 32. `ctx_purge` can delete one source instead of everything
+
+`src/server.ts`, `src/store.ts`
+
+`ctx_purge` had two settings: one session, or the whole project. Between them
+sits the case that actually comes up — one source went in wrong. A stale doc
+site, a 40 MB log capture, a file indexed from the wrong branch. The only
+remedy on offer was to delete the entire knowledge base and re-earn it, so the
+realistic outcome was that nobody purged anything and the bad source kept
+answering searches.
+
+```
+ctx_purge(confirm: true, source: "react-docs")
+  → Purged source "react-docs": N section(s) removed.
+```
+
+The source branch returns before the file-level wipe the other scopes run:
+nothing is closed, no file is unlinked, the stats file is not reset, and every
+other source, session row and counter survives untouched.
+
+**The label must match exactly, and a miss is refused rather than guessed.**
+This is the part worth stating, because the temptation runs the other way:
+`ctx_search`'s `source` filter matches partial labels, so a caller who learned
+a label there will reasonably pass a substring here. A cheerful "purged" would
+then read as "it is gone" while the source is still indexed and still
+answering. So a label that matches nothing is an error, and the error names the
+indexed labels that contain it — up to ten, then `+N more` — or, when none are
+close, says how many sources exist and points at `ctx_stats`.
+
+**Combining `source` with anything wider is refused as ambiguous.** `source`
+implies `scope: "source"`; pairing it with a `sessionId` or with
+`scope: "project"` asks for two different deletions at once, and choosing one
+of them on the caller's behalf is exactly how a whole-project wipe happens by
+accident. `scope: "source"` without a label is refused too.
+
+**A partial delete reports itself as one.** `sources.label` carries no UNIQUE
+constraint, so one label can own several rows — a legacy import, an interrupted
+re-index. The handler loops until the label is gone and, if it could not finish,
+answers `Partially purged source "…": N of M row(s) removed` as an error with
+what to do next. Removing one row of three and calling it done is the same
+silent success as removing none.
+
 ## Merged ahead of upstream: the fetch extraction ladder
 
 `src/fetch/blocks.ts`, `src/fetch/extract.ts`, `src/fetch/page-store.ts`, `src/server.ts`
@@ -774,11 +1274,36 @@ memory and the code index.
 | `CONTEXT_MODE_STATS_FILE_RETENTION_DAYS` | `14` | Age at which `stats-*.json` files are rolled up |
 | `CONTEXT_MODE_STATS_COST` | on | `0` drops the dollar section of `ctx_stats` |
 | `CONTEXT_MODE_STATS_TEAM_EXTRAPOLATION` | off | `1` adds the 10-developer projection |
+| `CONTEXT_MODE_EXEC_IDLE_TIMEOUT_MS` | `0` (off) | Silence budget for a foreground run; every byte of output resets it |
+| `CONTEXT_MODE_EXEC_WALL_TIMEOUT_MS` | `0` (off) | Absolute cap on a foreground run, for callers who want one |
+| `CONTEXT_MODE_EXEC_KILL_GRACE_MS` | `2000` | SIGTERM → SIGKILL delay, so a killed process can flush and unlock |
+| `CONTEXT_MODE_EXEC_MAX_OUTPUT_BYTES` | `33554432` (32 MB) | Hard output cap per run; was 100 MB |
+| `CONTEXT_MODE_EXEC_ENV_MODE` | denylist | `allowlist` passes only named variables to the subprocess |
+| `CONTEXT_MODE_INDEX_HASH_SKIP` | on | `0` re-indexes a source even when its bytes are unchanged |
+| `CONTEXT_MODE_INDEX_HASH_SKIP_REATTRIBUTE` | off | `1` rewrites a skipped source so its chunks carry the current session id |
+| `CONTEXT_MODE_CODE_CHUNKING` | on | `0` chunks source files as markdown again, byte for byte — see `docs/research/code-chunking-2026-08-18.md` |
+| `CONTEXT_MODE_SEARCH_COMPLETENESS` | on | `0` drops the per-query "showing N of M" line |
+| `CONTEXT_MODE_SEARCH_ESCALATION` | on | `0` drops the per-response escalation block |
+| `CONTEXT_MODE_SEARCH_EXACT_TOTALS` | off | `1` re-fuses at a wider fetch for an exact total instead of `N+`, capped at 500 |
+| `CONTEXT_MODE_INDEX_REDACT` | on | `0` disables credential screening of indexed text |
+| `CONTEXT_MODE_INDEX_ENTROPY_REDACT` | off | `1` adds the entropy heuristic to that screening |
+
+The last two switches are read by `src/session/redact.ts` and applied by
+`ContentStore` on every path that writes to the index — `index`,
+`indexPlainText`, `indexJSON` — ahead of the content hash, so flipping one
+re-indexes affected sources instead of leaving the cached hash describing bytes
+that are no longer what would be stored. Both are resolved when the store is
+constructed, so a change takes effect on the next store, not mid-process. The
+entropy layer is off for a reason worth repeating outside the source:
+it is a heuristic, not a guarantee. On real code it fires on base64-inlined
+assets and minified bundles, and a credential with no recognisable marker passes
+both layers regardless. It reduces accidental capture; it is not a control to
+rely on when handling credentials.
 
 ## Tests
 
-`npm test` — 4910 passing, 38 skipped (4853 of them this fork's, the rest
-upstream's three new fetch suites). New suites:
+`npm test` — 5,163 passing and 38 skipped across 242 suites, recorded at
+`b005dcb`, the last commit of the P2 series that changes behaviour. New suites:
 
 - `tests/cli/fork-info.test.ts` — upgrade-source resolution, fork identity
 - `tests/core/store-delete-source.test.ts` — source eviction
@@ -802,6 +1327,16 @@ upstream's three new fetch suites). New suites:
 - `tests/core/semantic-visibility.test.ts` — the three coverage states, hint latch
 - `tests/core/content-budget.test.ts` — usage accounting, eviction guards, compaction
 - `tests/session/stats-scope-containment.test.ts` — ADR-0005 scope labels and nesting
+- `tests/executor/idle-timeout.test.ts` — the silence watchdog, its arming rules, `killedBy`
+- `tests/executor/env-allowlist.test.ts` — `CONTEXT_MODE_EXEC_ENV_MODE=allowlist`
+- `tests/store-hash-skip.test.ts` — the unchanged-content skip and the re-attribution switch
+- `tests/search/completeness.test.ts` — the completeness line, the escalation block, both switches
+- `tests/core/tool-registration.test.ts` — twelve tools, their names and order; the acceptance gate for the `server.ts` split
+- `tests/session/redact.test.ts` — credential screening, and the real-corpus false-positive guards
+- `tests/store-redaction-wiring.test.ts` — no credential reaches the database, on every index path
+- `tests/store-code-chunking.test.ts` — declaration boundaries, packing, the byte-for-byte opt-out
+- `tests/cli/inventory.test.ts` — label grouping, ordering, empty store, and that the command stays read-only
+- `tests/core/search.test.ts` — also carries the retrieval gate: the 18 named cases plus the aggregate against `retrieval-baseline.json`
 
 ## Installing this fork in Claude Code
 
