@@ -18,12 +18,26 @@
 
 import { describe, test, beforeEach, afterEach, expect, vi } from "vitest";
 import { mkdtempSync, rmSync, writeFileSync, mkdirSync } from "node:fs";
-import { join, dirname } from "node:path";
+import { join, dirname, resolve } from "node:path";
 import { tmpdir } from "node:os";
 import { execSync } from "node:child_process";
 
 import { SessionDB } from "../../src/session/db.js";
-import { attributeAndInsertEvents } from "../../hooks/session-loaders.mjs";
+import { attributeAndInsertEvents, createSessionLoaders } from "../../hooks/session-loaders.mjs";
+
+/**
+ * Resolve the attribution helper the way the hooks resolve it: through
+ * `createSessionLoaders`, which loads `hooks/session-attribution.bundle.mjs`
+ * and only falls back to `build/` when the bundle is absent. Importing
+ * `src/session/project-attribution.ts` directly — as this suite used to —
+ * tests a file no hook ever loads, which is exactly how the bundle drifted
+ * four months behind its source without a single red test.
+ */
+async function loadResolver() {
+  const { loadProjectAttribution } = createSessionLoaders(resolve(__dirname, "../../hooks"));
+  const { resolveProjectAttributions } = await loadProjectAttribution();
+  return resolveProjectAttributions;
+}
 
 function platformConfigFile(fakeHome: string): string {
   if (process.platform === "win32") {
@@ -111,10 +125,9 @@ describe("cross-project attribution — Bug 7 repro", () => {
       { type: "file_edit", category: "file", data: join(projB, "src/foo.ts"), priority: 2 },
     ];
 
-    // Real attribution resolver — comes from src/session/project-attribution.ts
-    // via createSessionLoaders.loadProjectAttribution(). We import directly
-    // here to exercise the production path.
-    const { resolveProjectAttributions } = await import("../../src/session/project-attribution.js");
+    // Real attribution resolver — the built bundle, resolved exactly as the
+    // hooks resolve it. See loadResolver() above.
+    const resolveProjectAttributions = await loadResolver();
 
     attributeAndInsertEvents(
       db,
@@ -154,7 +167,7 @@ describe("cross-project attribution — Bug 7 repro", () => {
       { type: "file_edit", category: "file", data: join(projA, "src/b.ts"), priority: 2 },
       { type: "file_edit", category: "file", data: join(projB, "src/c.ts"), priority: 2 },
     ];
-    const { resolveProjectAttributions } = await import("../../src/session/project-attribution.js");
+    const resolveProjectAttributions = await loadResolver();
 
     attributeAndInsertEvents(
       db, sid, events,
@@ -190,7 +203,7 @@ describe("cross-project attribution — Bug 7 repro", () => {
     // eslint-disable-next-line no-console
     console.log(`[Bug 8 extract output] ${JSON.stringify(events)}`);
 
-    const { resolveProjectAttributions } = await import("../../src/session/project-attribution.js");
+    const resolveProjectAttributions = await loadResolver();
 
     attributeAndInsertEvents(
       db, sid, events,
@@ -219,7 +232,7 @@ describe("cross-project attribution — Bug 7 repro", () => {
     const events = [
       { type: "cwd", category: "cwd", data: projB, priority: 2 },
     ];
-    const { resolveProjectAttributions } = await import("../../src/session/project-attribution.js");
+    const resolveProjectAttributions = await loadResolver();
 
     attributeAndInsertEvents(
       db, sid, events,
@@ -250,7 +263,7 @@ describe("cross-project attribution — Bug 7 repro", () => {
       // No git op match, no cwd event — just generic shell activity
       { type: "data", category: "data", data: "free disk space", priority: 3 },
     ];
-    const { resolveProjectAttributions } = await import("../../src/session/project-attribution.js");
+    const resolveProjectAttributions = await loadResolver();
 
     attributeAndInsertEvents(
       db, sid, events,
