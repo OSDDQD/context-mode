@@ -203,6 +203,7 @@ function printHelp(): void {
     "  context-mode index <path>            Index a file or directory into the FTS5 knowledge base",
     "  context-mode search <query...>       Search the current project's FTS5 knowledge base",
     "  context-mode drain [--project path]  Index the pending code-index and subagent-capture queues now",
+    "  context-mode inventory               Show what is indexed for this project (read-only)",
     "  context-mode doctor                  Diagnose runtime issues, hooks, FTS5, version",
     "  context-mode upgrade                 Fix hooks, permissions, and settings",
     "  context-mode hook <platform> <event> Dispatch a configured hook script",
@@ -225,6 +226,11 @@ function printHelp(): void {
     "  --limit <n>                          Results to show (default: 3)",
     "  --type <code|prose>                  Filter by content type",
     "",
+    "Inventory options:",
+    "  --project <path>                     Project identity for the content DB (default: cwd)",
+    "  --top <n>                            Largest sources to list (default: 10)",
+    "  --json                               Machine-readable output",
+    "",
     "Environment:",
     "  CONTEXT_MODE_DIR=/absolute/path      Override sessions/content storage root; empty is ignored, non-empty must be absolute",
   ].join("\n"));
@@ -238,6 +244,8 @@ if (args[0] === "--help" || args[0] === "-h" || args[0] === "help") {
   searchCommand(args.slice(1)).then((code) => process.exit(code));
 } else if (args[0] === "drain") {
   drainCommand(args.slice(1)).then((code) => process.exit(code));
+} else if (args[0] === "inventory") {
+  inventoryCommand(args.slice(1)).then((code) => process.exit(code));
 } else if (args[0] === "doctor") {
   doctor().then((code) => process.exit(code));
 } else if (args[0] === "upgrade") {
@@ -756,6 +764,168 @@ async function searchCommand(argv: string[]): Promise<number> {
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     console.error(`context-mode search: ${message}`);
+    return 1;
+  }
+}
+
+/* -------------------------------------------------------
+ * inventory — what is recorded about this project
+ * ------------------------------------------------------- */
+
+export interface InventoryTypeGroup {
+  /** Source-label prefix, or "other" for labels without one. */
+  type: string;
+  sources: number;
+  chunks: number;
+}
+
+export interface Inventory {
+  project: string;
+  db: { path: string; bytes: number; walBytes: number };
+  sources: number;
+  chunks: number;
+  /** ISO timestamp of the newest indexed source, absent on an empty store. */
+  lastIndexedAt?: string;
+  byType: InventoryTypeGroup[];
+  largest: Array<{ label: string; chunks: number }>;
+}
+
+/**
+ * Group key for a source label.
+ *
+ * Labels are written as `<kind>:<detail>` — `code:/abs/path`, `batch:git log`,
+ * `execute:shell`, `fetch:https://…`. The prefix is only taken when it looks
+ * like a kind: lowercase letters, digits and dashes. That rules out a Windows
+ * path indexed under its own name (`C:\src\app.ts` is one source of kind
+ * "other", not 253 sources of kind "C"), and leaves free-form user labels
+ * grouped together instead of each inventing a type of its own.
+ */
+export function inventoryType(label: string): string {
+  const colon = label.indexOf(":");
+  if (colon <= 0) return "other";
+  const prefix = label.slice(0, colon);
+  return /^[a-z][a-z0-9-]*$/.test(prefix) ? prefix : "other";
+}
+
+/**
+ * Fold the store's own accounting into the shape both renderers print.
+ *
+ * Pure on purpose: everything that talks to SQLite happens in the caller, so
+ * the grouping and ordering rules can be tested without a database.
+ */
+export function buildInventory(input: {
+  project: string;
+  dbPath: string;
+  dbBytes: number;
+  walBytes: number;
+  sources: Array<{ label: string; chunkCount: number }>;
+  indexState: { totalChunks: number; totalSources: number; lastIndexedAt?: string };
+  top: number;
+}): Inventory {
+  const groups = new Map<string, InventoryTypeGroup>();
+  for (const s of input.sources) {
+    const type = inventoryType(s.label);
+    const g = groups.get(type) ?? { type, sources: 0, chunks: 0 };
+    g.sources++;
+    g.chunks += s.chunkCount;
+    groups.set(type, g);
+  }
+
+  return {
+    project: input.project,
+    db: { path: input.dbPath, bytes: input.dbBytes, walBytes: input.walBytes },
+    // From getIndexState() rather than from summing listSources(): it is the
+    // store's own answer, and the two disagreeing is itself worth seeing.
+    sources: input.indexState.totalSources,
+    chunks: input.indexState.totalChunks,
+    lastIndexedAt: input.indexState.lastIndexedAt,
+    byType: [...groups.values()].sort((a, b) => b.chunks - a.chunks || a.type.localeCompare(b.type)),
+    largest: [...input.sources]
+      .sort((a, b) => b.chunkCount - a.chunkCount || a.label.localeCompare(b.label))
+      .slice(0, input.top)
+      .map((s) => ({ label: s.label, chunks: s.chunkCount })),
+  };
+}
+
+/** Human-readable rendering of an inventory. */
+export function renderInventory(inv: Inventory): string {
+  const lines = [
+    `project: ${inv.project}`,
+    `db: ${inv.db.path}`,
+    `size: ${mb(inv.db.bytes)}${inv.db.walBytes > 0 ? ` (+ ${mb(inv.db.walBytes)} WAL)` : ""}`,
+    `last indexed: ${inv.lastIndexedAt ?? "never"}`,
+    "",
+    `sources: ${inv.sources}, chunks: ${inv.chunks}`,
+  ];
+
+  if (inv.sources === 0) {
+    lines.push("", "Nothing is indexed for this project yet.");
+    return lines.join("\n");
+  }
+
+  const pad = (n: number, w: number) => String(n).padStart(w);
+  const typeWidth = Math.max(4, ...inv.byType.map((g) => g.type.length));
+  lines.push("", "by type:");
+  for (const g of inv.byType) {
+    lines.push(`  ${g.type.padEnd(typeWidth)}  ${pad(g.sources, 6)} sources  ${pad(g.chunks, 7)} chunks`);
+  }
+
+  lines.push("", `largest sources (top ${inv.largest.length}):`);
+  const chunkWidth = Math.max(...inv.largest.map((s) => String(s.chunks).length));
+  for (const s of inv.largest) {
+    lines.push(`  ${pad(s.chunks, chunkWidth)} chunks  ${s.label}`);
+  }
+  return lines.join("\n");
+}
+
+/**
+ * Answer "what is recorded about me?" — the question the knowledge base could
+ * not answer before. Read-only: it opens the store, reads its own accounting,
+ * and never writes, deletes or compacts.
+ */
+async function inventoryCommand(argv: string[]): Promise<number> {
+  try {
+    const parsed = parseFlags(argv);
+    // `--help` arrives as a flag and `-h` as a positional — parseFlags only
+    // treats `--`-prefixed tokens as flags. inventory takes no positional
+    // argument, so both spellings have to be looked for in both places.
+    if (boolFlag(parsed.flags, "help") || parsed.positional.includes("-h")) {
+      console.log("Usage: context-mode inventory [--project path] [--top n] [--json]");
+      return 0;
+    }
+
+    const projectDir = resolveCliProjectDir(stringFlag(parsed.flags, "project"), process.cwd());
+    const { store, dbPath, contentDir } = await openCliContentStore(projectDir);
+    try {
+      // The `.db` file is what getDBSizeBytes() measures; the WAL can hold a
+      // sixth of the footprint and is reported beside it rather than hidden.
+      let walBytes = 0;
+      try {
+        walBytes = contentStoreUsage(contentDir).stores.find((s) => s.dbPath === dbPath)?.walBytes ?? 0;
+      } catch { /* accounting is a nicety — never fail the report over it */ }
+
+      const inventory = buildInventory({
+        project: projectDir,
+        dbPath,
+        dbBytes: store.getDBSizeBytes(),
+        walBytes,
+        sources: store.listSources(),
+        indexState: store.getIndexState(),
+        top: numberFlag(parsed.flags, "top") ?? 10,
+      });
+
+      console.log(
+        boolFlag(parsed.flags, "json")
+          ? JSON.stringify(inventory, null, 2)
+          : renderInventory(inventory),
+      );
+      return 0;
+    } finally {
+      store.close();
+    }
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    console.error(`context-mode inventory: ${message}`);
     return 1;
   }
 }
