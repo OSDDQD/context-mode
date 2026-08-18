@@ -14,7 +14,7 @@ import type { PreparedStatement } from "./db-base.js";
 import { readFileSync, readdirSync, unlinkSync, existsSync, statSync, openSync, fstatSync, closeSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { extname, join } from "node:path";
 import { walkDirectoryDetailed, type WalkOptions } from "./store-directory.js";
 import type { SearchCompleteness } from "./search/completeness.js";
 export type { SearchCompleteness } from "./search/completeness.js";
@@ -170,6 +170,101 @@ const CHUNK_TITLE_MAX_CHARS = 80;
 // boundary for readability — but only if that boundary is past this fraction of
 // the slice, otherwise we'd waste too much of the byte budget.
 const WHITESPACE_BREAK_RATIO = 0.5;
+
+// ─────────────────────────────────────────────────────────
+// Code-aware chunking
+// ─────────────────────────────────────────────────────────
+
+// Source files used to go through #chunkMarkdown, which knows about `#`
+// headings and blank-line paragraphs and nothing else. On a .ts file the cut
+// therefore landed wherever the byte cap happened to fall — usually the middle
+// of a function. Two things paid for it: BM25, because a chunk's title is its
+// first line, and embeddings, because half a function embeds as half a thought.
+//
+// What follows is a line-level heuristic, not a parser. tree-sitter and
+// @babel/parser would both answer this better and both cost more than the
+// answer is worth here: one ships native binaries, the other megabytes of
+// bundle, against a dependency list deliberately kept at eight packages.
+// Anything the heuristic fails to recognise falls back to the previous
+// behaviour, and #splitOversizedPlainChunk stays the last stage regardless, so
+// the byte cap holds whatever the heuristic decides.
+
+/**
+ * Extensions whose files are source code with line-anchored declarations.
+ *
+ * A deliberate subset of INDEXABLE_EXTENSIONS (src/session/code-index.ts):
+ * prose (.md, .mdx, .rst, .txt), data (.json, .yaml, .yml, .toml, .ini,
+ * .conf) and stylesheets are left out. "Declaration at this indent" means
+ * nothing in a YAML file, and .md is the format #chunkMarkdown exists for.
+ */
+const CODE_CHUNK_EXTENSIONS = new Set([
+  ".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs", ".py", ".rb", ".go", ".rs",
+  ".java", ".kt", ".swift", ".c", ".h", ".cc", ".cpp", ".hpp", ".cs", ".php",
+  ".ex", ".exs", ".erl", ".scala", ".sh", ".bash", ".zsh", ".fish", ".sql",
+  ".graphql", ".proto", ".vue", ".svelte", ".tf", ".gradle", ".r", ".pl",
+]);
+
+/**
+ * Keywords that open a declaration. Nothing here is language-specific enough
+ * to be wrong elsewhere: a line starting with `class` is a class in every
+ * language that has the word.
+ *
+ * `const`/`let`/`var`/`import` are pointedly absent. They open a declaration
+ * at the top level, but at any depth they open a statement, and a chunk that
+ * begins `const rows = query(...)` is exactly the mid-function cut this exists
+ * to stop. Leaving them out costs nothing: a run of module-level constants
+ * attaches to the block above it and travels with it.
+ */
+const CODE_DECL_KEYWORD =
+  /^(?:export|package|module|namespace|declare|use|function|func|fn|def|defp|defmodule|defmacro|class|struct|enum|interface|trait|impl|type|typedef|record|object|protocol|extension|actor|public|private|protected|internal|abstract|final|static|override|open|async|sub|proc|constructor|get|set|readonly|operator|resource|provider|variable|val)\b/;
+
+/**
+ * Comment, docstring and decorator lines. These carry no declaration of their
+ * own but introduce the one below them, which is why they move with it.
+ *
+ * `#` is a comment only when nothing word-like follows: `# note` is a comment,
+ * `#insertChunks(` is a TypeScript private method, and both occur in this
+ * repository. A Python comment written without the space (`#note`) reads as a
+ * declaration under that rule — a miss the fallback absorbs.
+ */
+const CODE_DOC_LINE =
+  /^(?:\/\/|\/\*|\*\/|\*(?![\w(])|#!|#\[|#(?![\w[])|--(?=[\s-]|$)|"""|'''|@[A-Za-z_]|%(?=[\s%])|=begin|=end)/;
+
+/**
+ * An identifier followed by `(` or `<` — a method signature. Excluded: lines
+ * ending in `;` (a call statement) and control-flow heads, which is what keeps
+ * `if (ready) {` and `doThing(x);` from passing as declarations while
+ * `#insertChunks(` and `test("name", () => {` do.
+ */
+const CODE_SIGNATURE = /^[#*]?[A-Za-z_$][\w$]*\s*[(<]/;
+const CODE_CONTROL =
+  /^(?:if|for|while|switch|catch|return|else|elif|do|try|with|match|case|when|until|unless|foreach|await|throw|yield)\b/;
+
+/** Closing brackets and block terminators — structure, not content. */
+const CODE_CLOSER = /^(?:[}\])]|\*\/|end\b|fi\b|done\b|esac\b)/;
+
+// A class body splits into methods, a method body does not usefully split into
+// statements. Two levels of descent past the file's own top level is where the
+// returns stop; below that, the byte splitter is the honest answer.
+const CODE_CHUNK_MAX_DEPTH = 2;
+
+// Consecutive declarations are packed together until the chunk reaches this
+// size, then the next declaration starts a fresh one. Packing all the way to
+// MAX_CHUNK_BYTES would title a 4 KB chunk after whichever of its six
+// functions came first; not packing at all would file a one-line `export type`
+// as its own document and let BM25 length normalisation reward it for being
+// short. A kilobyte is roughly one documented function, and on this
+// repository it lands the median chunk at ~1.4 KB — see
+// docs/research/code-chunking-2026-08-18.md for the sweep.
+const CODE_CHUNK_MIN_BYTES = 1024;
+
+// Line grouping for plain-text output — command captures, logs, and any source
+// file the code heuristic could not read.
+const PLAIN_TEXT_LINES_PER_CHUNK = 20;
+
+// How far into a chunk to look for the declaration line that names it. A doc
+// comment longer than this is its own subject and titles the chunk itself.
+const CODE_TITLE_SCAN_LINES = 30;
 
 // ─────────────────────────────────────────────────────────
 // ContentStore
@@ -1079,7 +1174,7 @@ export class ContentStore {
     const unchanged = this.#skipUnchanged(label, filePath, contentHash);
     if (unchanged) return unchanged;
 
-    const chunks = this.#chunkMarkdown(text);
+    const chunks = this.#chunkFile(text, filePath, MAX_CHUNK_BYTES);
     return withRetry(() => this.#insertChunks(chunks, label, text, filePath, contentHash, attribution));
   }
 
@@ -1215,7 +1310,7 @@ export class ContentStore {
   indexPlainText(
     content: string,
     source: string,
-    linesPerChunk: number = 20,
+    linesPerChunk: number = PLAIN_TEXT_LINES_PER_CHUNK,
     attribution?: { sessionId?: string; eventId?: string },
     maxChunkBytes: number = MAX_CHUNK_BYTES,
   ): IndexResult {
@@ -2160,6 +2255,250 @@ export class ContentStore {
     flush();
 
     return chunks;
+  }
+
+  // ── Code-aware chunking ──
+
+  /**
+   * Pick a chunker for one indexed file.
+   *
+   * Markdown chunking is the default and stays the default for everything that
+   * is not a source file. A source file gets #chunkCode; if the heuristic finds
+   * no structure in it — a minified bundle, generated output, a language it
+   * does not know — it falls through to #chunkPlainText rather than back to
+   * markdown. Markdown's paragraph split leaves one hole in the byte cap (a
+   * single paragraph larger than the cap is emitted whole), a minified bundle
+   * is exactly one such paragraph, and there were never any headings to find.
+   */
+  #chunkFile(text: string, filePath: string | undefined, maxChunkBytes: number): Chunk[] {
+    if (!this.#codeChunkingApplies(filePath)) return this.#chunkMarkdown(text, maxChunkBytes);
+
+    const structured = this.#chunkCode(text, maxChunkBytes);
+    if (structured) return structured;
+
+    return this.#chunkPlainText(text, PLAIN_TEXT_LINES_PER_CHUNK, maxChunkBytes)
+      .map((c) => ({ ...c, hasCode: true }));
+  }
+
+  /**
+   * @returns true when this file is source code the chunker should read as
+   *          such. CONTEXT_MODE_CODE_CHUNKING=0 answers false for everything,
+   *          which puts every caller back on the markdown path it used before.
+   */
+  #codeChunkingApplies(filePath: string | undefined): boolean {
+    if (process.env.CONTEXT_MODE_CODE_CHUNKING === "0") return false;
+    if (!filePath) return false;
+    return CODE_CHUNK_EXTENSIONS.has(extname(filePath).toLowerCase());
+  }
+
+  /**
+   * Chunk a source file so that every chunk starts where a declaration starts.
+   *
+   * The file is cut at lines that open a declaration at column zero, with the
+   * doc comment or decorator run directly above a declaration moving down to
+   * join it. Consecutive declarations are then packed together until the chunk
+   * reaches CODE_CHUNK_MIN_BYTES, so a file of one-line exports does not become
+   * a file of one-line chunks. A declaration too large to fit on its own — a
+   * class, typically — is re-cut at its members' indent, and whatever is still
+   * oversized after that goes through #splitOversizedPlainChunk, which remains
+   * the last stage and the only one that decides how many bytes a chunk holds.
+   *
+   * @returns Chunks, or null when the file holds no structure the heuristic
+   *          can see — #chunkFile then falls through to #chunkPlainText.
+   */
+  #chunkCode(text: string, maxChunkBytes: number): Chunk[] | null {
+    if (text.trim().length === 0) return null;
+
+    const blocks = this.#codeBlocks(text.split("\n"), 0);
+    if (!blocks) return null;
+
+    const parts = this.#packCodeBlocks(blocks, maxChunkBytes, 0);
+    if (parts.length === 0) return null;
+    return parts.map((p) => ({ ...p, hasCode: true }));
+  }
+
+  /**
+   * Cut `lines` at every declaration sitting at exactly `indent`, carrying the
+   * comment run above each declaration into the block it introduces.
+   *
+   * @returns One string[] per block, or null when the lines hold no structure
+   *          the heuristic can see (a minified bundle, a data blob, a language
+   *          it does not know) and the caller should fall back.
+   */
+  #codeBlocks(lines: string[], indent: number): string[][] | null {
+    const blocks: string[][] = [];
+    let current: string[] = [];
+    let boundaries = 0;
+
+    for (const line of lines) {
+      if (current.length > 0 && this.#isCodeBoundary(line, indent)) {
+        // Walk back over the doc comment / decorators directly above: they
+        // describe what starts here, so they belong to the block starting
+        // here. Blank lines are skipped on the way — a section banner with a
+        // blank line under it still introduces what follows the blank line —
+        // but left behind, since they separate nothing once the block moves.
+        let end = current.length;
+        while (end > 0 && current[end - 1].trim().length === 0) end--;
+        let start = end;
+        while (start > 0 && CODE_DOC_LINE.test(current[start - 1].trim())) start--;
+        const carried = start < end ? current.splice(start, end - start) : [];
+        if (current.some((l) => l.trim().length > 0)) blocks.push(current);
+        current = carried;
+        boundaries++;
+      }
+      current.push(line);
+    }
+    if (current.some((l) => l.trim().length > 0)) blocks.push(current);
+
+    if (boundaries === 0 || blocks.length < 2) return null;
+    return blocks;
+  }
+
+  /** @returns true when `line` opens a declaration at exactly `indent`. */
+  #isCodeBoundary(line: string, indent: number): boolean {
+    if (this.#codeIndentWidth(line) !== indent) return false;
+    const trimmed = line.trim();
+    if (trimmed.length === 0) return false;
+    if (CODE_DECL_KEYWORD.test(trimmed)) return true;
+    // A comment run opens a block because the declaration it introduces is
+    // about to; a run that introduces nothing simply merges with its neighbour.
+    if (CODE_DOC_LINE.test(trimmed)) return true;
+    if (CODE_CONTROL.test(trimmed)) return false;
+    return CODE_SIGNATURE.test(trimmed) && !trimmed.endsWith(";");
+  }
+
+  /** Leading whitespace width, tabs counted as four columns. */
+  #codeIndentWidth(line: string): number {
+    const lead = /^[ \t]*/.exec(line)?.[0] ?? "";
+    return lead.includes("\t") ? lead.replace(/\t/g, "    ").length : lead.length;
+  }
+
+  /** Drop blank lines from both ends; they belong to no block in particular. */
+  #trimBlankEdges(lines: string[]): string[] {
+    let start = 0;
+    let end = lines.length;
+    while (start < end && lines[start].trim().length === 0) start++;
+    while (end > start && lines[end - 1].trim().length === 0) end--;
+    return lines.slice(start, end);
+  }
+
+  /**
+   * Title a code chunk with its declaration rather than its first line.
+   *
+   * The distinction pays for itself: titles carry a BM25 weight of 5.0, and a
+   * chunk that opens with a JSDoc block would otherwise be titled `/**`.
+   */
+  #codeChunkTitle(lines: string[]): string {
+    let fallback = "";
+    const limit = Math.min(lines.length, CODE_TITLE_SCAN_LINES);
+    for (let i = 0; i < limit; i++) {
+      const trimmed = lines[i].trim();
+      if (trimmed.length === 0) continue;
+      if (!fallback) fallback = trimmed;
+      if (CODE_DOC_LINE.test(trimmed)) continue;
+      return trimmed.slice(0, CHUNK_TITLE_MAX_CHARS);
+    }
+    return (fallback || "Code").slice(0, CHUNK_TITLE_MAX_CHARS);
+  }
+
+  /**
+   * Pack consecutive blocks into chunks — a chunk closes once it is big enough
+   * to stand alone (CODE_CHUNK_MIN_BYTES) and never grows past maxChunkBytes —
+   * and hand anything too large for one chunk to #splitOversizedCodeBlock.
+   */
+  #packCodeBlocks(
+    blocks: string[][],
+    maxChunkBytes: number,
+    depth: number,
+  ): Array<{ title: string; content: string }> {
+    const chunks: Array<{ title: string; content: string }> = [];
+    let accumulator: string[] = [];
+    let accumulatorBytes = 0;
+
+    const flushAccumulator = () => {
+      if (accumulator.length === 0) return;
+      const lines = accumulator;
+      accumulator = [];
+      accumulatorBytes = 0;
+      chunks.push({ title: this.#codeChunkTitle(lines), content: lines.join("\n") });
+    };
+
+    for (const block of blocks) {
+      const lines = this.#trimBlankEdges(block);
+      if (lines.length === 0) continue;
+      const text = lines.join("\n");
+      const bytes = Buffer.byteLength(text);
+
+      if (bytes > maxChunkBytes) {
+        flushAccumulator();
+        chunks.push(...this.#splitOversizedCodeBlock(lines, maxChunkBytes, depth));
+        continue;
+      }
+
+      // A declaration big enough to stand on its own does stand on its own:
+      // packing it behind a short preamble would title the chunk after the
+      // preamble and bury what the chunk is actually about.
+      if (accumulator.length > 0 && bytes >= CODE_CHUNK_MIN_BYTES) flushAccumulator();
+
+      // A blank line separates packed blocks, so the two bytes it costs are
+      // part of the fit test rather than a surprise after the join.
+      const separator = accumulator.length > 0 ? 2 : 0;
+      if (accumulator.length > 0 && accumulatorBytes + separator + bytes > maxChunkBytes) {
+        flushAccumulator();
+        accumulator.push(...lines);
+        accumulatorBytes = bytes;
+        continue;
+      }
+      if (accumulator.length > 0) accumulator.push("");
+      accumulator.push(...lines);
+      accumulatorBytes += separator + bytes;
+      if (accumulatorBytes >= CODE_CHUNK_MIN_BYTES) flushAccumulator();
+    }
+    flushAccumulator();
+
+    return chunks;
+  }
+
+  /**
+   * A block that does not fit gets one more chance at structure: re-cut at the
+   * indent its members sit on (a class into methods, an object literal into
+   * keys). Past CODE_CHUNK_MAX_DEPTH, or when that finds nothing, the byte
+   * splitter takes over — the cap is not negotiable and this is where it lands.
+   */
+  #splitOversizedCodeBlock(
+    lines: string[],
+    maxChunkBytes: number,
+    depth: number,
+  ): Array<{ title: string; content: string }> {
+    if (depth < CODE_CHUNK_MAX_DEPTH) {
+      const memberIndent = this.#codeMemberIndent(lines);
+      if (memberIndent !== null) {
+        const inner = this.#codeBlocks(lines, memberIndent);
+        if (inner) return this.#packCodeBlocks(inner, maxChunkBytes, depth + 1);
+      }
+    }
+    return this.#splitOversizedPlainChunk(lines, this.#codeChunkTitle(lines), maxChunkBytes);
+  }
+
+  /**
+   * The indent a block's members sit on: the shallowest indent deeper than the
+   * block's own header, ignoring blank lines and closing brackets (a trailing
+   * `}` shares the header's indent and would otherwise be mistaken for one).
+   *
+   * @returns That indent, or null when the block has no interior to speak of.
+   */
+  #codeMemberIndent(lines: string[]): number | null {
+    const base = this.#codeIndentWidth(lines[0]);
+    let member: number | null = null;
+    for (let i = 1; i < lines.length; i++) {
+      const trimmed = lines[i].trim();
+      if (trimmed.length === 0) continue;
+      if (CODE_CLOSER.test(trimmed)) continue;
+      const width = this.#codeIndentWidth(lines[i]);
+      if (width <= base) continue;
+      if (member === null || width < member) member = width;
+    }
+    return member;
   }
 
   /**
