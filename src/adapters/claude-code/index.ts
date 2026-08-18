@@ -42,6 +42,7 @@ import {
 import {
   HOOK_TYPES,
   HOOK_SCRIPTS,
+  HOOK_TIMEOUTS,
   REQUIRED_HOOKS,
   PRE_TOOL_USE_MATCHERS,
   PRE_TOOL_USE_MATCHER_PATTERN,
@@ -134,10 +135,20 @@ export class ClaudeCodeAdapter extends ClaudeCodeBaseAdapter implements HookAdap
     const preToolUseCommand = buildHookRuntimeCommand(`${pluginRoot}/hooks/pretooluse.mjs`);
     const preToolUseMatchers = [...PRE_TOOL_USE_MATCHERS];
 
+    // Explicit timeouts, graded by where the hook sits (HOOK_TIMEOUTS in
+    // ./hooks.ts). Leaving them off is not a neutral default: Claude Code waits
+    // 60s, and a minute of silence in front of a tool call reads to the user as
+    // a hung terminal — pretooluse.mjs is the one that runs before every Bash.
     return {
       PreToolUse: preToolUseMatchers.map((matcher) => ({
         matcher,
-        hooks: [{ type: "command", command: preToolUseCommand }],
+        hooks: [
+          {
+            type: "command",
+            command: preToolUseCommand,
+            timeout: HOOK_TIMEOUTS.PreToolUse,
+          },
+        ],
       })),
       PostToolUse: [
         {
@@ -146,6 +157,7 @@ export class ClaudeCodeAdapter extends ClaudeCodeBaseAdapter implements HookAdap
             {
               type: "command",
               command: buildHookRuntimeCommand(`${pluginRoot}/hooks/posttooluse.mjs`),
+              timeout: HOOK_TIMEOUTS.PostToolUse,
             },
           ],
         },
@@ -157,6 +169,7 @@ export class ClaudeCodeAdapter extends ClaudeCodeBaseAdapter implements HookAdap
             {
               type: "command",
               command: buildHookRuntimeCommand(`${pluginRoot}/hooks/precompact.mjs`),
+              timeout: HOOK_TIMEOUTS.PreCompact,
             },
           ],
         },
@@ -168,6 +181,7 @@ export class ClaudeCodeAdapter extends ClaudeCodeBaseAdapter implements HookAdap
             {
               type: "command",
               command: buildHookRuntimeCommand(`${pluginRoot}/hooks/userpromptsubmit.mjs`),
+              timeout: HOOK_TIMEOUTS.UserPromptSubmit,
             },
           ],
         },
@@ -179,6 +193,7 @@ export class ClaudeCodeAdapter extends ClaudeCodeBaseAdapter implements HookAdap
             {
               type: "command",
               command: buildHookRuntimeCommand(`${pluginRoot}/hooks/sessionstart.mjs`),
+              timeout: HOOK_TIMEOUTS.SessionStart,
             },
           ],
         },
@@ -190,6 +205,7 @@ export class ClaudeCodeAdapter extends ClaudeCodeBaseAdapter implements HookAdap
             {
               type: "command",
               command: buildHookRuntimeCommand(`${pluginRoot}/hooks/stop.mjs`),
+              timeout: HOOK_TIMEOUTS.Stop,
             },
           ],
         },
@@ -569,7 +585,7 @@ export class ClaudeCodeAdapter extends ClaudeCodeBaseAdapter implements HookAdap
       if (hookType === HOOK_TYPES.PRE_TOOL_USE) {
         const entry = {
           matcher: PRE_TOOL_USE_MATCHER_PATTERN,
-          hooks: [{ type: "command", command }],
+          hooks: [{ type: "command", command, timeout: HOOK_TIMEOUTS[hookType] }],
         };
         const existing = hooks.PreToolUse as Array<Record<string, unknown>> | undefined;
         if (existing && Array.isArray(existing)) {
@@ -591,7 +607,7 @@ export class ClaudeCodeAdapter extends ClaudeCodeBaseAdapter implements HookAdap
       } else {
         const entry = {
           matcher: "",
-          hooks: [{ type: "command", command }],
+          hooks: [{ type: "command", command, timeout: HOOK_TIMEOUTS[hookType] }],
         };
         const existing = hooks[hookType] as Array<Record<string, unknown>> | undefined;
         if (existing && Array.isArray(existing)) {

@@ -2,7 +2,7 @@
 
 Fork of [mksglu/context-mode](https://github.com/mksglu/context-mode) at v1.0.169.
 
-Thirty-four changes, each addressing a gap observed while running the plugin daily in
+Thirty-five changes, each addressing a gap observed while running the plugin daily in
 Claude Code. Every one is backwards compatible, and every behavioural default
 carries an env switch back. Two defaults differ from upstream on purpose: the
 compact tool descriptions (what ships on every request) and the semantic layer,
@@ -1429,6 +1429,80 @@ Removing `fff` and `codegraph` from `~/.claude.json` is deliberately left to
 the operator: it is a user-owned config, and it should happen only once the
 daemon is running under plugin supervision on that machine.
 
+## 35. The plugin as the host sees it
+
+`agents/context-gather.md`, `skills/context-mode/SKILL.md`, `commands/ctx-{find,graph}.md`,
+`platform-skills/ctx-{find,graph}/`, `hooks/hooks.json`,
+`src/adapters/claude-code/{hooks,index}.ts`, `.claude-plugin/*.json`,
+`src/session/analytics.ts`, `tests/plugins/plugin-structure.test.ts`
+
+Change 34 added `ctx_find` and `ctx_graph`, tested them, and shipped them. What it
+did not do is tell anyone. Claude Code does not read this repository — it reads a
+manifest, a hook registration file, a set of skill descriptions and the tool list
+attached to an agent. On every one of those surfaces the two new tools were absent,
+which is a specific kind of failure: nothing throws, no suite goes red, the host
+simply stops seeing something.
+
+**The tools became reachable.** `agents/context-gather.md` lists its tools
+explicitly, and such a list is an allowlist — the research agent written to survey a
+tree without reading it could not call the one tool built for that. Both are now in
+the list, with the division of labour spelled out in the body: `ctx_find` — where it
+lives; `ctx_search` — what we already know about it; `ctx_graph` — how it is
+connected. The same three-way split now appears in the routing skill's description
+(the text a model reads when deciding whether the skill applies at all), in the root
+and platform `CLAUDE.md`, and in the README tool table.
+
+**They got the command parity every other user-facing tool has.** `/ctx-find` and
+`/ctx-graph`, both `disable-model-invocation: true` so they cost nothing standing,
+plus their `platform-skills/` twins for the hosts that have no slash commands.
+Nine commands, nine skills, name for name.
+
+**The PreToolUse hook stopped firing twice.** Three matchers named context-mode's own
+MCP tools in full; each is a superstring of `mcp__`, which sat in the same list.
+Claude Code fires one process per matching entry, so every `ctx_execute` paid for two
+`node` processes and two passes of the delay / redirect / rejected-approach markers
+the hook writes into tmpdir. The three were dropped, not replaced — the hook body
+(`isExternalMcpTool()`) is what distinguishes our tools from foreign ones, and the
+Codex adapter had already reached this shape independently.
+
+**Every hook got a timeout.** Sixteen registrations across eight events had none, so
+all of them inherited the host's 60-second default — including `pretooluse.mjs`,
+which runs in front of every `Bash` and can self-heal by copying files on a first
+run. A minute of silence there is indistinguishable from a hung terminal. Budgets
+are graded by position rather than uniform (`HOOK_TIMEOUTS`): 15s on the pre-tool
+path, 20s for capture, 30s for the session drain, 45s for `SessionStart`, and 60s
+kept deliberately for `PreCompact`, where the work genuinely is heavy.
+
+**The manifests name the fork.** `author`, `homepage`, `repository` and the issues
+address pointed at upstream, so a user who installed from this marketplace and
+followed the metadata would file a report about this fork's code in someone else's
+tracker. Ownership fields now name the fork; the origin stays stated in prose, in the
+description and in this document.
+
+**The savings claim rests on the measurement again.** `analytics.ts` carried
+`lifetimeTokensWithout * 0.02` as a fallback — a hardcoded 98% that asserted the
+headline rather than measuring it, and which nothing consumed (its only reader,
+`renderHero`, has no call sites). Removed. The claim itself is now stated identically
+in the manifest, the marketplace entry and the README, and traced to its corpus:
+315 KB of raw output across the 14 `ctx_execute_file` scenarios comes back as 5.4 KB.
+`BENCHMARK.md` said 5.5 KB; summing its own rows gives 5,517 B, so the README was
+right and the subtotal was not.
+
+**The litter has a source and the source is fixed.** `f0.tmp`, `f1.tmp`, `f2.tmp`
+appeared in the repository root on every `npm test`: an executor concurrency test
+wrote to `process.cwd()`, and the executor sets the sandbox cwd to the project root.
+Each run now makes its own `mkdtemp` directory and removes it.
+
+**And the whole contract is a test now.** `tests/plugins/plugin-structure.test.ts`
+pins the six rules that break quietly — canonical layout, a `SKILL.md` per skill
+directory, command ↔ platform-skill parity, no absolute paths in committed manifests,
+non-overlapping `PreToolUse` matchers, an explicit timeout on every hook — plus the
+tool-surface checks that would have caught this whole wave, and the fork-identity and
+savings-claim assertions above. `skills/.ignore` is documented rather than moved: Pi's
+skill loader only reads it from the directory it scans, so `skills/` legitimately
+contains a file among the directories, and the test now says so out loud
+(CONTRIBUTING.md → *Plugin layout contract*).
+
 ## Merged ahead of upstream: the fetch extraction ladder
 
 `src/fetch/blocks.ts`, `src/fetch/extract.ts`, `src/fetch/page-store.ts`, `src/server.ts`
@@ -1570,8 +1644,7 @@ rely on when handling credentials.
 
 ## Tests
 
-`npm test` — 5,175 passing and 38 skipped across 244 suites, recorded at
-`3f1df63`, the last commit that changes behaviour. New suites:
+`npm test` — 5,645 passing and 38 skipped across 268 suites. New suites:
 
 - `tests/cli/fork-info.test.ts` — upgrade-source resolution, fork identity
 - `tests/core/store-delete-source.test.ts` — source eviction
@@ -1599,7 +1672,7 @@ rely on when handling credentials.
 - `tests/executor/env-allowlist.test.ts` — `CONTEXT_MODE_EXEC_ENV_MODE=allowlist`
 - `tests/store-hash-skip.test.ts` — the unchanged-content skip and the re-attribution switch
 - `tests/search/completeness.test.ts` — the completeness line, the escalation block, both switches
-- `tests/core/tool-registration.test.ts` — twelve tools, their names and order; the acceptance gate for the `server.ts` split
+- `tests/core/tool-registration.test.ts` — fourteen tools, their names and order; the acceptance gate for the `server.ts` split
 - `tests/session/redact.test.ts` — credential screening, and the real-corpus false-positive guards
 - `tests/store-redaction-wiring.test.ts` — no credential reaches the database, on every index path
 - `tests/store-code-chunking.test.ts` — declaration boundaries, packing, the byte-for-byte opt-out
@@ -1607,6 +1680,7 @@ rely on when handling credentials.
 - `tests/core/search.test.ts` — also carries the retrieval gate: the 18 named cases plus the aggregate against `retrieval-baseline.json`
 - `tests/scripts/bundle-manifest.test.ts` — every hook bundle is built, scanned and committed; the parser itself is pinned first
 - `tests/hooks/attribution-bundle-parity.test.ts` — the shipped bundle against its source, including the Bug 8 case that the orphan lost
+- `tests/plugins/plugin-structure.test.ts` — the plugin as the host sees it: layout, a `SKILL.md` per skill directory, command ↔ platform-skill parity, no absolute paths in committed manifests, non-overlapping `PreToolUse` matchers, a timeout on every hook, the tool surface (agent allowlist, skill description, README table), fork identity, and the savings claim against its measured basis
 
 ## Installing this fork in Claude Code
 

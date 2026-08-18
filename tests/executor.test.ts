@@ -1711,16 +1711,28 @@ describe("Edge Cases", () => {
 describe("Temp Cleanup Resilience", () => {
   test("concurrent executions all return valid results (EBUSY resilience)", async () => {
     const count = 15;
+    // The FS churn is the point — 15 concurrent runs each touching files while
+    // the executor tears its temp dirs down. WHERE they land is not: the
+    // executor sets the sandbox cwd to the PROJECT ROOT (executor.ts:391), so
+    // the original `path.join(process.cwd(), ...)` dropped f0.tmp/f1.tmp/f2.tmp
+    // into the repository root on every `npm test` — gitignored, invisible, and
+    // still there afterwards. Each run now gets its own tmpdir and removes it.
     const promises = Array.from({ length: count }, (_, i) =>
       executor.execute({
         language: "javascript",
         code: `
           const fs = require('fs');
+          const os = require('os');
           const path = require('path');
-          for (let j = 0; j < 3; j++) {
-            fs.writeFileSync(path.join(process.cwd(), 'f' + j + '.tmp'), 'data');
+          const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ctx-ebusy-'));
+          try {
+            for (let j = 0; j < 3; j++) {
+              fs.writeFileSync(path.join(dir, 'f' + j + '.tmp'), 'data');
+            }
+            console.log("ok-${i}");
+          } finally {
+            fs.rmSync(dir, { recursive: true, force: true });
           }
-          console.log("ok-${i}");
         `,
       }),
     );

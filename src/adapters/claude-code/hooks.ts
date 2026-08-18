@@ -55,16 +55,34 @@ export type HookType = (typeof HOOK_TYPES)[keyof typeof HOOK_TYPES];
  */
 export const EXTERNAL_MCP_MATCHER_PATTERN = "mcp__";
 
-/** Tools that context-mode's PreToolUse hook intercepts. */
+/**
+ * Tools that context-mode's PreToolUse hook intercepts.
+ *
+ * Entries MUST NOT overlap. Claude Code fires one hook process per matching
+ * entry, and `generateHookConfig` emits one settings.json entry per element of
+ * this list, so an entry already covered by another is not redundancy — it is a
+ * second `node` process before every affected tool call plus a second pass of
+ * the delay / redirect / rejected-approach markers `pretooluse.mjs` writes into
+ * tmpdir.
+ *
+ * That is exactly what the three explicit
+ * `mcp__plugin_context-mode_context-mode__ctx_*` entries did until v1.0.170:
+ * every one of them is a superstring of `mcp__`, so `ctx_execute` matched twice
+ * and paid twice. They were dropped, not replaced — `mcp__` already covers every
+ * MCP tool (substring semantics, see EXTERNAL_MCP_MATCHER_PATTERN above), and
+ * the hook BODY (`isExternalMcpTool()` in hooks/core/routing.mjs) is what tells
+ * context-mode's own tools apart from foreign ones. The Codex adapter reached
+ * the same shape independently — its matcher asserts
+ * `not.toContain("mcp__plugin_context-mode_context-mode__")`.
+ *
+ * Non-overlap is enforced by tests/plugins/plugin-structure.test.ts.
+ */
 export const PRE_TOOL_USE_MATCHERS = [
   "Bash",
   "WebFetch",
   "Read",
   "Grep",
   "Agent",
-  "mcp__plugin_context-mode_context-mode__ctx_execute",
-  "mcp__plugin_context-mode_context-mode__ctx_execute_file",
-  "mcp__plugin_context-mode_context-mode__ctx_batch_execute",
   EXTERNAL_MCP_MATCHER_PATTERN,
 ] as const;
 
@@ -111,6 +129,37 @@ export const POST_TOOL_USE_MATCHER_PATTERN = POST_TOOL_USE_MATCHERS.join("|");
 // ─────────────────────────────────────────────────────────
 // Hook script file names
 // ─────────────────────────────────────────────────────────
+
+/**
+ * Seconds each hook gets before Claude Code kills it.
+ *
+ * Claude Code's default is 60s. That default is wrong in both directions here:
+ * far too generous for the pre-tool path, where the user is staring at a prompt
+ * that has not moved (`pretooluse.mjs` runs in front of every Bash, and on a
+ * first run it can self-heal by copying files — a minute of that is
+ * indistinguishable from a hang), and not obviously enough for `PreCompact`,
+ * which builds the resume snapshot and is the one place the work is genuinely
+ * heavy.
+ *
+ * So the budgets are graded rather than uniform:
+ *   - 15s — anything on the pre-tool path or in front of a prompt
+ *   - 20s — post-tool and turn-end capture (SQLite writes, extraction)
+ *   - 30s — SessionEnd drain
+ *   - 45s — SessionStart (context injection, adapter detection, healing)
+ *   - 60s — PreCompact (snapshot build; the host default, kept deliberately)
+ *
+ * Kept in lockstep with hooks/hooks.json by tests/plugins/plugin-structure.test.ts.
+ */
+export const HOOK_TIMEOUTS: Record<HookType, number> = {
+  PreToolUse: 15,
+  PostToolUse: 20,
+  PreCompact: 60,
+  SessionStart: 45,
+  UserPromptSubmit: 15,
+  Stop: 20,
+  SubagentStop: 20,
+  SessionEnd: 30,
+};
 
 /** Map of hook types to their script file names. */
 export const HOOK_SCRIPTS: Record<HookType, string> = {

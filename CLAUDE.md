@@ -28,17 +28,21 @@ Otherwise: `ctx_batch_execute(commands, queries)` or `ctx_execute(language: "she
 ### Read (for analysis)
 Reading to **Edit** → Read correct. Reading to **analyze/explore/summarize** → `ctx_execute_file(path, language, code)`.
 
-### Grep — may flood context
-Use `ctx_execute(language: "shell", code: "grep ...")` in sandbox.
+### Grep / Glob — may flood context
+Locating something → `ctx_find(query)`. Exhaustive literal sweep → `ctx_execute(language: "shell", code: "grep ...")` in sandbox.
 
 ## Tool selection
 
 0. **MEMORY**: `ctx_search(sort: "timeline")` — after resume, check prior context before asking user.
 1. **GATHER**: `ctx_batch_execute(commands, queries)` — runs all commands, auto-indexes, returns search. ONE call replaces 30+. Each command: `{label: "header", command: "..."}`.
-2. **FOLLOW-UP**: `ctx_search(queries: ["q1", "q2", ...])` — all questions as array, ONE call (default relevance mode).
-3. **PROCESSING**: `ctx_execute(language, code)` | `ctx_execute_file(path, language, code)` — sandbox, only stdout enters context.
-4. **WEB**: `ctx_fetch_and_index(url, source)` then `ctx_search(queries)` — raw HTML never enters context.
-5. **INDEX**: `ctx_index(content, source)` — store in FTS5 for later search.
+2. **LOCATE**: `ctx_find(query, scope?, type?)` — where does this live. Fuses file names, grep, FTS5, vectors and the codegraph into ONE ranked list; replaces the Glob + Grep + `ctx_search` triad.
+3. **STRUCTURE**: `ctx_graph(action, symbol|file|query)` — how is this connected. `symbols` | `outline` | `callers` | `callees` | `impact` | `related` | `explore`. Answers from the codegraph index instead of reading files.
+4. **FOLLOW-UP**: `ctx_search(queries: ["q1", "q2", ...])` — what do we already know. All questions as array, ONE call (default relevance mode).
+5. **PROCESSING**: `ctx_execute(language, code)` | `ctx_execute_file(path, language, code)` — sandbox, only stdout enters context.
+6. **WEB**: `ctx_fetch_and_index(url, source)` then `ctx_search(queries)` — raw HTML never enters context.
+7. **INDEX**: `ctx_index(content, source)` — store in FTS5 for later search.
+
+Three retrieval tools, three questions: `ctx_find` — where it lives; `ctx_search` — what we already know about it; `ctx_graph` — how it is connected.
 
 ## Parallel I/O batches
 

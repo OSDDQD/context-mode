@@ -48,7 +48,7 @@
 | Git log (150+ commits) | git | 11.6 KB | 107 B | 99% | 16ms |
 | Analytics CSV (500 rows) | analytics | 85.5 KB | 222 B | 100% | 32ms |
 
-**Subtotal: 315 KB raw → 5.5 KB context (98% savings)**
+**Subtotal: 315 KB raw → 5.4 KB context (98% savings)** — 5,517 B summed over the 14 rows above, against 314.8 KB raw.
 
 ## Part 2: `ctx_index` + `ctx_search` — Knowledge Retrieval (FTS5 BM25)
 

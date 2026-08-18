@@ -153,6 +153,16 @@ export interface HookEntry {
   hooks: Array<{
     type: string;
     command: string;
+    /**
+     * Seconds the host waits before killing the hook process.
+     *
+     * Optional because not every platform honours it, but omitting it where it
+     * IS honoured is not a neutral default: Claude Code falls back to 60s, and
+     * a minute of silence in front of a tool call is indistinguishable from a
+     * hung terminal. Adapters that can set it should — graded by where the hook
+     * sits, not uniformly (see HOOK_TIMEOUTS in adapters/claude-code/hooks.ts).
+     */
+    timeout?: number;
   }>;
 }
 

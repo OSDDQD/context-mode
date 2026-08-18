@@ -5,6 +5,9 @@ description: |
   Bash/cat/Read when processing, analyzing, filtering, or summarizing data that may
   exceed ~20 lines: logs, test/build output, git history, JSON/API responses, browser
   or Playwright snapshots, dependency trees, docs fetches, codebase statistics.
+  Also use ctx_find instead of Glob+Grep to locate where something lives in a project,
+  and ctx_graph instead of reading files to answer structural questions (who calls a
+  symbol, what breaks if it changes, what a file declares).
   Also triggers on ANY MCP tool output that may exceed 20 lines.
 ---
 
@@ -92,6 +95,28 @@ About to run a command / read a file / call an API?
 | MCP output (already in context) | Use directly | Don't re-index — it's already loaded |
 | MCP output (need multi-query) | `ctx_execute` to save → `ctx_index(path)` → `ctx_search` | Save to file first, index server-side |
 | Wipe indexed KB content | `ctx_purge(confirm: true)` | Permanently deletes all indexed content |
+| Locate a file or symbol | `ctx_find` | "where does the session DB path get built?" |
+| Structural question about code | `ctx_graph` | "who calls `ContentStore.index`?" |
+
+## Three Retrieval Tools, Three Questions
+
+They are not interchangeable, and picking the wrong one costs a round trip:
+
+| Question | Tool | What it reads |
+|----------|------|---------------|
+| **Where does this live?** | `ctx_find` | File names (frecency-ranked), grep over the tree, the FTS5 knowledge base, chunk vectors, and the codegraph neighbourhood — all five fused into one ranked list, with blind signals reported |
+| **What do we already know about it?** | `ctx_search` | Only the FTS5 knowledge base: output you captured, docs you fetched, auto-captured session memory |
+| **How is it connected?** | `ctx_graph` | The codegraph SQLite index: `symbols`, `outline`, `callers`, `callees`, `impact`, `related`, `explore` |
+
+- `ctx_find` **replaces the Glob + Grep + `ctx_search` triad.** One call instead of
+  three whose results you would otherwise merge by reading all three. Confine it with
+  `scope: "src/session"` or `type: "code" | "files" | "memory"`.
+- `ctx_graph` **replaces reading files to trace call paths.** "What breaks if I change
+  `redactSecrets`?" is `ctx_graph(action: "impact", symbol: "redactSecrets")` — a few
+  rows — not fifteen `Read` calls. It needs a codegraph index (`codegraph init` once
+  per project); without one it says so instead of guessing.
+- Reach past `ctx_find` for raw Glob/Grep only when you need an exhaustive literal
+  sweep rather than a ranked answer.
 
 ## Automatic Triggers
 
@@ -107,6 +132,8 @@ Use context-mode for ANY of these, without being asked:
 - **Build output**: "build the project", "check for warnings", "compile errors"
 - **Code metrics**: "count lines", "find TODOs", "function count", "analyze codebase"
 - **Web docs lookup**: "look up the docs", "check the API reference", "find examples"
+- **Locating code** (`ctx_find`): "where is X handled", "which file does Y", "find the config for Z"
+- **Structural questions** (`ctx_graph`): "who calls this", "what does this call", "what breaks if I change it", "what's in this file"
 
 ## Language Selection
 

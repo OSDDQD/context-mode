@@ -325,6 +325,35 @@ After rebuilding, restart your Claude Code session. The MCP server reloads on se
 | `hooks/pretooluse.mjs` | Tool routing + context window protection |
 | `hooks/session-helpers.mjs` | Shared utilities (stdin reader, session ID, DB paths) |
 
+### Plugin layout contract
+
+The host sees the plugin through its manifest, its hook registrations, its skill
+descriptions and the tool list it hands a subagent. None of that is exercised by a
+unit test of the code underneath, and when it breaks nothing fails — the host simply
+stops seeing something. `tests/plugins/plugin-structure.test.ts` pins the parts that
+break quietly:
+
+| Rule | Why |
+|---|---|
+| Manifest at `.claude-plugin/plugin.json`; components (`commands/`, `agents/`, `skills/`, `hooks/`) at the repo root | Canonical layout — nesting a component inside `.claude-plugin/` makes it invisible |
+| Every directory under `skills/` and `platform-skills/` holds a `SKILL.md` | A skill directory without one is silently skipped |
+| `commands/ctx-*.md` ↔ `platform-skills/ctx-*/` name-for-name | Hosts without slash commands get the skill twin; a command added on one side only reaches half the platforms |
+| Plugin-relative paths only — `${CLAUDE_PLUGIN_ROOT}`, never an absolute path | An absolute path is correct on exactly one machine |
+| `PreToolUse` matchers must not overlap | Claude Code fires one process per matching entry; an entry already covered by another costs a second `node` process and a second pass of the tmpdir markers before every affected tool call |
+| Every hook entry carries an explicit `timeout` | The host default is 60s, and a minute of silence in front of a tool call reads as a hung terminal. Budgets live in `HOOK_TIMEOUTS` (`src/adapters/claude-code/hooks.ts`) and are mirrored in `hooks/hooks.json` |
+
+Two entries in `skills/` are deliberately not skills and the walk must tolerate them:
+
+- **`skills/.ignore`** — a Pi ignore-list, not a skill and not a directory. Pi's skill
+  loader (`@mariozechner/pi-coding-agent`) scans skill directories with
+  `includeRootFiles=true` and reads `.ignore` / `.gitignore` / `.fdignore` to decide
+  what to skip. Keeping the list in-package is what stops Pi from parsing a stray
+  markdown file as a skill even if a stale copy reaches a published tarball
+  (issue #496 / the v1.0.120 regression). It must stay inside `skills/` — that is the
+  only directory Pi consults — so any code walking `skills/` has to expect a file
+  there, not only directories.
+- Anything the `.ignore` list names (currently `UPSTREAM-CREDITS.md`).
+
 ## TDD Workflow
 
 We follow test-driven development. Every PR must include tests.

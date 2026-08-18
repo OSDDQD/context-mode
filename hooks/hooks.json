@@ -1,5 +1,5 @@
 {
-  "description": "Context-mode hooks — PreToolUse routing, PostToolUse session capture, UserPromptSubmit decisions, PreCompact snapshot, SessionStart context injection, Stop turn-end capture, SubagentStop transcript capture, SessionEnd drain",
+  "description": "Context-mode hooks — PreToolUse routing, PostToolUse session capture, UserPromptSubmit decisions, PreCompact snapshot, SessionStart context injection, Stop turn-end capture, SubagentStop transcript capture, SessionEnd drain. Every entry carries an explicit `timeout` (seconds): the host default is 60s, and a minute of silence in front of a tool call reads to the user as a hung terminal. Budgets are graded by where the hook sits — 15s for anything on the pre-tool path, 60s only for PreCompact, whose work is genuinely heavy. PreToolUse matchers MUST NOT overlap: the host fires one process per matching entry, so a matcher covered by another costs a second `node` process and a second pass of the tmpdir markers (see PRE_TOOL_USE_MATCHERS in src/adapters/claude-code/hooks.ts). Both invariants are enforced by tests/plugins/plugin-structure.test.ts.",
   "hooks": {
     "PostToolUse": [
       {
@@ -7,7 +7,8 @@
         "hooks": [
           {
             "type": "command",
-            "command": "node \"${CLAUDE_PLUGIN_ROOT}/hooks/posttooluse.mjs\""
+            "command": "node \"${CLAUDE_PLUGIN_ROOT}/hooks/posttooluse.mjs\"",
+            "timeout": 20
           }
         ]
       }
@@ -18,7 +19,8 @@
         "hooks": [
           {
             "type": "command",
-            "command": "node \"${CLAUDE_PLUGIN_ROOT}/hooks/precompact.mjs\""
+            "command": "node \"${CLAUDE_PLUGIN_ROOT}/hooks/precompact.mjs\"",
+            "timeout": 60
           }
         ]
       }
@@ -29,7 +31,8 @@
         "hooks": [
           {
             "type": "command",
-            "command": "node \"${CLAUDE_PLUGIN_ROOT}/hooks/pretooluse.mjs\""
+            "command": "node \"${CLAUDE_PLUGIN_ROOT}/hooks/pretooluse.mjs\"",
+            "timeout": 15
           }
         ]
       },
@@ -38,7 +41,8 @@
         "hooks": [
           {
             "type": "command",
-            "command": "node \"${CLAUDE_PLUGIN_ROOT}/hooks/pretooluse.mjs\""
+            "command": "node \"${CLAUDE_PLUGIN_ROOT}/hooks/pretooluse.mjs\"",
+            "timeout": 15
           }
         ]
       },
@@ -47,7 +51,8 @@
         "hooks": [
           {
             "type": "command",
-            "command": "node \"${CLAUDE_PLUGIN_ROOT}/hooks/pretooluse.mjs\""
+            "command": "node \"${CLAUDE_PLUGIN_ROOT}/hooks/pretooluse.mjs\"",
+            "timeout": 15
           }
         ]
       },
@@ -56,7 +61,8 @@
         "hooks": [
           {
             "type": "command",
-            "command": "node \"${CLAUDE_PLUGIN_ROOT}/hooks/pretooluse.mjs\""
+            "command": "node \"${CLAUDE_PLUGIN_ROOT}/hooks/pretooluse.mjs\"",
+            "timeout": 15
           }
         ]
       },
@@ -65,34 +71,8 @@
         "hooks": [
           {
             "type": "command",
-            "command": "node \"${CLAUDE_PLUGIN_ROOT}/hooks/pretooluse.mjs\""
-          }
-        ]
-      },
-      {
-        "matcher": "mcp__plugin_context-mode_context-mode__ctx_execute",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "node \"${CLAUDE_PLUGIN_ROOT}/hooks/pretooluse.mjs\""
-          }
-        ]
-      },
-      {
-        "matcher": "mcp__plugin_context-mode_context-mode__ctx_execute_file",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "node \"${CLAUDE_PLUGIN_ROOT}/hooks/pretooluse.mjs\""
-          }
-        ]
-      },
-      {
-        "matcher": "mcp__plugin_context-mode_context-mode__ctx_batch_execute",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "node \"${CLAUDE_PLUGIN_ROOT}/hooks/pretooluse.mjs\""
+            "command": "node \"${CLAUDE_PLUGIN_ROOT}/hooks/pretooluse.mjs\"",
+            "timeout": 15
           }
         ]
       },
@@ -101,7 +81,8 @@
         "hooks": [
           {
             "type": "command",
-            "command": "node \"${CLAUDE_PLUGIN_ROOT}/hooks/pretooluse.mjs\""
+            "command": "node \"${CLAUDE_PLUGIN_ROOT}/hooks/pretooluse.mjs\"",
+            "timeout": 15
           }
         ]
       }
@@ -112,7 +93,8 @@
         "hooks": [
           {
             "type": "command",
-            "command": "node \"${CLAUDE_PLUGIN_ROOT}/hooks/userpromptsubmit.mjs\""
+            "command": "node \"${CLAUDE_PLUGIN_ROOT}/hooks/userpromptsubmit.mjs\"",
+            "timeout": 15
           }
         ]
       }
@@ -123,7 +105,8 @@
         "hooks": [
           {
             "type": "command",
-            "command": "node \"${CLAUDE_PLUGIN_ROOT}/hooks/sessionstart.mjs\""
+            "command": "node \"${CLAUDE_PLUGIN_ROOT}/hooks/sessionstart.mjs\"",
+            "timeout": 45
           }
         ]
       }
@@ -134,7 +117,8 @@
         "hooks": [
           {
             "type": "command",
-            "command": "node \"${CLAUDE_PLUGIN_ROOT}/hooks/stop.mjs\""
+            "command": "node \"${CLAUDE_PLUGIN_ROOT}/hooks/stop.mjs\"",
+            "timeout": 20
           }
         ]
       }
@@ -145,7 +129,8 @@
         "hooks": [
           {
             "type": "command",
-            "command": "node \"${CLAUDE_PLUGIN_ROOT}/hooks/subagentstop.mjs\""
+            "command": "node \"${CLAUDE_PLUGIN_ROOT}/hooks/subagentstop.mjs\"",
+            "timeout": 20
           }
         ]
       }
@@ -156,7 +141,8 @@
         "hooks": [
           {
             "type": "command",
-            "command": "node \"${CLAUDE_PLUGIN_ROOT}/hooks/sessionend.mjs\""
+            "command": "node \"${CLAUDE_PLUGIN_ROOT}/hooks/sessionend.mjs\"",
+            "timeout": 30
           }
         ]
       }

@@ -2285,16 +2285,21 @@ function renderNarrative5Section(args: {
   const lifetimeLegacyTokens = lifetimeEventsTokens + lifetimeRescueTokens;
   const lifetimeRealTokens   = realBytes?.lifetime?.totalSavedTokens ?? 0;
   const lifetimeTokensWithout = Math.max(lifetimeLegacyTokens, lifetimeRealTokens);
-  // Lifetime "with" — measured when available, else legacy 0.02 fallback.
-  // Honest definition (matches conversation bar below):
+  // There is deliberately no lifetime "with" figure computed here.
+  //
+  // Until v1.0.170 this block derived one, and when the schema had no
+  // measurement it fell back to `lifetimeTokensWithout * 0.02` — a hardcoded
+  // 98% that asserted the headline claim instead of measuring it. Nothing in
+  // this function consumed the value (the only consumer, `renderHero`, has no
+  // call sites), so the constant survived purely as a number waiting to be
+  // rendered as evidence for itself.
+  //
+  // The honest definitions still stand and are applied where real bytes exist —
+  // see the strict-compression bar below (ADR-0004):
   //   "with"    = bytes_returned (what the model actually re-saw)
   //   "without" = bytes_returned + bytes_avoided
-  // When the schema has measurement, derive `with` from `bytes_returned`.
-  const lifeRet = realBytes?.lifetime?.bytesReturned ?? 0;
-  const lifeAv  = realBytes?.lifetime?.bytesAvoided  ?? 0;
-  const lifetimeTokensWith = (lifeRet + lifeAv) > 0
-    ? Math.max(1, Math.floor(tokensFromBytes(lifeRet)))
-    : Math.max(1, Math.round(lifetimeTokensWithout * 0.02));
+  // With no measurement there is no ratio to draw, and the empty-state hint
+  // says so rather than substituting a constant.
 
   // Bytes from realBytes when present, else derive from tokens. Goes through
   // `bytesFromTokens` — the exact inverse of the `tokensFromBytes` above — so

@@ -1,13 +1,14 @@
 {
   "name": "context-mode",
   "version": "1.0.169",
-  "description": "MCP server that saves 98% of your context window with session continuity. Sandboxed code execution in 11 languages, FTS5 knowledge base with BM25 ranking, and automatic state restore across compactions.",
+  "description": "MCP server that keeps raw tool output out of your context window — 315 KB of benchmarked output comes back as 5.4 KB (98% reduction, see BENCHMARK.md), with session continuity across compactions. Sandboxed code execution in 11 languages, FTS5 knowledge base with BM25 ranking, fused project-wide search, and codegraph-backed structural queries. Fork of mksglu/context-mode.",
   "author": {
-    "name": "Mert Koseoğlu",
-    "url": "https://github.com/mksglu"
+    "name": "OSDDQD",
+    "url": "https://github.com/OSDDQD"
   },
-  "homepage": "https://github.com/mksglu/context-mode#readme",
-  "repository": "https://github.com/mksglu/context-mode",
+  "homepage": "https://github.com/OSDDQD/context-mode#readme",
+  "repository": "https://github.com/OSDDQD/context-mode",
+  "bugs": "https://github.com/OSDDQD/context-mode/issues",
   "license": "Elastic-2.0",
   "keywords": [
     "mcp",

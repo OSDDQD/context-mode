@@ -58,7 +58,7 @@ Every MCP tool call dumps raw data into your context window. A Playwright snapsh
 
 Context Mode is an MCP server that solves all four sides of this problem:
 
-1. **Context Saving** — Sandbox tools keep raw data out of the context window. 315 KB becomes 5.4 KB. 98% reduction.
+1. **Context Saving** — Sandbox tools keep raw data out of the context window. Across the 14 `ctx_execute_file` scenarios in [BENCHMARK.md](BENCHMARK.md), 315 KB of raw output comes back as 5.4 KB — a 98% reduction. That is a measured byte ratio over a named corpus, not a projection; `ctx stats` reports what your own sessions actually kept out.
 2. **Session Continuity** — Every file edit, git operation, task, error, and user decision is tracked in SQLite. When the conversation compacts, context-mode doesn't dump this data back into context — it indexes events into FTS5 and retrieves only what's relevant via BM25 search. The model picks up exactly where you left off. If you don't `--continue`, previous session data is deleted immediately — a fresh session means a clean slate.
 3. **Think in Code** — The LLM should program the analysis, not compute it. Instead of reading 50 files into context to count functions, the agent writes a script that does the counting and `console.log()`s only the result. One script replaces ten tool calls and saves 100x context. This is a mandatory paradigm across all 17 supported clients, plus the OpenClaw gateway integration: stop treating the LLM as a data processor, treat it as a code generator.
 
@@ -104,7 +104,7 @@ Restart Claude Code (or run `/reload-plugins`).
 
 All checks should show `[x]`. The doctor validates runtimes, hooks, FTS5, and plugin registration.
 
-**Routing:** Automatic. The SessionStart hook injects routing instructions at runtime — no file is written to your project. The plugin registers all hooks (PreToolUse, PostToolUse, UserPromptSubmit, PreCompact, SessionStart, Stop, SubagentStop, SessionEnd) and 12 MCP tools — seven execution and retrieval tools (`ctx_batch_execute`, `ctx_gather`, `ctx_execute`, `ctx_execute_file`, `ctx_index`, `ctx_search`, `ctx_fetch_and_index`) plus five meta-tools (`ctx_stats`, `ctx_doctor`, `ctx_upgrade`, `ctx_purge`, `ctx_insight`).
+**Routing:** Automatic. The SessionStart hook injects routing instructions at runtime — no file is written to your project. The plugin registers all hooks (PreToolUse, PostToolUse, UserPromptSubmit, PreCompact, SessionStart, Stop, SubagentStop, SessionEnd) and 14 MCP tools — nine execution and retrieval tools (`ctx_batch_execute`, `ctx_gather`, `ctx_execute`, `ctx_execute_file`, `ctx_index`, `ctx_search`, `ctx_find`, `ctx_graph`, `ctx_fetch_and_index`) plus five meta-tools (`ctx_stats`, `ctx_doctor`, `ctx_upgrade`, `ctx_purge`, `ctx_insight`).
 
 | Slash Command | What it does |
 |---|---|
@@ -1189,6 +1189,8 @@ npm install -g context-mode
 | `ctx_execute_file` | Process files in a separate subprocess. Raw content never leaves. | 45 KB → 155 B |
 | `ctx_index` | Chunk markdown into FTS5 with BM25 ranking. | 60 KB → 40 B |
 | `ctx_search` | Query indexed content with multiple queries in one call. | On-demand retrieval |
+| `ctx_find` | **Where does this live?** One fused search: fuzzy file names (frecency-ranked), literal grep, the FTS5 knowledge base, chunk vectors, and the codegraph neighbourhood — five signals reciprocal-rank-fused into a single list, each row tagged with the signals that found it and blind signals reported. Confine with `scope` (directory prefix) or `type` (`all` \| `files` \| `code` \| `memory`). Replaces the Glob + Grep + `ctx_search` triad. | 3 calls → 1 |
+| `ctx_graph` | **How is this connected?** Structural questions answered from the codegraph SQLite index instead of by reading files: `symbols` (where a name is defined), `outline` (a file's declarations in source order), `callers` / `callees` (transitive call-graph walk), `impact` (what breaks if a symbol changes), `related` (the graph neighbourhood of a file), `explore` (source bodies plus the call paths reaching them). Every answer states whether the index lags the working tree. Requires `codegraph init` once per project. | 15 × `Read` → a few rows |
 | `ctx_fetch_and_index` | Fetch URL, chunk and index. Cache reuses content within TTL (default 24h, override per-call with `ttl: <ms>`). `ttl: 0` or `force: true` to bypass. Pass `requests: [{url, source}, ...]` + `concurrency: 1-8` for parallel multi-URL. | 60 KB → 40 B |
 | `ctx_stats` | Show context savings, call counts, and session statistics. | — |
 | `ctx_doctor` | Diagnose installation: runtimes, hooks, FTS5, versions. | — |
@@ -1494,7 +1496,7 @@ Works on **all platforms**. On Claude Code, slash commands (`/ctx-stats`, `/ctx-
 | Test output (30 suites) | 6.0 KB | 337 B | 95% |
 | Repo research (subagent) | 986 KB | 62 KB | 94% |
 
-Over a full session: 315 KB of raw output becomes 5.4 KB. Session time extends from ~30 minutes to ~3 hours.
+Summed over the 14 `ctx_execute_file` scenarios: 315 KB of raw output becomes 5.4 KB — 98% kept out. Session time extends from ~30 minutes to ~3 hours.
 
 [Full benchmark data with 21 scenarios →](BENCHMARK.md)
 

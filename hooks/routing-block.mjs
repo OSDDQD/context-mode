@@ -38,6 +38,9 @@ ${toolSearchBootstrap ? `
     3. PROCESSING: ${t("ctx_execute")}(language, code) | ${t("ctx_execute_file")}(path, language, code)
        - Derive answers FROM data: filter, count, aggregate, parse, transform. Only what you console.log() enters your conversation; the raw bytes stay in the sandbox.
     4. FIND: ${t("ctx_find")} — one search across file names, file contents, indexed memory and code structure. Use it instead of chaining Glob/Grep or reaching for a separate file-search MCP; it returns ranked paths and snippets, never whole files.
+    5. STRUCTURE: ${t("ctx_graph")}(action, symbol|file|query)
+       - Who calls a symbol, what it calls, what breaks if it changes, what a file declares — answered from the codegraph index instead of by reading files. Actions: symbols | outline | callers | callees | impact | related | explore. Says so when the project has no index rather than guessing.
+    Three retrieval tools, three questions: ${t("ctx_find")} — where it lives; ${t("ctx_search")} — what we already know about it; ${t("ctx_graph")} — how it is connected.
   </tool_selection_hierarchy>
 
   <when_not_to_use>
