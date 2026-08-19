@@ -186,6 +186,10 @@ function extractFileAndRule(input: HookInput): SessionEvent[] {
     // pure / sync / hot-path-safe — the tradeoff is that adding a new
     // platform requires updating this regex.
     //
+    // The list stays wider than the two supported hosts on purpose: it
+    // matches rule files PRESENT IN A PROJECT, and a repository can carry a
+    // GEMINI.md or a .cursor/ directory whatever agent is reading it today.
+    //
     //   Filenames: CLAUDE.md, AGENTS.md, AGENTS.override.md, GEMINI.md,
     //              QWEN.md, KIRO.md, copilot-instructions.md,
     //              context-mode.mdc
@@ -266,6 +270,29 @@ function extractFileAndRule(input: HookInput): SessionEvent[] {
     const patchTargets = extractApplyPatchTargets(
       String(tool_input["command"] ?? tool_input["patch"] ?? ""),
     );
+    for (const target of patchTargets) {
+      events.push({
+        type: target.type,
+        category: "file",
+        data: safeString(target.path),
+        priority: 1,
+      });
+    }
+    return events;
+  }
+
+  // Codex writes files two ways, and only one of them arrived here. Besides
+  // the dedicated `apply_patch` tool above, the model can run the same patch
+  // as a shell command — `apply_patch <<'EOF' … EOF` — which reaches this
+  // extractor as `Bash` (normalized from shell/local_shell/exec_command/
+  // container.exec). Down that path the patch envelope sits inside the
+  // command text, so the branch above never saw it and a Codex session that
+  // edited files through the shell recorded no file_edit at all: the session
+  // memory said the model had read files and run commands, and never that it
+  // changed anything.
+  if (tool_name === "Bash") {
+    if (isToolError(input)) return events;
+    const patchTargets = extractApplyPatchTargets(String(tool_input["command"] ?? ""));
     for (const target of patchTargets) {
       events.push({
         type: target.type,
@@ -784,7 +811,10 @@ function extractPlan(input: HookInput): SessionEvent[] {
     }
   }
 
-  if (input.tool_name === "apply_patch") {
+  // Same two-path story as the file extractor: a patch run through the shell
+  // carries its targets in the command text. Accept both spellings so a plan
+  // file written on Codex is recorded whichever way the patch was applied.
+  if (input.tool_name === "apply_patch" || input.tool_name === "Bash") {
     if (isToolError(input)) return [];
     const patchTargets = extractApplyPatchTargets(
       String(input.tool_input["command"] ?? input.tool_input["patch"] ?? ""),
@@ -1582,315 +1612,6 @@ export interface AgentUsageCounts {
   native_cost_usd?: number | null;
 }
 
-// ── Kimi Code (kimi-code) usage parsers ────────────────────────────────────
-// Implementation lives in src/adapters/kimi/usage.ts (per adapter ownership);
-// re-exported here so the hook-reachable session-extract bundle can import the
-// cursor-gated wire.jsonl reader without a separate per-adapter bundle. The
-// import is type-only-free (runtime callees buildAgentUsageEvent are hoisted),
-// so the extract.ts <-> usage.ts cycle is load-order safe.
-export { parseKimiUsage, extractKimiUsageSince } from "../adapters/kimi/usage.js";
-
-// ── Qwen Code (qwen-code) usage parsers ────────────────────────────────────
-// Implementation lives in src/adapters/qwen-code/usage.ts (per adapter
-// ownership); re-exported here so the hook-reachable session-extract bundle can
-// import the cursor-gated chats/<sessionId>.jsonl reader via the shared
-// loadExtract() loader, exactly like the kimi re-export above. Same load-order
-// safety: runtime callee buildAgentUsageEvent is hoisted within this module.
-export { parseQwenUsage, extractQwenUsageSince } from "../adapters/qwen-code/usage.js";
-
-/**
- * Pi (oh-my-pi) per-turn usage parser.
- *
- * Maps a Pi `turn_end` payload (`{ message: AssistantMessage }`) to the
- * `buildAgentUsageEvent` input shape, or null when there is nothing to record.
- *
- * Field provenance (adapter-matrix/pi.md @320261f + cited refs):
- *   - usage:        AssistantMessage.usage          (ai/src/types.ts:521 -> catalog/src/types.ts:100-145)
- *   - model_id:     AssistantMessage.model          (ai/src/types.ts:510; kept "provider/model" — builder normalizes)
- *   - input:        Usage.input                     -> input_tokens
- *   - output:       Usage.output                    -> output_tokens
- *   - cacheWrite:   Usage.cacheWrite                -> cache_creation_tokens
- *   - cacheRead:    Usage.cacheRead                 -> cache_read_tokens
- *   - native USD:   Usage.cost.total                -> native_cost_usd (HIGH confidence; no price-table needed)
- *
- * The event is per-turn incremental (per-response usage; anthropic.ts:1893-1901;
- * "for the turn" catalog/types.ts:103), so each turn_end maps to exactly one
- * agent_usage event with no cross-turn accumulation.
- *
- * Algorithmic + null-safe, NO regex. Accepts either the full TurnEndEvent
- * (`{ message }`) or a bare AssistantMessage (`{ usage, model }`) so callers
- * can pass `event` or `event.message` interchangeably. Returns null when the
- * payload is not an assistant message, carries no usage object, or every token
- * bucket is zero/absent (an all-zero turn emits no event — matches
- * buildAgentUsageEvent's own zero->null contract).
- */
-export function parsePiUsage(payload: unknown): AgentUsageCounts | null {
-  if (!payload || typeof payload !== "object") return null;
-  const root = payload as Record<string, unknown>;
-
-  // Unwrap TurnEndEvent.message when present; otherwise treat the payload as
-  // the AssistantMessage itself.
-  const maybeMessage = root.message;
-  const message: Record<string, unknown> =
-    maybeMessage && typeof maybeMessage === "object"
-      ? (maybeMessage as Record<string, unknown>)
-      : root;
-
-  // Only assistant turns carry LLM usage. Custom/non-LLM turns are skipped.
-  // Tolerate a missing role (some payloads omit it) but reject an explicit
-  // non-assistant role.
-  if (typeof message.role === "string" && message.role !== "assistant") {
-    return null;
-  }
-
-  const usageRaw = message.usage;
-  if (!usageRaw || typeof usageRaw !== "object") return null;
-  const usage = usageRaw as Record<string, unknown>;
-
-  const num = (v: unknown): number =>
-    typeof v === "number" && Number.isFinite(v) && v > 0 ? v : 0;
-
-  const input_tokens = num(usage.input);
-  const output_tokens = num(usage.output);
-  const cache_creation_tokens = num(usage.cacheWrite);
-  const cache_read_tokens = num(usage.cacheRead);
-
-  // Zero-everything turn → null (mirrors buildAgentUsageEvent's contract; keeps
-  // the DB free of no-op cost events).
-  if (
-    input_tokens <= 0 &&
-    output_tokens <= 0 &&
-    cache_creation_tokens <= 0 &&
-    cache_read_tokens <= 0
-  ) {
-    return null;
-  }
-
-  // Pi-native USD cost lives on usage.cost.total. Preserve it only when finite;
-  // omit (null) on absence so the builder falls back to the pricing catalog.
-  let native_cost_usd: number | null = null;
-  const costRaw = usage.cost;
-  if (costRaw && typeof costRaw === "object") {
-    const total = (costRaw as Record<string, unknown>).total;
-    if (typeof total === "number" && Number.isFinite(total)) {
-      native_cost_usd = total;
-    }
-  }
-
-  const model_id = typeof message.model === "string" ? message.model : "";
-
-  return {
-    model_id,
-    input_tokens,
-    output_tokens,
-    cache_creation_tokens,
-    cache_read_tokens,
-    native_cost_usd,
-  };
-}
-
-/**
- * openclaw `model.usage` diagnostic-event capture — parseOpenclawUsage.
- *
- * openclaw exposes a first-class `model.usage` diagnostic event
- * (`DiagnosticUsageEvent`, refs/platforms/openclaw/src/infra/diagnostic-events.ts:18-47),
- * emitted once per turn and consumed via `onDiagnosticEvent(listener)`
- * (diagnostic-events.ts:1156) — the same bus the first-party diagnostics-otel /
- * diagnostics-prometheus extensions read.
- *
- * Field mapping (openclaw → AgentUsageCounts):
- *   evt.usage.input     → input_tokens
- *   evt.usage.output    → output_tokens
- *   evt.usage.cacheWrite→ cache_creation_tokens   (cache-creation)
- *   evt.usage.cacheRead → cache_read_tokens       (cache-read)
- *   evt.costUsd         → native_cost_usd  (pre-computed via estimateUsageCost,
- *                                           agent-runner.ts:1995 — preferred over catalog)
- *   evt.model           → model_id
- *
- * CRITICAL: read `evt.usage` (the PER-TURN TOTAL — "Last Turn Total"
- * agent-runner.ts:943), NEVER `evt.lastCallUsage` (the last-model-call DELTA,
- * diagnostic-events.ts:34-40). Summing both would double-count.
- *
- * Returns AgentUsageCounts (the buildAgentUsageEvent input shape) or null when
- * the event is not a usage event / carries no usage / sums to zero. Pure,
- * null-safe, algorithmic — NO regex.
- */
-export function parseOpenclawUsage(payload: unknown): AgentUsageCounts | null {
-  if (!payload || typeof payload !== "object") return null;
-  const evt = payload as Record<string, unknown>;
-
-  // Only the `model.usage` diagnostic carries token usage. Tolerate an absent
-  // type (defensive against a thinner payload variant) but reject any explicit
-  // non-usage diagnostic (model.failover, log.record, …).
-  if (typeof evt.type === "string" && evt.type !== "model.usage") {
-    return null;
-  }
-
-  // PER-TURN TOTAL lives on `usage`. `lastCallUsage` is the last-call delta and
-  // must NOT be consumed — reading it instead would understate (or, when summed
-  // with usage, double-count) the turn.
-  const usageRaw = evt.usage;
-  if (!usageRaw || typeof usageRaw !== "object") return null;
-  const usage = usageRaw as Record<string, unknown>;
-
-  const num = (v: unknown): number =>
-    typeof v === "number" && Number.isFinite(v) && v > 0 ? v : 0;
-
-  const input_tokens = num(usage.input);
-  const output_tokens = num(usage.output);
-  const cache_creation_tokens = num(usage.cacheWrite);
-  const cache_read_tokens = num(usage.cacheRead);
-
-  // Zero-everything turn → null (mirrors buildAgentUsageEvent's contract; keeps
-  // the DB free of no-op cost events).
-  if (
-    input_tokens <= 0 &&
-    output_tokens <= 0 &&
-    cache_creation_tokens <= 0 &&
-    cache_read_tokens <= 0
-  ) {
-    return null;
-  }
-
-  // openclaw ships a pre-computed USD cost at the TOP LEVEL (`evt.costUsd`, not
-  // nested under usage). Preserve it only when finite; omit (null) on absence so
-  // the builder falls back to the pricing catalog.
-  const costRaw = evt.costUsd;
-  const native_cost_usd: number | null =
-    typeof costRaw === "number" && Number.isFinite(costRaw) ? costRaw : null;
-
-  const model_id = typeof evt.model === "string" ? evt.model : "";
-
-  return {
-    model_id,
-    input_tokens,
-    output_tokens,
-    cache_creation_tokens,
-    cache_read_tokens,
-    native_cost_usd,
-  };
-}
-
-/**
- * opencode per-turn usage parser.
- *
- * Ground truth: context-mode-platform/docs/prds/2026-06-paid-observability/
- * adapter-matrix/opencode.md. opencode tracks usage per *assistant message*; the
- * usage-bearing payload reaches a plugin via the `message.updated` bus event,
- * whose `event.properties.info` is the full Message. The assistant token shape
- * (refs platforms/opencode .../session/message.ts) is:
- *   info.tokens = { input, output, reasoning, cache: { read, write } }
- *   info.cost   = USD cost for this message
- *   info.modelID / info.providerID  (older refs may expose a single info.model)
- *
- * Field mapping (refs message.ts):
- *   tokens.input        -> input_tokens
- *   tokens.output       -> output_tokens
- *   tokens.cache.read   -> cache_read_tokens
- *   tokens.cache.write  -> cache_creation_tokens
- *   modelID/providerID  -> model_id (`${providerID}/${modelID}` when both present)
- *   cost                -> native_cost_usd
- *
- * LAST-STEP-SNAPSHOT CAVEAT (refs processor.ts:717-718): message-level
- * `.tokens` is OVERWRITTEN every step-finish, so it holds the LAST step's usage
- * — not the turn total. `.cost`, however, ACCUMULATES (`cost += usage.cost`) and
- * is the correct cumulative turn cost. We therefore pass `info.cost` through as
- * native_cost_usd so the billed $ is exact even though the token snapshot is
- * imprecise; the token columns remain best-effort (last-step) telemetry. A true
- * turn-total token sum would require summing per-step Step.Ended parts, which the
- * `message.updated` payload does not carry — out of scope for this snapshot-based
- * capture.
- *
- * Accepts either the bus event (`{ properties: { info } }`), the wrapped
- * `{ event: { properties: { info } } }`, or the bare Message (`info`) so the
- * caller can hand us whatever the SDK surfaces. NO regex — pure algorithmic,
- * null-safe traversal. Returns null when the payload is not an assistant
- * message, carries no tokens object, or every token bucket is zero/absent
- * (mirrors buildAgentUsageEvent's zero->null contract).
- */
-export function parseOpencodeUsage(payload: unknown): AgentUsageCounts | null {
-  if (!payload || typeof payload !== "object") return null;
-  const root = payload as Record<string, unknown>;
-
-  // Unwrap, most-specific first: { event: { properties: { info } } } →
-  // { properties: { info } } → bare message. Each hop is guarded so a missing
-  // layer simply falls through to treating the current object as the message.
-  const eventLayer =
-    root.event && typeof root.event === "object"
-      ? (root.event as Record<string, unknown>)
-      : root;
-  const propsLayer =
-    eventLayer.properties && typeof eventLayer.properties === "object"
-      ? (eventLayer.properties as Record<string, unknown>)
-      : eventLayer;
-  const message: Record<string, unknown> =
-    propsLayer.info && typeof propsLayer.info === "object"
-      ? (propsLayer.info as Record<string, unknown>)
-      : root;
-
-  // Only assistant messages carry token usage. Tolerate a missing role but
-  // reject an explicit non-assistant one.
-  if (typeof message.role === "string" && message.role !== "assistant") {
-    return null;
-  }
-
-  const tokensRaw = message.tokens;
-  if (!tokensRaw || typeof tokensRaw !== "object") return null;
-  const tokens = tokensRaw as Record<string, unknown>;
-
-  const num = (v: unknown): number =>
-    typeof v === "number" && Number.isFinite(v) && v > 0 ? v : 0;
-
-  const cacheRaw = tokens.cache;
-  const cache =
-    cacheRaw && typeof cacheRaw === "object"
-      ? (cacheRaw as Record<string, unknown>)
-      : {};
-
-  const input_tokens = num(tokens.input);
-  const output_tokens = num(tokens.output);
-  const cache_read_tokens = num(cache.read);
-  const cache_creation_tokens = num(cache.write);
-
-  // Zero-everything turn → null (keeps the DB free of no-op cost events).
-  if (
-    input_tokens <= 0 &&
-    output_tokens <= 0 &&
-    cache_creation_tokens <= 0 &&
-    cache_read_tokens <= 0
-  ) {
-    return null;
-  }
-
-  // Native cumulative USD cost (preferred — exact, immune to the last-step
-  // token-snapshot imprecision). Omit (null) on absence so the builder falls
-  // back to the pricing catalog over the last-step token columns.
-  const costRaw = message.cost;
-  const native_cost_usd =
-    typeof costRaw === "number" && Number.isFinite(costRaw) ? costRaw : null;
-
-  // Billed model id. Prefer the `${providerID}/${modelID}` pair (how opencode
-  // itself addresses the model); fall back to a bare modelID, then a single
-  // `model` string (older refs shape). Empty when none present.
-  const modelID = typeof message.modelID === "string" ? message.modelID : "";
-  const providerID =
-    typeof message.providerID === "string" ? message.providerID : "";
-  let model_id = "";
-  if (modelID.length > 0) {
-    model_id = providerID.length > 0 ? `${providerID}/${modelID}` : modelID;
-  } else if (typeof message.model === "string") {
-    model_id = message.model;
-  }
-
-  return {
-    model_id,
-    input_tokens,
-    output_tokens,
-    cache_creation_tokens,
-    cache_read_tokens,
-    native_cost_usd,
-  };
-}
 
 /**
  * Build a structured `agent_usage` event from summed per-model token counts.
@@ -1940,80 +1661,6 @@ export function buildAgentUsageEvent(counts: {
   if (cache_creation_tokens > 0) event.cache_creation_tokens = cache_creation_tokens;
   if (cost !== null) event.cost_usd = cost;
   return event;
-}
-
-/**
- * gemini-cli AfterModel usage capture — parse ONE AfterModel hook payload into
- * a builder `agent_usage` event (or null). Pure, null-safe, struct-only — NO regex.
- *
- * Refs (docs/prds/2026-06-paid-observability/adapter-matrix/gemini-cli.md):
- *   - AfterModel fires per model call inside the gemini-cli stream loop
- *     (geminiChat.ts:1213); the hook input carries `llm_request` + `llm_response`
- *     (hooks/types.ts:692-695).
- *   - `llm_response.usageMetadata` exposes promptTokenCount / candidatesTokenCount
- *     / totalTokenCount (hookTranslator.ts:60-64).
- *   - model_id = `response.modelVersion || req.model` (loggingContentGenerator.ts:405,553).
- *
- * Mapping → builder shape:
- *   promptTokenCount        → input_tokens
- *   candidatesTokenCount    → output_tokens
- *   thoughtsTokenCount      → ADDED into output_tokens (Gemini bills reasoning as output)
- *   cachedContentTokenCount → cache_read_tokens (when present)
- *   model_id                → response.modelVersion || llm_request.model
- *
- * CAVEAT — the DECOUPLED AfterModel payload (hookTranslator.ts:60-64) forwards
- * only prompt/candidates/total and DROPS cachedContentTokenCount +
- * thoughtsTokenCount. We map those two defensively WHEN PRESENT (richer payload
- * variant / future fix / OTel-fed input) but never depend on them — the common
- * case is input+output only. For full cached/thoughts fidelity the OTel
- * `api_response` exporter or the chat-recording JSON is the source of record.
- *
- * MULTI-CALL TURNS — one user turn that triggers tool calls spans MULTIPLE
- * model calls, each AfterModel cumulative within itself. This fn emits ONE
- * priced event PER AfterModel call (each call is one billed round-trip).
- * Per-userPromptId summation into a single per-turn total is DEFERRED — emitting
- * per-call never double-counts, since each call's usageMetadata is the
- * authoritative total for that call.
- */
-export function parseGeminiUsage(afterModelPayload: unknown): SessionEvent | null {
-  if (!afterModelPayload || typeof afterModelPayload !== "object") return null;
-  const payload = afterModelPayload as Record<string, unknown>;
-
-  const resp = payload.llm_response;
-  if (!resp || typeof resp !== "object") return null;
-  const response = resp as Record<string, unknown>;
-
-  const um = response.usageMetadata;
-  if (!um || typeof um !== "object") return null;
-  const usage = um as Record<string, unknown>;
-
-  const num = (v: unknown): number => (typeof v === "number" && Number.isFinite(v) ? v : 0);
-
-  const input = num(usage.promptTokenCount);
-  const candidates = num(usage.candidatesTokenCount);
-  const thoughts = num(usage.thoughtsTokenCount);
-  const cached = num(usage.cachedContentTokenCount);
-  // Gemini bills reasoning (thoughts) as output tokens — fold into output.
-  const output = candidates + thoughts;
-
-  // model_id = response.modelVersion (server-confirmed) || llm_request.model.
-  const req = payload.llm_request;
-  const reqModel =
-    req && typeof req === "object" && typeof (req as Record<string, unknown>).model === "string"
-      ? ((req as Record<string, unknown>).model as string)
-      : "";
-  const modelVersion = typeof response.modelVersion === "string" ? response.modelVersion : "";
-  const modelId = modelVersion.length > 0 ? modelVersion : reqModel;
-
-  // gemini exposes no native cost — cost_usd is derived from the pricing catalog
-  // inside buildAgentUsageEvent (native_cost_usd omitted). All-zero ⇒ null.
-  return buildAgentUsageEvent({
-    model_id: modelId,
-    input_tokens: input,
-    output_tokens: output,
-    cache_creation_tokens: 0,
-    cache_read_tokens: cached,
-  });
 }
 
 /**
@@ -2649,35 +2296,26 @@ export function resetIterationLoopState(): void {
 // ── Public API ─────────────────────────────────────────────────────────────
 
 /**
- * Map platform-native tool names (Qwen Code, Gemini CLI, OpenCode, etc.) to the
- * canonical Claude Code names this extractor branches on. Without this, Qwen's
- * `run_shell_command` events would silently produce zero git/cwd/env extractions.
+ * Map Codex CLI's native tool names to the canonical Claude Code names this
+ * extractor branches on. Without it, a Codex `shell` event would silently
+ * produce zero git/cwd/env extractions.
  *
- * Evidence: refs/platforms/qwen-code/packages/core/src/tools/tool-names.ts
+ * The map used to carry rows for Qwen Code, Gemini CLI, OpenCode and
+ * Antigravity CLI as well; those went with their hosts. What is left is one
+ * host's vocabulary, and Codex spells the same operation five ways depending
+ * on which exec path ran, which is why Bash has five keys.
+ *
+ * There is deliberately no row for Codex's file-edit tool. `apply_patch` is
+ * branched on under its own name in `extractFileAndRule` and `extractPlan`,
+ * so renaming it to `Edit` would lose the patch envelope those branches
+ * parse. The gap that DID exist was one layer over: the same patch run as a
+ * shell command normalizes to `Bash` here, and until that branch was added
+ * the targets inside the command text produced no file event at all.
+ *
+ * Evidence: openai/codex codex-rs/core/src/tools/ — `shell`, `local_shell`,
+ * `exec_command` and `container.exec` are all emitted, per exec mode.
  */
 const TOOL_NAME_NORMALIZE: Record<string, string> = {
-  // Qwen Code / Gemini CLI native names
-  run_shell_command: "Bash",
-  read_file: "Read",
-  read_many_files: "Read",
-  grep_search: "Grep",
-  search_file_content: "Grep",
-  web_fetch: "WebFetch",
-  write_file: "Write",
-  edit: "Edit",
-  glob: "Glob",
-  todo_write: "TodoWrite",
-  ask_user_question: "AskUserQuestion",
-  list_directory: "LS",
-  save_memory: "Memory",
-  skill: "Skill",
-  exit_plan_mode: "ExitPlanMode",
-  agent: "Agent",
-  // OpenCode native names
-  bash: "Bash",
-  view: "Read",
-  grep: "Grep",
-  fetch: "WebFetch",
   // Codex CLI
   shell: "Bash",
   shell_command: "Bash",
@@ -2685,14 +2323,6 @@ const TOOL_NAME_NORMALIZE: Record<string, string> = {
   "container.exec": "Bash",
   local_shell: "Bash",
   grep_files: "Grep",
-  // Antigravity CLI (`agy`) native names. Keep in sync with the two other agy
-  // maps: hooks/antigravity-cli/payload.mjs (normalizeAgyToolName) and
-  // hooks/core/routing.mjs (TOOL_ALIASES).
-  run_command: "Bash",
-  view_file: "Read",
-  read_url_content: "WebFetch",
-  list_dir: "LS",
-  search_web: "WebSearch",
 };
 
 function normalizeHookInput(input: HookInput): HookInput {

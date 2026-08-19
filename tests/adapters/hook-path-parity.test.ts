@@ -9,26 +9,19 @@ import {
   type HookType as ClaudeHookType,
 } from "../../src/adapters/claude-code/hooks.js";
 
-import {
-  HOOK_SCRIPTS as GEMINI_HOOK_SCRIPTS,
-  buildHookCommand as buildGeminiHookCommand,
-  type HookType as GeminiHookType,
-} from "../../src/adapters/gemini-cli/hooks.js";
-
-import {
-  HOOK_SCRIPTS as KIRO_HOOK_SCRIPTS,
-  buildHookCommand as buildKiroHookCommand,
-} from "../../src/adapters/kiro/hooks.js";
-
 /**
- * Cross-adapter parity test for issue #712.
+ * Hook path parity — issue #712.
  *
  * For every adapter whose `buildHookCommand` emits an absolute filesystem
- * path (i.e. NOT a CLI-dispatcher Tier C adapter — vscode-copilot,
- * jetbrains-copilot, cursor, codex deliberately emit
- * `context-mode hook <platform> <event>` strings and are excluded), the
- * emitted command MUST resolve to a script that exists in the published
- * tree under the same relative layout HOOK_MAP in src/cli.ts uses.
+ * path, the emitted command MUST resolve to a script that exists in the
+ * published tree under the same relative layout HOOK_MAP in src/cli.ts uses.
+ *
+ * Since the fifteen-host removal that is claude-code alone: gemini-cli and
+ * kiro were the other two path-emitting adapters and left with their hosts,
+ * and codex emits a CLI-dispatcher string instead. "Cross-adapter parity" is
+ * therefore now a one-row table — but the check it performs is not about
+ * comparing adapters to each other, it is about comparing each adapter's emit
+ * to the tree, and that keeps working at one row.
  *
  * Why this test exists: issue #712 — gemini-cli's `buildHookCommand`
  * carried claude-code's flat `hooks/<script>` shape across without
@@ -43,12 +36,11 @@ import {
  * no parsing, no fragile string scraping — just "does the file the
  * command points at actually exist?".
  *
- * Adapters NOT covered here (CLI-dispatcher Tier C):
- *   - vscode-copilot  (PR #620, .github/hooks/context-mode.json is
- *                      workspace-committed; absolute paths leak PII)
- *   - jetbrains-copilot (same as above; .jetbrains/copilot/hooks.json)
- *   - cursor           (CLI dispatcher in .cursor/hooks.json)
- *   - codex            (CLI dispatcher in ~/.codex/hooks.json)
+ * Adapters NOT covered here (CLI-dispatcher Tier C): codex, which writes
+ * `context-mode hook codex <event>` into ~/.codex/hooks.json. The reason that
+ * tier exists — an absolute path in a workspace-committed file leaks the
+ * author's home directory and breaks on every other machine (PR #620) — is
+ * still why it must not be assimilated into this one.
  */
 
 interface AdapterParityCase {
@@ -67,18 +59,6 @@ const adapters: AdapterParityCase[] = [
     scripts: CLAUDE_HOOK_SCRIPTS,
     build: (h, p) => buildClaudeHookCommand(h as ClaudeHookType, p),
     subdir: "",
-  },
-  {
-    platform: "gemini-cli",
-    scripts: GEMINI_HOOK_SCRIPTS,
-    build: (h, p) => buildGeminiHookCommand(h as GeminiHookType, p),
-    subdir: "gemini-cli",
-  },
-  {
-    platform: "kiro",
-    scripts: KIRO_HOOK_SCRIPTS,
-    build: (h, p) => buildKiroHookCommand(h, p),
-    subdir: "kiro",
   },
 ];
 
@@ -111,14 +91,19 @@ describe("hook path parity across adapters (issue #712)", () => {
       });
 
       it("never emits the wrong subdir (regression guard for issue #712)", () => {
-        const otherSubdirs = [
-          "gemini-cli",
-          "kiro",
-          "vscode-copilot",
-          "cursor",
-          "codex",
-          "jetbrains-copilot",
-        ].filter((s) => s !== adapter.subdir);
+        // `hooks/codex/` is the only platform subdir that still exists, which
+        // makes emitting into it the only way this leak can happen now.
+        //
+        // The list used to carry gemini-cli, kiro, vscode-copilot, cursor and
+        // jetbrains-copilot as well, on the argument that a returning
+        // directory should trip here rather than ship. That argument does not
+        // survive contact with the code: no emit path can produce those names
+        // any more, so those five assertions could never fail — and a check
+        // that cannot fail is not a guard, it is a list that makes the test
+        // look wider than it is. If a host comes back it brings its own
+        // adapter, and the adapter belongs in `adapters` above, which is what
+        // actually extends this test.
+        const otherSubdirs = ["codex"].filter((s) => s !== adapter.subdir);
         for (const [hookType, scriptName] of Object.entries(adapter.scripts)) {
           const cmd = adapter.build(hookType, "/fixed/plugin/root");
           for (const wrong of otherSubdirs) {

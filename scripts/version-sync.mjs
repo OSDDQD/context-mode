@@ -20,7 +20,6 @@ import { fileURLToPath } from "node:url";
 export const TARGETS = [
   ".claude-plugin/plugin.json",
   ".claude-plugin/marketplace.json",
-  ".cursor-plugin/plugin.json",
   ".codex-plugin/plugin.json",
   // .codex-plugin/marketplace.json is intentionally absent — Codex CLI
   // reads marketplaces from .agents/plugins/marketplace.json (or
@@ -33,20 +32,11 @@ export const TARGETS = [
   // `interface`, and `plugins[]`), so it doesn't need version-syncing.
   // Per-plugin `version` lives in .codex-plugin/plugin.json which is
   // already in this list.
-  ".openclaw-plugin/openclaw.plugin.json",
-  ".openclaw-plugin/package.json",
-  "openclaw.plugin.json",
-  ".pi/extensions/context-mode/package.json",
-  // Antigravity CLI (agy) plugin bundle manifest — agy installs it via
-  // `agy plugin install configs/antigravity-cli`. Without this entry it would
-  // freeze at its pinned version on the next bump (cf. the .cursor-plugin
-  // v1.0.111 drift the version-sync test guards against).
-  "configs/antigravity-cli/plugin.json",
-  // GitHub Copilot CLI plugin bundle manifest — installed via
-  // `copilot plugin install <repo>:configs/copilot-cli`. Same drift guard as
-  // the agy bundle above: without this it freezes at its pinned version on the
-  // next bump (cf. the .cursor-plugin v1.0.111 drift the version-sync test guards).
-  "configs/copilot-cli/.github/plugin/plugin.json",
+  //
+  // Three entries, down from eleven (15a02cf). Every removed entry was a
+  // manifest for a host this fork no longer ships, and each one was a place the
+  // number could be forgotten — which is the failure D0 spent a wave on. The
+  // shorter this list, the smaller the surface.
 ];
 
 // Every place inside a manifest that carries the version. The writer and
@@ -164,9 +154,6 @@ if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
   else syncManifests();
 }
 
-// Note: package.json's `omp` block intentionally has no `version` field.
-// The OMP loader stamps `manifest.version = pluginPkg.version` from the
-// top-level package.json:version at load time (see
-// refs/platforms/oh-my-pi/packages/coding-agent/src/extensibility/plugins/
-// loader.ts:87), so a duplicate would just drift on every release without
-// adding any signal. The `pi` block follows the same upstream rule.
+// The `pi`, `openclaw` and `omp` blocks that used to sit in package.json were
+// removed with their hosts (15a02cf); none of them carried a `version` field, so
+// nothing about this list changes with them gone.

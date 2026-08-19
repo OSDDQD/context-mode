@@ -204,20 +204,10 @@ await runHook(async () => {
   // estimated `bytes_avoided`. PreToolUse cannot load SessionDB safely (native
   // module load breaks hook stdout), hence the marker indirection.
   if (decision && decision.redirectMeta) {
-    try {
-      const sessionId = getSessionId(input);
-      const meta = decision.redirectMeta;
-      const summary = String(meta.commandSummary ?? "").slice(0, 200);
-      const markerPath = resolve(tmpdir(), `context-mode-redirect-${sessionId}.txt`);
-      // Format: tool:type:bytesAvoided:commandSummary (matches Override C).
-      // commandSummary may legitimately contain `:` (URLs) — don't quote it,
-      // PostToolUse parses only the first 3 colons and treats the rest as data.
-      writeFileSync(
-        markerPath,
-        `${meta.tool}:${meta.type}:${meta.bytesAvoided}:${summary}`,
-        "utf-8",
-      );
-    } catch { /* best-effort — never block hook */ }
+    // Shared with the Codex hook (hooks/core/routing.mjs): one writer, one
+    // reader, one format. The two hosts drifted here before it was shared.
+    const { writeRedirectMarker } = await import("./core/routing.mjs");
+    writeRedirectMarker(getSessionId(input), decision.redirectMeta);
   }
 
   // ─── stdout write is the LAST action — process exits immediately after ───

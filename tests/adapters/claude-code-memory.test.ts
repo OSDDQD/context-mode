@@ -5,9 +5,12 @@ import { join, resolve } from "node:path";
 import { ClaudeCodeAdapter } from "../../src/adapters/claude-code/index.js";
 
 /**
- * Slice 2 — Claude Code adapter inherits BaseAdapter memory defaults.
- * No override needed; verify the inherited values match the
- * documented per-adapter convention.
+ * Claude Code adapter memory/config conventions.
+ *
+ * These three values (config root, instruction file, memory dir) used to be
+ * inherited from BaseAdapter; the base was folded into the adapter when it
+ * dropped to one real user, so they are now written here. The assertions did
+ * not move — they always ran against ClaudeCodeAdapter.
  */
 describe("ClaudeCodeAdapter memory conventions", () => {
   const adapter = new ClaudeCodeAdapter();

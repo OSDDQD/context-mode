@@ -1,3 +1,15 @@
+/**
+ * CLIENT_NAME_TO_PLATFORM — the handshake tier of platform detection.
+ *
+ * This map answers before any env var is read, so an entry going missing does
+ * not fail loudly: the host quietly drops to the env-var or config-dir tier and
+ * is identified by a directory instead of by the name it sent. The fifteen-host
+ * removal shrank the map from twenty-nine entries to three, and the risk during
+ * that edit was exactly this — losing a surviving host's row among the
+ * departing ones. Hence the two-sided assertions below: the supported names
+ * resolve, and nothing else does.
+ */
+
 import { describe, it, expect } from "vitest";
 import { CLIENT_NAME_TO_PLATFORM } from "../../src/adapters/client-map.js";
 
@@ -6,79 +18,58 @@ describe("CLIENT_NAME_TO_PLATFORM", () => {
     expect(CLIENT_NAME_TO_PLATFORM["claude-code"]).toBe("claude-code");
   });
 
-  it("maps antigravity-client → antigravity", () => {
-    expect(CLIENT_NAME_TO_PLATFORM["antigravity-client"]).toBe("antigravity");
-  });
-
-  it("maps gemini-cli-mcp-client → gemini-cli", () => {
-    expect(CLIENT_NAME_TO_PLATFORM["gemini-cli-mcp-client"]).toBe("gemini-cli");
-  });
-
-  it("maps cursor-vscode → cursor", () => {
-    expect(CLIENT_NAME_TO_PLATFORM["cursor-vscode"]).toBe("cursor");
-  });
-
-  it("maps Visual-Studio-Code → vscode-copilot", () => {
-    expect(CLIENT_NAME_TO_PLATFORM["Visual-Studio-Code"]).toBe("vscode-copilot");
-  });
-
-  it("maps Codex → codex", () => {
+  it("maps both Codex client names → codex", () => {
+    // Codex sends `Codex` from the CLI and `codex-mcp-client` from the MCP
+    // client wrapper, depending on how the session was started. Both are real
+    // names observed in handshakes; dropping either sends that shape of Codex
+    // session down to the env-var tier.
     expect(CLIENT_NAME_TO_PLATFORM["Codex"]).toBe("codex");
-  });
-
-  it("maps codex-mcp-client → codex", () => {
     expect(CLIENT_NAME_TO_PLATFORM["codex-mcp-client"]).toBe("codex");
-  });
-
-  it('maps "Kiro CLI" to "kiro"', () => {
-    expect(CLIENT_NAME_TO_PLATFORM["Kiro CLI"]).toBe("kiro");
-  });
-
-  it("maps qwen-code client name to qwen-code platform", () => {
-    expect(CLIENT_NAME_TO_PLATFORM["qwen-code"]).toBe("qwen-code");
-  });
-
-  it('maps "JetBrains Client" to "jetbrains-copilot"', () => {
-    expect(CLIENT_NAME_TO_PLATFORM["JetBrains Client"]).toBe("jetbrains-copilot");
-  });
-
-  it('maps "IntelliJ IDEA" to "jetbrains-copilot"', () => {
-    expect(CLIENT_NAME_TO_PLATFORM["IntelliJ IDEA"]).toBe("jetbrains-copilot");
-  });
-
-  it('maps "PyCharm" to "jetbrains-copilot"', () => {
-    expect(CLIENT_NAME_TO_PLATFORM["PyCharm"]).toBe("jetbrains-copilot");
-  });
-
-  // Issue #542 — Pi → OMP rebrand. Current upstream
-  // refs/platforms/oh-my-pi/packages/coding-agent/src/mcp/client.ts:46-49
-  // ships clientInfo.name = "omp-coding-agent". Older installs still send
-  // "Pi CLI" or "Pi Coding Agent". All three coexist.
-  it('maps "omp-coding-agent" to "omp" (rebrand canonical name)', () => {
-    expect(CLIENT_NAME_TO_PLATFORM["omp-coding-agent"]).toBe("omp");
-  });
-
-  it('maps "Pi CLI" to "pi" (legacy install)', () => {
-    expect(CLIENT_NAME_TO_PLATFORM["Pi CLI"]).toBe("pi");
-  });
-
-  it('maps "Pi Coding Agent" to "pi" (legacy install)', () => {
-    expect(CLIENT_NAME_TO_PLATFORM["Pi Coding Agent"]).toBe("pi");
-  });
-
-  it('maps "kimi-code" to "kimi"', () => {
-    expect(CLIENT_NAME_TO_PLATFORM["kimi-code"]).toBe("kimi");
-  });
-
-  it('maps "kimi" to "kimi"', () => {
-    expect(CLIENT_NAME_TO_PLATFORM["kimi"]).toBe("kimi");
-  });
-
-  it('maps "Kimi Code" to "kimi"', () => {
-    expect(CLIENT_NAME_TO_PLATFORM["Kimi Code"]).toBe("kimi");
   });
 
   it("returns undefined for unknown client name", () => {
     expect(CLIENT_NAME_TO_PLATFORM["some-unknown-client"]).toBeUndefined();
+  });
+
+  it.each([
+    "antigravity-client",
+    "antigravity-cli",
+    "agy",
+    "cursor-vscode",
+    "Visual-Studio-Code",
+    "copilot-cli",
+    "GitHub Copilot CLI",
+    "github-copilot-cli",
+    "JetBrains Client",
+    "IntelliJ IDEA",
+    "PyCharm",
+    "Kilo Code",
+    "Kiro CLI",
+    "Pi CLI",
+    "Pi Coding Agent",
+    "omp-coding-agent",
+    "Zed",
+    "zed",
+    "qwen-code",
+    "qwen-cli-mcp-client",
+    "kimi-code",
+    "kimi",
+    "Kimi Code",
+    "gemini-cli-mcp-client",
+  ])("no longer maps %s (host removed)", (name) => {
+    // A removed host still running against this build would announce itself
+    // here. Resolving it would name a PlatformId with no adapter behind it, so
+    // the correct answer is "unrecognised" and the fall-through to
+    // ClaudeCodeAdapter that getAdapter's default gives it.
+    expect(CLIENT_NAME_TO_PLATFORM[name]).toBeUndefined();
+  });
+
+  it("maps nothing outside the supported platforms", () => {
+    // Guards the shape rather than the rows: every value must be a platform
+    // that still exists, whatever the keys grow into.
+    expect([...new Set(Object.values(CLIENT_NAME_TO_PLATFORM))].sort()).toEqual([
+      "claude-code",
+      "codex",
+    ]);
   });
 });

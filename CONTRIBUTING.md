@@ -34,16 +34,9 @@ src/
   adapters/
     types.ts       → HookAdapter interface, RoutingInstructionsConfig
     detect.ts      → Platform detection via env vars
+    base.ts        → BaseAdapter — config dir, memory dir, instruction files
     claude-code/   → Claude Code adapter (index.ts, hooks.ts, config.ts)
-    qwen-code/     → Qwen Code adapter (extends Claude Code wire protocol)
-    gemini-cli/    → Gemini CLI adapter
-    opencode/      → OpenCode adapter
     codex/         → Codex CLI adapter
-    vscode-copilot/ → VS Code Copilot adapter
-    omp/           → OMP (Oh My Pi) adapter — MCP-only, isolated ~/.omp/ storage (#473)
-  openclaw/
-    workspace-router.ts → Workspace path resolution for Pi Agent sessions
-  openclaw-plugin.ts   → OpenClaw gateway plugin entry (sync register)
 hooks/               → Plain JS hooks (.mjs) — no build needed
 configs/             → Per-platform install files (settings.json, mcp.json, CLAUDE.md, etc.)
 ```
@@ -161,7 +154,7 @@ Where you could not exercise the real path, say so and name the link that went u
 ### 1. Clone and install
 
 ```bash
-git clone https://github.com/mksglu/context-mode.git
+git clone https://github.com/OSDDQD/context-mode.git
 cd context-mode
 npm install
 npm run build  # tsc compiles src/ → build/
@@ -317,7 +310,7 @@ After rebuilding, restart your Claude Code session. The MCP server reloads on se
 | `src/executor.ts` | Polyglot code executor (JS, Python, Shell, etc.) |
 | `src/session/db.ts` | SessionDB — persistent session event storage |
 | `src/session/extract.ts` | Event extractors for PostToolUse hook |
-| `src/adapters/detect.ts` | Platform detection (Claude Code, Gemini CLI, etc.) |
+| `src/adapters/detect.ts` | Platform detection (Claude Code, Codex CLI) |
 | `src/adapters/types.ts` | HookAdapter interface, shared adapter types |
 | `hooks/sessionstart.mjs` | Session lifecycle (startup/compact/resume/clear) |
 | `hooks/posttooluse.mjs` | Real-time event capture from tool calls |
@@ -336,23 +329,22 @@ break quietly:
 | Rule | Why |
 |---|---|
 | Manifest at `.claude-plugin/plugin.json`; components (`commands/`, `agents/`, `skills/`, `hooks/`) at the repo root | Canonical layout — nesting a component inside `.claude-plugin/` makes it invisible |
-| Every directory under `skills/` and `platform-skills/` holds a `SKILL.md` | A skill directory without one is silently skipped |
-| `commands/ctx-*.md` ↔ `platform-skills/ctx-*/` name-for-name | Hosts without slash commands get the skill twin; a command added on one side only reaches half the platforms |
+| Every directory under `skills/` holds a `SKILL.md` | A skill directory without one is silently skipped |
+| Every `commands/ctx-*.md` is named in the injected routing block | Slash commands exist only on Claude Code; the routing block is what a host without them is handed, so a command missing from it reaches half the platforms |
 | Plugin-relative paths only — `${CLAUDE_PLUGIN_ROOT}`, never an absolute path | An absolute path is correct on exactly one machine |
 | `PreToolUse` matchers must not overlap | Claude Code fires one process per matching entry; an entry already covered by another costs a second `node` process and a second pass of the tmpdir markers before every affected tool call |
 | Every hook entry carries an explicit `timeout` | The host default is 60s, and a minute of silence in front of a tool call reads as a hung terminal. Budgets live in `HOOK_TIMEOUTS` (`src/adapters/claude-code/hooks.ts`) and are mirrored in `hooks/hooks.json` |
 
-Two entries in `skills/` are deliberately not skills and the walk must tolerate them:
+One entry in `skills/` is deliberately not a skill, and the walk must tolerate it:
 
-- **`skills/.ignore`** — a Pi ignore-list, not a skill and not a directory. Pi's skill
-  loader (`@mariozechner/pi-coding-agent`) scans skill directories with
-  `includeRootFiles=true` and reads `.ignore` / `.gitignore` / `.fdignore` to decide
-  what to skip. Keeping the list in-package is what stops Pi from parsing a stray
-  markdown file as a skill even if a stale copy reaches a published tarball
-  (issue #496 / the v1.0.120 regression). It must stay inside `skills/` — that is the
-  only directory Pi consults — so any code walking `skills/` has to expect a file
-  there, not only directories.
-- Anything the `.ignore` list names (currently `UPSTREAM-CREDITS.md`).
+- **`skills/.ignore`** — a file, not a directory and not a skill, so any code walking
+  `skills/` has to expect one there. It was written for Pi's skill loader
+  (`@mariozechner/pi-coding-agent`), which scanned skill directories with
+  `includeRootFiles=true` and read `.ignore` / `.gitignore` / `.fdignore` to decide
+  what to skip (issue #496 / the v1.0.120 regression). Pi went with the other
+  fourteen hosts in 15a02cf and nothing reads the file today; the entry it lists,
+  `UPSTREAM-CREDITS.md`, is not in `skills/` either. Whether the file stays is open —
+  the layout rule above is what has to hold, not the loader that motivated it.
 
 ## TDD Workflow
 
@@ -363,7 +355,7 @@ We follow test-driven development. Every PR must include tests.
 The skill lives under `.claude/skills/context-mode-ops/` in this repo (moved from the deprecated `skills/` location in #439). Install via the direct path:
 
 ```bash
-npx skills add https://github.com/mksglu/context-mode/tree/main/.claude/skills/context-mode-ops
+npx skills add https://github.com/OSDDQD/context-mode/tree/main/.claude/skills/context-mode-ops
 ```
 
 ### Red-Green-Refactor
@@ -378,7 +370,7 @@ npx skills add https://github.com/mksglu/context-mode/tree/main/.claude/skills/c
 
 | Domain | Test File |
 |---|---|
-| Adapters | `tests/adapters/<platform>.test.ts` |
+| Adapters | `tests/adapters/claude-code.test.ts`, `tests/adapters/codex.test.ts` |
 | Client detection | `tests/adapters/detect.test.ts`, `tests/adapters/client-map.test.ts` |
 | Search & FTS5 | `tests/core/search.test.ts` |
 | Server & tools | `tests/core/server.test.ts` |
@@ -387,13 +379,9 @@ npx skills add https://github.com/mksglu/context-mode/tree/main/.claude/skills/c
 | Hook routing | `tests/hooks/core-routing.test.ts` |
 | Hook formatting | `tests/hooks/formatters.test.ts` |
 | Hook integration | `tests/hooks/integration.test.ts` |
-| Cursor hooks | `tests/hooks/cursor-hooks.test.ts` |
-| Gemini hooks | `tests/hooks/gemini-hooks.test.ts` |
-| VS Code hooks | `tests/hooks/vscode-hooks.test.ts` |
-| JetBrains hooks | `tests/hooks/jetbrains-hooks.test.ts` |
-| Kiro hooks | `tests/hooks/kiro-hooks.test.ts` |
-| Copilot CLI hooks | `tests/hooks/copilot-cli-hooks.test.ts` |
-| Antigravity CLI hooks | `tests/hooks/antigravity-cli-hooks.test.ts` |
+| Codex hooks | `tests/hooks/codex-goal-compact.test.ts`, `tests/hooks/codex-sessionstart-rule-capture.test.ts` |
+| Cross-host hook wiring | `tests/hooks/platform-bridge-wire.test.ts`, `tests/hooks/platform-detect.test.ts` |
+| Hook path parity | `tests/adapters/hook-path-parity.test.ts` |
 | Session DB | `tests/session/session-db.test.ts` |
 | Session extract | `tests/session/session-extract.test.ts` |
 | Session snapshot | `tests/session/session-snapshot.test.ts` |
@@ -402,7 +390,8 @@ npx skills add https://github.com/mksglu/context-mode/tree/main/.claude/skills/c
 | Executor | `tests/executor.test.ts` |
 | Store/Search | `tests/store.test.ts` |
 | Security | `tests/security.test.ts` |
-| OpenClaw plugin | `tests/plugins/openclaw.test.ts` |
+| Plugin layout | `tests/plugins/plugin-structure.test.ts` |
+| Codex manifest | `tests/plugins/codex-manifest.test.ts` |
 
 If your change doesn't fit any existing file, discuss with the maintainer before creating a new one.
 
@@ -413,34 +402,6 @@ When your change affects tool output (ctx_execute, ctx_search, ctx_fetch_and_ind
 1. Run the same prompt **before** your change (on `main`)
 2. Run it **again** with your change
 3. Include both outputs in your PR
-
-## Testing the OpenClaw Adapter
-
-The OpenClaw adapter has its own test suite and installation workflow.
-
-### Running tests
-
-```bash
-npx vitest run tests/plugins/openclaw.test.ts tests/adapters/openclaw.test.ts
-```
-
-These tests run without a live OpenClaw instance — they mock the plugin API.
-
-### Local OpenClaw testing
-
-To test against a running OpenClaw gateway:
-
-1. Install the plugin:
-   ```bash
-   npm run install:openclaw
-   # Or with a custom state directory:
-   npm run install:openclaw -- /path/to/openclaw-state
-   ```
-   The script picks up `$OPENCLAW_STATE_DIR` from your environment (default: `/openclaw`). It handles building, native dependency rebuild, extension registration, and gateway restart in one step.
-
-2. Open a Pi Agent session and verify hooks fire by checking the debug log output.
-
-See [`docs/adapters/openclaw.md`](docs/adapters/openclaw.md) for hook registration details and known upstream issues.
 
 ## Prose-style policy (issue [#482](https://github.com/mksglu/context-mode/issues/482))
 
@@ -458,27 +419,6 @@ context-mode does not dictate how the model writes its final answer. The four pi
 The regression test at `tests/core/server.test.ts > prose-style policy (#482)` pins the deletion: any caveman-style language landing in `src/server.ts`, `hooks/routing-block.mjs`, or `README.md` will fail CI.
 
 If you genuinely need to nudge the model on style for a specific use case, do it in your own project's `CLAUDE.md` / `AGENTS.md`. Don't ship it inside the framework.
-
-## For Pi developers
-
-context-mode works on Pi now. The extension injects routing rules, registers
-ctx_* tools through the MCP bridge, and the lean `configs/pi/AGENTS.md` keeps
-context budget tight.
-
-**First-time setup:** If you open this project in Pi before running `npm install`
-and `npm run build`, you will see errors. That's normal — the extension needs
-the compiled server bundle. Run the build once and restart.
-
-- If you use Pi: remove `CLAUDE.md` from your project root. Pi.dev reads both
-  CLAUDE.md and AGENTS.md, burning double context on duplicated routing
-  instructions the extension already injects.
-- Use `ctx_search` to recall decisions, errors, and blockers from prior
-  sessions instead of re-reading raw files.
-- Use `ctx_insight` for personal analytics — session activity, tool usage,
-  error rate, project focus.
-
-For the full local dev workflow, build commands, and test instructions, see
-[the contributing guide above](#contributing-to-context-mode).
 
 ## Submitting a Bug Report
 

@@ -102,50 +102,40 @@ await runHook(async () => {
     // large Read). Format: `tool:type:bytesAvoided:commandSummary` (Override C).
     let redirectEmitted = false;
     try {
-      const redirectPath = resolve(tmpdir(), `context-mode-redirect-${sessionId}.txt`);
-      let redirectData;
-      try {
-        redirectData = readFileSync(redirectPath, "utf-8").trim();
-        // Slice 3.3: unlink so the next PostToolUse for an unrelated tool call
-        // does NOT re-emit the same event (no double-accounting).
-        unlinkSync(redirectPath);
-      } catch { /* no marker — Slice 3.4: phantom-event guard */ }
-
-      if (redirectData) {
-        // Parse first 3 colons; the rest (commandSummary) may itself contain
-        // colons (URLs do — `https://`). Avoid `split(":", 4)` which would
-        // truncate the summary at any embedded colon.
-        const i1 = redirectData.indexOf(":");
-        const i2 = i1 >= 0 ? redirectData.indexOf(":", i1 + 1) : -1;
-        const i3 = i2 >= 0 ? redirectData.indexOf(":", i2 + 1) : -1;
-        if (i1 > 0 && i2 > i1 && i3 > i2) {
-          const tool = redirectData.slice(0, i1);
-          const type = redirectData.slice(i1 + 1, i2);
-          const bytesRaw = redirectData.slice(i2 + 1, i3);
-          const summary = redirectData.slice(i3 + 1);
-          const bytesAvoided = Number.parseInt(bytesRaw, 10);
-          if (Number.isFinite(bytesAvoided) && bytesAvoided > 0) {
-            // v1.0.160: route through wire — context-saving (byte-accounting)
-            // widget on the platform reads category='redirect' rows. event
-            // carries bytes_avoided so the bytesList branch in
-            // attributeAndInsertEvents stamps the column.
-            attributeAndInsertEvents(
-              db,
-              sessionId,
-              [{
-                type,
-                category: "redirect",
-                data: `${tool}: ${summary}`,
-                priority: 2,
-                bytes_avoided: bytesAvoided,
-              }],
-              input,
-              projectDir,
-              "PreToolUse",
-              resolveProjectAttributions,
-            );
-            redirectEmitted = true;
-          }
+      // Shared marker reader (hooks/core/routing.mjs) — the Codex hooks use
+      // the same one, so an accounting rule cannot hold on one host and not
+      // the other.
+      const { consumeRedirectMarker, READ_EDIT_EXEMPT_TYPE } = await import("./core/routing.mjs");
+      const marker = consumeRedirectMarker(sessionId);
+      if (marker) {
+        // "Routed, and saved nothing" — the read-before-edit retry that
+        // PreToolUse promised would go through. It has to suppress the
+        // missed-redirect record (otherwise taking the offered way out counts
+        // as a fresh violation, which raises the tally, the cost line and the
+        // escalation step — a loop that feeds itself) while claiming no
+        // saving, because the bytes really did arrive.
+        if (marker.type === READ_EDIT_EXEMPT_TYPE) {
+          redirectEmitted = true;
+        } else if (marker.bytesAvoided > 0) {
+          // v1.0.160: route through wire — the context-saving widget on the
+          // platform reads category='redirect' rows, and bytes_avoided is
+          // stamped by the bytesList branch in attributeAndInsertEvents.
+          attributeAndInsertEvents(
+            db,
+            sessionId,
+            [{
+              type: marker.type,
+              category: "redirect",
+              data: `${marker.tool}: ${marker.summary}`,
+              priority: 2,
+              bytes_avoided: marker.bytesAvoided,
+            }],
+            input,
+            projectDir,
+            "PreToolUse",
+            resolveProjectAttributions,
+          );
+          redirectEmitted = true;
         }
       }
     } catch { /* best-effort — never block hook */ }

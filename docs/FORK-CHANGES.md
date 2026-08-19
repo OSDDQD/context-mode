@@ -1663,6 +1663,95 @@ cheap. `CONTEXT_MODE_COST_NOTICE=0` turns it off. The classification moved into
 same floor — two hosts, one definition of "this went straight into the context
 window".
 
+### Enforcement where the loss is proven before the call
+
+Advice competed with habit and lost. The only rules with full adherence were the
+ones that deny and hand back a ready replacement, so the wave moved two cases from
+advice to refusal — the two where the loss is knowable *before* the call runs.
+
+**A whole-file `Read` at or above `CONTEXT_MODE_READ_DENY_BYTES` (50 000).** The
+refusal carries `ctx_execute_file` on the actual path, not a tool name. It is the
+same 50 000 the large-read byte accounting has always used, and
+`readAccountingBytes()` now derives from `readDenyBytes()` rather than repeating the
+literal: with the threshold lowered to 10 000 the old code refused at 10 KB while
+accounting still began at 50 KB, so every file between them was refused and never
+counted — the plugin reported saving nothing on exactly the reads the operator had
+asked it to be strictest about. A read the caller already bounded with
+`offset`/`limit` is a slice, not a file, and passes unchanged.
+
+**The escape hatch is stated in the refusal itself**, because intent is not visible
+in the call: a 60 KB file being read to edit and one being read to summarise are the
+same request. `Edit` matches against the exact bytes in the conversation and a
+summary is not those bytes, so read-before-edit has to keep working. The refusal
+names three ways out — bound the read, repeat the same path within
+`CONTEXT_MODE_READ_EDIT_WINDOW_MS` (120 000), or set the threshold to `0` — and a
+refusal the model cannot read its way past is one it gets stuck behind, which costs
+more than the bytes.
+
+**And the accounting had to honour the hatch, which is where it first went wrong.**
+The retry is an ordinary allowed `Read`, so PostToolUse saw a heavy native call with
+no marker and recorded a fresh violation: the tally grew, the cost line fired, the
+adherence denominator gained one, and the ladder climbed a step. Taking the way out
+the plugin had just offered made the next refusal harsher — a loop that feeds
+itself, aimed squarely at the one case the hatch exists for. The retry now carries a
+`read-edit-exempt` marker with `bytesAvoided: 0`: already accounted for, and
+claiming no saving, because the bytes really did arrive. Below the collection floor
+no marker is needed — nothing under it was ever counted as a violation. The marker
+type is one exported constant rather than two string literals, since a typo on
+either side would silently restore the loop.
+
+**A known-heavy Bash command** is denied with `ctx_batch_execute`. Four entries by
+default (`npm test`, `docker logs`, `git log -p`, `find /`), configurable through
+`CONTEXT_MODE_BASH_DENY_COMMANDS`; an entry that will not compile as a regex falls
+back to a case-insensitive substring test, and an empty value turns the list off.
+The refusal names the entry it matched, so the way to watch that one command
+directly is to drop it from the list rather than to fight the hook.
+
+**`Grep` and `Glob` only ask, and only when unbounded** — no path, no glob, no
+`head_limit`, and asking for matching lines rather than file names, all four
+together, because each condition alone is ordinary. They stayed at `ask` on the
+strength of our own measurement, printed two subsections down: `ctx_find` returns
+2.6 KB against `rg -l`'s 0.7 KB and ranks rather than enumerates. Denying an
+exhaustive literal sweep would trade a cheap complete answer for an expensive
+partial one, which is removing a capability rather than routing it. Escalation
+raises the price of a call; it does not invent a capability the replacement lacks.
+
+### Escalation instead of a one-shot nudge
+
+The advisory fired once per session per rule. The first `Read` of a session got it
+and the two-hundredth got silence — in exactly the long sessions where the plugin
+matters most, and after a compaction the model no longer had even the first one.
+Firing it every time was not the fix either: a notice on every call is noise, and
+noise is what gets tuned out.
+
+So the price of a violation grows instead of resetting. Four steps —
+`0` silent, `1` advise, `2` ask, `3` deny — and **the first one is silence**: a
+session that routes its heavy work never hears from the plugin at all. Past the
+threshold the advisory returns carrying the number of bytes already lost, then it
+becomes a confirmation, then a refusal. Capped there; there is no step past
+refusing.
+
+The steps are multiples of `CONTEXT_MODE_NUDGE_AFTER_CALLS` (3) and
+`CONTEXT_MODE_NUDGE_AFTER_BYTES` (102 400), whichever is further along: three
+unrouted heavy calls or 100 KB buys the advisory back, six or 200 KB turns it into a
+confirmation, nine or 300 KB into a refusal. The tone change explains itself in the
+message, naming both knobs and their current values, because a rule that hardens
+without saying why reads as a malfunction.
+
+It moves the same lever D2 built — the same refusal, the same escape hatch, the same
+`ctx_execute_file` handed back — rather than opening a second ladder beside it. Two
+mechanisms that both refuse a `Read` would have to agree about the retry window, and
+they would eventually not.
+
+**No new telemetry.** PreToolUse runs in front of every tool call on a budget
+measured in milliseconds; opening SQLite there to count events would tax the whole
+session to inform the few calls that need it. PostToolUse has the database open and
+has just counted, so it writes the two numbers to one small file and PreToolUse
+reads that — the same rows, the same count, one hop. When the file cannot be read
+the reader returns `null` rather than zeroes, and `null` means the pre-existing
+behaviour: "nothing has leaked" and "cannot tell" must not collapse into the same
+silence.
+
 ### Whether the routing happens at all is a number now
 
 Every change above tries to make the model route more work through the plugin, and
@@ -1732,9 +1821,9 @@ The uncomfortable rows are the point of the section:
   with a 1.78 s p90 — and cold `ctx_search` is the least stable row in the set,
   having reached a 4.1 s p90 on an earlier build. It is paid exactly when the model
   is deciding, for the rest of the session, whether the routed tool is worth using.
-- **Warm, the detour is invisible**: 26 ms, 152 ms and 188 ms of absolute penalty.
-  The multiples look alarming (8×, 19×, ~110×) only because the native baselines are
-  0.2–26 ms.
+- **Warm, the detour is invisible**: 188 ms (`ctx_search`), 152 ms (`ctx_find`) and
+  25–26 ms (both file-reading tools) of absolute penalty. The multiples look alarming
+  (8×, 20×, ~125–130×) only because the native baselines are 0.2–26 ms.
 - **The routed call is slower in every pair, in every regime.** There is no
   configuration in which routing is free.
 
@@ -1774,6 +1863,143 @@ fixed in 35, in CI and README this time.
 `bundle.yml` remains the one workflow that commits to this repository, and stays:
 it rebuilds the bundles when `src/**` changes, which is a defence against the exact
 failure this entry opens with.
+
+## 37. Seventeen hosts become two
+
+`src/adapters/**`, `configs/**`, `.cursor-plugin/`, `.openclaw-plugin/`, `.pi/`,
+`openclaw.plugin.json`, `scripts/version-sync.mjs`, `package.json`,
+`scripts/postinstall.mjs`, `scripts/ctx-debug.sh`,
+`.github/workflows/tier2-e2e-smoke.yml`, `README.md`,
+`docs/platform-support.md`, `.claude/skills/context-mode-ops/*`,
+`src/server.ts`, `.github/FUNDING.yml` (deleted), `web/**`
+
+`15a02cf` removes fifteen client platforms — Gemini CLI, VS Code Copilot,
+JetBrains Copilot, GitHub Copilot CLI, Cursor, OpenCode, KiloCode, OpenClaw,
+Kimi Code, Qwen Code, Antigravity (IDE and `agy`), Kiro, Zed, Pi and OMP —
+leaving Claude Code and Codex. 207 files, 36,541 deleted lines, and not one
+line added: restoring any host is a revert of that commit and nothing else, and
+a conflict with upstream resolves by "our deletion wins" rather than line by
+line. The tree does not compile at that commit, deliberately; the couplings are
+untangled in the one that follows.
+
+**The reason is the multiplier, not the code.** Every change to routing had to
+be reasoned about seventeen times — seventeen hook wire formats, seventeen
+config locations, seventeen session-id conventions — and verified on two, since
+those are the two hosts anyone here actually runs. The other fifteen were
+maintained from documentation and upstream source reading, which is exactly the
+regime where a change looks right and is not. This wave measured what that
+costs: D0 lost two full waves to a version number that eleven manifests had to
+agree on, and eight of those eleven belonged to hosts nobody could test.
+
+**What the reduction bought, concretely.** `version-sync.mjs` went from eleven
+manifests to three (`.claude-plugin/plugin.json`, `.claude-plugin/marketplace.json`,
+`.codex-plugin/plugin.json`) plus `package.json` itself — every removed entry was
+a place the number could be forgotten, and forgetting it is what made `ctx_find`
+and `ctx_graph` invisible for two waves. `package.json` lost its `pi`, `openclaw`
+and `omp` blocks, the `install:openclaw` script, two `files[]` entries, five
+keywords, and a `main`/`exports` pair that pointed at `build/adapters/opencode/`
+and `build/adapters/openclaw/` — build outputs whose sources no longer exist.
+`ctx-debug.sh` lost its fourteen-host detection ladder, its config-file probes
+and its session-directory sweep, all of which were reporting on paths this fork
+can no longer write. The tier-2 smoke workflow lost its Pi job — the only
+implemented one, whose driver script went with the host — and keeps the Claude
+Code placeholder plus the host-independent assertion half
+(`scripts/tier2-smoke/assert-stats.mjs`, covered by
+`tests/tier2-smoke-assert.test.ts`).
+
+**The documentation stops describing hosts that are gone.** The README's install
+section was sixteen `<details>` blocks; it is two, plus the build-prerequisites
+note. Its hook matrix and capability matrix went from eighteen columns to three,
+the per-platform prose from fifteen paragraphs to two, and the routing table
+from fifteen rows to two. `docs/platform-support.md` went from 955 lines to 280
+— fourteen platform sections and twenty-seven matrix rows removed — and now says
+plainly that one paradigm is left: both remaining hosts speak JSON over stdin
+and stdout, which is the paradigm the hooks were written against. The ops skill's
+"respect all 17 adapters equally" rule now names the two it means.
+
+**What is deliberately still there.** `tests/scripts/version-sync.test.ts` keeps
+every assertion it derives from `TARGETS`, and gained a floor
+(`TARGETS.length >= 3`) because a list that shrank to nothing would have made the
+whole suite pass by having nothing left to check. The two named cases for the
+`agy` and Copilot CLI bundles are gone with the bundles — what they asserted, the
+derived assertions still assert for every manifest that exists. And the removed
+hosts stay in this document's earlier entries: they were true when written, and
+a history rewritten to match the present tells you nothing about how it got here.
+
+**The package stops pointing at somebody else's repository.** `package.json`
+still carried upstream's `repository`, `homepage` and `bugs`, so a fork user who
+followed `npm bugs` filed against a tree that does not contain the code they are
+running; `.codex-plugin/plugin.json` carried upstream's author, homepage and
+repository as well, and `.github/FUNDING.yml` pointed the fork's Sponsor button
+at upstream's account. All of it now resolves to `OSDDQD/context-mode`, except
+the funding file, which is removed rather than retargeted — this fork asks for
+nothing, and a Sponsor button that renders an error is worse than none. Upstream
+keeps its credit where credit is the point: `contributors` in `package.json`, the
+"Fork of mksglu/context-mode" line in both plugin descriptions, `docs/UPSTREAM-CREDITS.md`,
+and every issue link that cites the report a fix came from. The same retarget
+applies to the issue templates, the `npx skills add` and `git clone` lines in
+`README.md` and `CONTRIBUTING.md`, and the `/plugin marketplace add` command,
+which was still installing upstream's plugin from a fork's own README. Same class
+as entries 33 and 35, and as the CI job above: an address inherited from a parent
+is not a neutral default, it is a wrong answer that nothing checks.
+
+Three counts were wrong in the same file set. The manifests advertised eleven
+sandbox languages against the twelve in `src/runtime.ts`; the README's host list
+in `package.json:description` still named Gemini CLI, VS Code Copilot and
+OpenCode; and the ops skill's data-verification table sourced three of its ten
+rows from `stats.json`, deleted with the workflow that wrote it. The table now
+says so in place of those rows, because a data-verification table that names a
+missing file is an invitation to invent the number it promised to verify.
+
+**The contributor-facing documentation catches up.** `CONTRIBUTING.md` described
+a `src/adapters/` tree with seven directories that no longer exist, a test matrix
+naming seven hook suites that were deleted, and a whole section on installing and
+testing the OpenClaw adapter through `npm run install:openclaw` — a script the
+previous step removed from `package.json`, pointing at `docs/adapters/openclaw.md`,
+a file in a directory that is gone. The pull-request template asked which of
+fifteen platforms a change affects. Both now describe the two that exist. The
+README's "Used across teams at" logo wall and its Hacker News badge are removed:
+neither claim is this fork's to make, and the marketing skill in this same tree
+forbids exactly that ("if you cannot verify a number, do not use it").
+`docs/adr/0006` keeps its accepted text and gains a dated amendment instead —
+its host-gating argument cited VS Code and JetBrains, and an ADR whose evidence
+is edited under it stops being a record.
+
+**The multi-adapter tests narrowed instead of thinning.** `enumerateAdapterDirs`
+was asserted against a hardcoded list of seventeen names and five hand-picked
+session-dir paths; it is now cross-checked against `getSessionDirSegments` in
+both directions, for every adapter, which covers strictly more than the sample
+did and needs no editing when a host is added — the duplicated segment map in
+`analytics.ts` is deliberate, and a deliberate copy is only safe while something
+proves the two agree. The renderer tests kept their subject and lost their
+ceiling: with two adapters the "Skipped" line can no longer join seven names, so
+the comma join is now proven in the one shape that remains reachable, a machine
+where both hosts hold nothing but fixtures. `auto-memory-adapter` lost the
+GEMINI.md case, which proved instruction-file lookup was table-driven rather than
+an AGENTS.md special case; the surviving half of that property — a second adapter
+choosing a second file name — is pinned with `ClaudeCodeAdapter` against an
+`AGENTS.md` planted in the same directory, so the assertion still fails if the
+adapter is ignored.
+
+**And the update path itself was pointed at upstream.** Found while retargeting the
+addresses above: `ctx_upgrade`'s inline fallback in `src/server.ts` cloned
+`mksglu/context-mode` with the URL written out as a literal. That branch is not an
+edge case — its own comment says "neither CLI file exists (e.g. marketplace
+installs)", which is how this plugin is installed. Running `ctx_upgrade` on a fork
+install therefore overwrote the fork with upstream: every local commit gone, nothing
+printed to say so, and the same command run again would report success.
+
+What makes it the same class as the rest of the day: **the defence already existed
+and was simply not connected here.** `src/util/fork-info.ts` was written for exactly
+this — its own docstring says an unconditional upstream clone "is not an upgrade —
+it is a silent downgrade that deletes every local addition and leaves no trace of
+having done so" — and `resolveUpgradeRepo()` walks operator override → the `fork`
+marker in `package.json` → the git origin of the installed tree → upstream only as a
+last resort. The CLI path used it. The inline path, the one a marketplace install
+actually takes, kept its literal. A mechanism that exists, is correct, and is wired
+to the branch that does not matter is entry 33 and entry 35 again, one layer further
+down: `resolveUpgradeRepo({ pluginRoot }).url` now feeds the clone, and the `fork`
+block in `package.json` resolves it to `OSDDQD/context-mode` on the first step.
 
 ## Merged ahead of upstream: the fetch extraction ladder
 
@@ -1903,6 +2129,12 @@ memory and the code index.
 | `CONTEXT_MODE_DOCTOR_LAYERS` | on | `0` drops the search-layers section from doctor and inventory |
 | `CONTEXT_MODE_ADHERENCE_MIN_BYTES` | collection floor (`2000`) | Heaviness line for the routing-adherence metric; clamped up to `CONTEXT_MODE_MISSED_REDIRECT_MIN_BYTES` |
 | `CONTEXT_MODE_COST_NOTICE` | on | `0` drops the per-call line naming what an unrouted payload cost |
+| `CONTEXT_MODE_READ_DENY_BYTES` | `50000` | Size at or above which a whole-file `Read` is refused with `ctx_execute_file` on the same path; `0` leaves only the advisory |
+| `CONTEXT_MODE_READ_EDIT_WINDOW_MS` | `120000` | How long the refused path may be read anyway — the read-before-edit escape hatch |
+| `CONTEXT_MODE_BASH_DENY_COMMANDS` | `npm test,docker logs,git log -p,find /(\s\|$)` | Comma-separated regexes refused with a ready `ctx_batch_execute`; empty turns the list off |
+| `CONTEXT_MODE_GREP_ASK` | on | `0` stops unbounded `Grep`/`Glob` asking for confirmation |
+| `CONTEXT_MODE_NUDGE_AFTER_CALLS` | `3` | Unrouted heavy calls per step of the escalation ladder (silent → advise → ask → deny) |
+| `CONTEXT_MODE_NUDGE_AFTER_BYTES` | `102400` | The same ladder in leaked bytes; whichever threshold is further along sets the step |
 
 The redaction switches are read by `src/session/redact.ts` and applied by
 `ContentStore` on every path that writes to the index — `index`,
@@ -1956,7 +2188,7 @@ rely on when handling credentials.
 - `tests/hooks/attribution-bundle-parity.test.ts` — the shipped bundle against its source, including the Bug 8 case that the orphan lost
 - `tests/plugins/plugin-structure.test.ts` — the plugin as the host sees it: layout, a `SKILL.md` per skill directory, command ↔ platform-skill parity, no absolute paths in committed manifests, non-overlapping `PreToolUse` matchers, a timeout on every hook, the tool surface (agent allowlist, skill description, README table), fork identity, and the savings claim against its measured basis
 - `tests/scripts/version-freshness.test.ts` — the version must move when the bundles, the hooks or the tool list do
-- `tests/scripts/version-sync.test.ts` — also covers `--check`: the eleven manifests verified without writing
+- `tests/scripts/version-sync.test.ts` — also covers `--check`: every manifest in `TARGETS` verified without writing (eleven when written, three since 15a02cf)
 - `tests/util/delivery-health.test.ts` — which `start.mjs` is running, what its bundle registers, and a cache sweep that spares what is in use
 - `tests/core/tool-description-displacement.test.ts` — every routing target names the native tool it displaces, and says where it does not apply
 - `tests/hooks/sessionstart-survives-compaction.test.ts` — the real hook on all four lifecycle sources, block compared byte for byte

@@ -111,19 +111,34 @@ describe("routePreToolUse", () => {
       );
     });
 
-    it("denies agy run_command CommandLine payloads like Bash command payloads", () => {
+    it("redirects Codex local_shell payloads like Bash command payloads", () => {
+      // Codex names its executor several ways across releases and its
+      // PreToolUse matcher fires on all of them. An alias that stops resolving
+      // does not fail loudly — enforcement just goes quiet on that host.
       const result = routePreToolUse(
-        "run_command",
-        { CommandLine: "curl https://example.com" },
+        "local_shell",
+        { command: "curl https://example.com" },
         undefined,
-        "antigravity-cli",
-        "agy-commandline-curl",
+        "claude-code",
+        "codex-local-shell-curl",
       );
       expect(result).not.toBeNull();
       expect(result!.action).toBe("modify");
       expect((result!.updatedInput as Record<string, string>).command).toContain(
         "curl/wget redirected",
       );
+    });
+
+    it("reads the command out of `cmd` as well as `command`", () => {
+      const result = routePreToolUse(
+        "shell",
+        { cmd: "curl https://example.com" },
+        undefined,
+        "claude-code",
+        "codex-cmd-field-curl",
+      );
+      expect(result).not.toBeNull();
+      expect(result!.action).toBe("modify");
     });
 
     it("denies wget commands with modify action", () => {
@@ -340,14 +355,14 @@ describe("routePreToolUse", () => {
       expect(result!.additionalContext).toBe(READ_GUIDANCE);
     });
 
-    it("treats agy view_file AbsolutePath payloads as Read", () => {
-      resetGuidanceThrottle("agy-view-file");
+    it("reads the target out of `path` as well as `file_path`", () => {
+      resetGuidanceThrottle("read-path-field");
       const result = routePreToolUse(
-        "view_file",
-        { AbsolutePath: "/some/file.ts" },
+        "Read",
+        { path: "/some/file.ts" },
         undefined,
-        "antigravity-cli",
-        "agy-view-file",
+        "claude-code",
+        "read-path-field",
       );
       expect(result).not.toBeNull();
       expect(result!.action).toBe("context");
@@ -395,40 +410,18 @@ describe("routePreToolUse", () => {
       expect(result!.reason).toContain(url);
     });
 
-    it("treats agy read_url_content URL payloads as WebFetch", () => {
+    it("names the URL and both replacement tools in the refusal", () => {
+      // What the removed per-host alias cases were really protecting: whatever
+      // name the call arrived under, the refusal has to hand back something
+      // callable. Neither remaining host aliases WebFetch, so the canonical
+      // name is the only entry point left, and it carries the whole contract.
       const url = "https://example.com/docs";
-      const result = routePreToolUse(
-        "read_url_content",
-        { URL: url },
-        undefined,
-        "antigravity-cli",
-        "agy-read-url",
-      );
+      const result = routePreToolUse("WebFetch", { url }, undefined, "claude-code", "webfetch-contract");
       expect(result).not.toBeNull();
       expect(result!.action).toBe("deny");
       expect(result!.reason).toContain(url);
-      // agy's call surface is context-mode/<tool> (see hooks/core/tool-naming.mjs),
-      // not Claude's mcp__context-mode__<tool> form.
-      expect(result!.reason).toContain("context-mode/ctx_fetch_and_index");
-    });
-
-    it("treats mcp_web_fetch as WebFetch and blocks it", () => {
-      const url = "https://example.com";
-      const result = routePreToolUse("mcp_web_fetch", { url });
-      expect(result).not.toBeNull();
-      expect(result!.action).toBe("deny");
       expect(result!.reason).toContain("WebFetch redirected");
-      expect(result!.reason).toContain("fetch_and_index");
-      expect(result!.reason).toContain("ctx_search");
-    });
-
-    it("treats mcp_fetch_tool as WebFetch and blocks it", () => {
-      const url = "https://example.com";
-      const result = routePreToolUse("mcp_fetch_tool", { url });
-      expect(result).not.toBeNull();
-      expect(result!.action).toBe("deny");
-      expect(result!.reason).toContain("WebFetch redirected");
-      expect(result!.reason).toContain("fetch_and_index");
+      expect(result!.reason).toContain("ctx_fetch_and_index");
       expect(result!.reason).toContain("ctx_search");
     });
 
@@ -439,9 +432,12 @@ describe("routePreToolUse", () => {
       expect(result).toBeNull();
     });
 
-    it("allows mcp_web_fetch alias when MCP server not ready (#230)", () => {
-      try { unlinkSync(mcpSentinel); } catch {}
-      const result = routePreToolUse("mcp_web_fetch", { url: "https://example.com" });
+    it("allows a Codex-aliased fetch-adjacent call when MCP server not ready (#230)", () => {
+      // The passthrough has to hold for aliased names too, not just canonical
+      // ones — otherwise a host whose native name resolves through an alias
+      // gets stranded pointing at a tool that is not running.
+      try { unlinkSync(mcpSentinel); } catch { /* already gone */ }
+      const result = routePreToolUse("shell", { command: "curl https://example.com" });
       expect(result).toBeNull();
     });
 

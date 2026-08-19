@@ -10,9 +10,15 @@
  *   3. With ONLY CONTEXT_MODE_PROJECT_DIR="/escape" set, result is "/escape"
  *      for every host (universal escape hatch invariant).
  *
- * Generates 17 × 16 × 3 = 816 assertions from one parameterized test. Adding
- * adapter #18 to PLATFORM_ENV_VARS grows the matrix automatically — no edit
- * to this file. This is the structural test for MUST-3 (17 adapters equal).
+ * Generates N × (N-1) × 3 assertions from one parameterized test — 816 when
+ * there were seventeen hosts, 6 since 15a02cf left two. Adding an adapter to
+ * PLATFORM_ENV_VARS grows the matrix automatically. This is the structural
+ * test for MUST-3 (every adapter treated equally).
+ *
+ * Two hosts is the sharpest pair the invariant can be stated on rather than a
+ * degenerate one: claude-code has a workspace var (CLAUDE_PROJECT_DIR) and
+ * codex has none (it passes cwd in hook stdin), so both branches of assertion
+ * 1 — "returns own" and "returns escape" — are still exercised, one per host.
  */
 
 import { describe, it, expect } from "vitest";
@@ -26,28 +32,17 @@ import {
 import type { PlatformId } from "../../src/adapters/types.js";
 
 // Hard-coded list of all registered platforms — kept in sync with detect.ts
-// CLIENT_NAME_TO_PLATFORM. If an 18th adapter is added, append it here.
-// (We can't reflect it from PLATFORM_ENV_VARS alone because some adapters
-// have no env vars — kiro, openclaw, antigravity-via-mcp-only, zed,
-// copilot-cli, antigravity-cli.)
+// CLIENT_NAME_TO_PLATFORM. If a third adapter is added, append it here.
+//
+// It stays hard-coded rather than reflected from PLATFORM_ENV_VARS because an
+// adapter may have no env vars at all and still need covering; codex is that
+// case today. The list carried fifteen more names until 15a02cf, and every one
+// of them stayed here afterwards — `PlatformId` no longer admits them, and
+// nothing said so, because tsconfig.json compiles `src` only and never looked
+// at this file. That is what tsconfig.test.json exists to prevent.
 const ALL_PLATFORMS: ReadonlyArray<PlatformId> = [
   "claude-code",
-  "gemini-cli",
-  "cursor",
-  "vscode-copilot",
-  "jetbrains-copilot",
-  "opencode",
-  "kilo",
-  "qwen-code",
   "codex",
-  "antigravity",
-  "kiro",
-  "openclaw",
-  "zed",
-  "pi",
-  "omp",
-  "copilot-cli",
-  "antigravity-cli",
 ];
 
 describe("resolveProjectDir matrix — MUST-3 invariant (issue #545)", () => {
@@ -127,7 +122,7 @@ describe("resolveProjectDir matrix — MUST-3 invariant (issue #545)", () => {
         assertions++;
       }
     }
-    // Sanity: with N=17 platforms, we expect 17 * 16 * 3 = 816 assertions.
+    // Sanity: with N platforms we expect N * (N-1) * 3 assertions.
     // Looser bound here to avoid the test itself becoming brittle if a
     // future adapter is added — just assert "many" and the per-iteration
     // expects above carry the real signal.

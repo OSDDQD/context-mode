@@ -185,6 +185,36 @@ describe("Bash structurally-bounded allowlist (#463)", () => {
     expect(lsLong?.action).toBe("context");
   });
 
+  it("a heavy-list command takes the advisory branch when the list is empty", () => {
+    // Recovered coverage: `find /` was this block's canonical unbounded
+    // command until it joined the heavy-output deny list and had to be
+    // rewritten to `find /tmp` everywhere. The rewrite was right — those
+    // commands are refused by default now — but it left nothing checking that
+    // the advisory branch still handles them at all. Emptying the list is the
+    // operator saying "let me watch this one", and it has to return the
+    // command to a nudge, not to silence.
+    const saved = process.env.CONTEXT_MODE_BASH_DENY_COMMANDS;
+    process.env.CONTEXT_MODE_BASH_DENY_COMMANDS = "";
+    try {
+      for (const command of ["find /", "npm test", "docker logs api", "git log -p"]) {
+        resetGuidanceThrottle(SID);
+        const decision = routePreToolUse("Bash", { command }, "/test", "claude-code", SID);
+        expect(decision?.action, `${command} with an empty deny list`).toBe("context");
+      }
+    } finally {
+      if (saved === undefined) delete process.env.CONTEXT_MODE_BASH_DENY_COMMANDS;
+      else process.env.CONTEXT_MODE_BASH_DENY_COMMANDS = saved;
+    }
+  });
+
+  it("and the same commands are refused while the list is in force", () => {
+    for (const command of ["find /", "npm test", "docker logs api", "git log -p"]) {
+      resetGuidanceThrottle(SID);
+      const decision = routePreToolUse("Bash", { command }, "/test", "claude-code", SID);
+      expect(decision?.action, `${command} with the default list`).toBe("deny");
+    }
+  });
+
   it("unbounded commands still get the nudge", () => {
     for (const command of [
       "find /tmp -name '*.log'",

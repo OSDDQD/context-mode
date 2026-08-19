@@ -11,6 +11,7 @@ tools:
   - mcp__plugin_context-mode_context-mode__ctx_gather
   - mcp__plugin_context-mode_context-mode__ctx_execute
   - mcp__plugin_context-mode_context-mode__ctx_execute_file
+  - mcp__plugin_context-mode_context-mode__ctx_read
   - mcp__plugin_context-mode_context-mode__ctx_search
   - mcp__plugin_context-mode_context-mode__ctx_find
   - mcp__plugin_context-mode_context-mode__ctx_graph

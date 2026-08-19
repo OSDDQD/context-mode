@@ -92,8 +92,14 @@ function route(tool: string, input: Record<string, unknown>, sid: string): Decis
   return routePreToolUse(tool, input, PROJECT, "claude-code", sid) as Decision | null;
 }
 
-/** Severity as a number, so "no softer than" is a comparison and not a story. */
-const SEVERITY: Record<string, number> = { null: 0, context: 1, ask: 2, deny: 3 };
+/**
+ * Severity as a number, so "no softer than" is a comparison and not a story.
+ *
+ * `allow` sits at 0 with `null`: both let the call through untouched. It is a
+ * separate action only because it carries the marker that tells PostToolUse
+ * the call is already accounted for.
+ */
+const SEVERITY: Record<string, number> = { null: 0, allow: 0, context: 1, ask: 2, deny: 3 };
 function severity(decision: Decision | null): number {
   return SEVERITY[decision?.action ?? "null"] ?? 0;
 }
@@ -195,7 +201,9 @@ describe("the ladder, step by step", () => {
     expect(first?.action).toBe("deny");
     expect(first?.reason).toMatch(/Read again/i);
     const second = route("Read", { file_path: midFile }, sid);
-    expect(second?.action ?? "null", "the promised repeat must not become a prompt either").toBe("null");
+    // `allow` is a passthrough that carries the accounted-for marker; what it
+    // must never be is a prompt or another refusal.
+    expect(severity(second), "the promised repeat must not become a prompt either").toBe(0);
   });
 
   it("never blocks a bounded read, however high the tally", () => {

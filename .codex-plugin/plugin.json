@@ -1,13 +1,14 @@
 {
   "name": "context-mode",
-  "version": "1.0.171",
-  "description": "MCP server that saves 98% of your context window with session continuity. Sandboxed code execution in 11 languages, FTS5 knowledge base with BM25 ranking, and automatic state restore across compactions.",
+  "version": "1.0.172",
+  "description": "MCP server that saves 98% of your context window with session continuity. Sandboxed code execution in 12 languages, FTS5 knowledge base with BM25 ranking, and automatic state restore across compactions.",
   "author": {
-    "name": "Mert Koseoğlu",
-    "url": "https://github.com/mksglu"
+    "name": "OSDDQD",
+    "url": "https://github.com/OSDDQD"
   },
-  "homepage": "https://github.com/mksglu/context-mode#readme",
-  "repository": "https://github.com/mksglu/context-mode",
+  "homepage": "https://github.com/OSDDQD/context-mode#readme",
+  "repository": "https://github.com/OSDDQD/context-mode",
+  "bugs": "https://github.com/OSDDQD/context-mode/issues",
   "license": "Elastic-2.0",
   "keywords": [
     "mcp",
@@ -25,7 +26,7 @@
   "interface": {
     "displayName": "context-mode",
     "shortDescription": "98% context window savings via FTS5 + sandboxed execution",
-    "developerName": "Mert Koseoğlu",
+    "developerName": "OSDDQD",
     "category": "Productivity"
   }
 }

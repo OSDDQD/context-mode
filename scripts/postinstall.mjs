@@ -2,8 +2,7 @@
 /**
  * postinstall — cross-platform post-install tasks
  *
- * 1. OpenClaw detection (print helper message)
- * 2. Windows global install: fix broken bin→node_modules path
+ * Windows global install: fix broken bin→node_modules path
  *    when nvm4w places the shim and node_modules in different directories.
  *    Creates a directory junction so npm's %~dp0\node_modules\... resolves.
  */
@@ -231,12 +230,7 @@ try {
   }
 } catch { /* best effort — don't block install */ }
 
-// ── 1. OpenClaw detection ────────────────────────────────────────────
-if (process.env.OPENCLAW_STATE_DIR) {
-  console.log("\n  OpenClaw detected. Run: npm run install:openclaw\n");
-}
-
-// ── 2. Windows global install — nvm4w junction fix ───────────────────
+// ── Windows global install — nvm4w junction fix ──────────────────────
 // npm's .cmd shim resolves modules via %~dp0\node_modules\<pkg>\...
 // On nvm4w the shim lives at C:\nvm4w\nodejs\ but node_modules is at
 // C:\Users\<USER>\AppData\Roaming\npm\node_modules\. The relative path

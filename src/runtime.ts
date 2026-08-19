@@ -272,23 +272,27 @@ function getVersion(cmd: string, args: string[] = ["--version"]): string {
  *
  * PR #190 (f69b0d2) made `process.execPath` the default so snap-Node
  * envs would not re-invoke the snap wrapper via PATH. That assumed
- * `process.execPath` always points at a JS runtime — true on Node,
- * tsx, and snap-Node, but FALSE when context-mode runs in-process
- * inside a bun-compiled self-contained binary (OpenCode, Kilo, …).
- * In those hosts, `process.execPath` resolves to `opencode.exe` /
- * `opencode` (NOT node), and spawning that with a `.js` argument
- * triggers the yargs "Failed to change directory" error (#731).
+ * `process.execPath` always points at a JS runtime — true on Node, tsx and
+ * snap-Node, false for any host that spawns us from a binary of its own.
  *
- * Fix: gate `process.execPath` on the existing `JS_RUNTIMES`
- * allowlist (single source of truth — same set used by
- * `buildNodeCommand()` in src/adapters/types.ts since PR #708). When
- * the execPath basename is not a known JS runtime, fall back to a
- * PATH-resolved `node`. If neither is reachable, return `null` and
- * let ctx_doctor surface an actionable error.
+ * The rule is therefore a probe, not a platform list: gate
+ * `process.execPath` on the `JS_RUNTIMES` allowlist (single source of
+ * truth — same set used by `buildNodeCommand()` in src/adapters/types.ts
+ * since PR #708). When the execPath basename is not a known JS runtime,
+ * fall back to a PATH-resolved `node`. If neither is reachable, return
+ * `null` and let ctx_doctor surface an actionable error.
  *
- * The cross-OS guard is the allowlist itself — NOT a `win32` check.
- * OpenCode ships self-contained binaries on macOS and Linux too,
- * and the bug reproduces identically there.
+ * That distinction is why the check survives the fifteen-host removal
+ * intact. #731 was reported against a bun-compiled self-contained host,
+ * where `process.execPath` was `opencode`/`opencode.exe` and spawning it
+ * with a `.js` argument produced the yargs "Failed to change directory"
+ * error; that host is gone, but the guard never asked which host it was.
+ * The other way in is still live: #800 below, where a `brew cleanup`
+ * deletes the Cellar the execPath points into.
+ *
+ * The cross-OS guard is the allowlist itself — NOT a `win32` check. Hosts
+ * ship self-contained binaries on macOS and Linux too, and the bug
+ * reproduces identically there.
  */
 export function resolveJavascriptRuntime(
   bun: string | null,
@@ -324,7 +328,7 @@ export function resolveJavascriptRuntime(
     // process alive).  Fall through to PATH resolution below.
   }
 
-  // Host binary (opencode/kilo/etc.) — fall back to node on PATH.
+  // execPath is not a JS runtime, or is a stale one — fall back to node on PATH.
   if (cmdExists("node")) return "node";
 
   // No usable runtime — doctor + summary must handle null gracefully.
@@ -466,8 +470,8 @@ function bunVersionAtLeast1(versionOutput: string): boolean {
  *     bun-safe past 1.0 but not 0.x).
  *
  * NOT used by:
- *   - `buildNodeCommand` — kept on `process.execPath` for openclaw doctor /
- *     upgrade hints which must invoke the better-sqlite3-loading CLI on
+ *   - `buildNodeCommand` — kept on `process.execPath` for the doctor /
+ *     upgrade hints, which must invoke the better-sqlite3-loading CLI on
  *     Node (#543: bun cannot dlopen better-sqlite3's prebuilt .node).
  *   - `ensure-deps.mjs` — separate path, must stay on Node for the same
  *     reason.
@@ -557,7 +561,7 @@ export function getRuntimeSummary(runtimes: RuntimeMap): string {
       `  JavaScript: ${runtimes.javascript} (${getVersion(runtimes.javascript)})${bunPreferred ? " ⚡" : ""}`,
     );
   } else {
-    // #731: host binary (opencode/kilo) AND no PATH-resolvable node.
+    // #731: execPath is not a JS runtime AND no PATH-resolvable node.
     // Surface actionable guidance instead of rendering literal `null`.
     lines.push(
       `  JavaScript: not available (install node or bun — host process is not a JS runtime)`,
@@ -649,9 +653,9 @@ export function buildCommand(
   switch (language) {
     case "javascript":
       if (!runtimes.javascript) {
-        // #731: in-process plugin host (opencode/kilo binary) AND no
-        // PATH-resolvable node. Refuse early with an actionable error
-        // instead of spawning the host binary (the original bug shape).
+        // #731: execPath is not a JS runtime AND no PATH-resolvable node.
+        // Refuse early with an actionable error instead of spawning
+        // whatever the host process happens to be (the original bug shape).
         throw new Error(
           "No JavaScript runtime available. Install Node.js or Bun on PATH (the host process is not itself a JS runtime).",
         );

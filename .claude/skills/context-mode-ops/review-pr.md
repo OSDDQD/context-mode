@@ -96,8 +96,8 @@ npm run typecheck
 // 2. WebSearch: "{PLATFORM_NAME} {ENV_VAR} environment variable"
 // 3. Context7: resolve-library-id for the platform, then query-docs
 
-// Example: PR adds OPENCODE_CONFIG_PATH
-// → Search OpenCode source: does this env var exist?
+// Example: PR adds CODEX_CONFIG_PATH
+// → Search Codex source: does this env var exist?
 // → If not: flag as potential LLM hallucination
 ```
 
@@ -253,10 +253,10 @@ For EACH claim in the PR:
 ### Example: Fake ENV Detection
 
 ```
-PR adds: process.env.OPENCODE_HOOK_PATH
-Step 1: rg "OPENCODE_HOOK_PATH" src/ → not found
-Step 2: WebSearch "OpenCode OPENCODE_HOOK_PATH environment variable" → no results
-Step 3: Context7 query OpenCode docs for "HOOK_PATH" → not documented
+PR adds: process.env.CODEX_HOOK_PATH
+Step 1: rg "CODEX_HOOK_PATH" src/ → not found
+Step 2: WebSearch "Codex CLI CODEX_HOOK_PATH environment variable" → no results
+Step 3: Context7 query Codex docs for "HOOK_PATH" → not documented
 Verdict: HALLUCINATED — flag to EM, remove from PR
 ```
 

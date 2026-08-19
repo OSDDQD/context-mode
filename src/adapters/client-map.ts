@@ -4,42 +4,31 @@
  * Source: Apify MCP Client Capabilities Registry
  * https://github.com/apify/mcp-client-capabilities
  *
- * Only includes platforms we have adapters for.
+ * Only includes platforms we have adapters for. Codex announces itself under
+ * two names depending on how it was built — `Codex` from the CLI, and
+ * `codex-mcp-client` from the MCP client wrapper — and both must resolve, or a
+ * Codex session drops to the env-var tier and is detected by CODEX_THREAD_ID
+ * instead of by the handshake it already sent.
+ *
+ * This tier answers before any env var is read: a host that says who it is
+ * should be believed over a directory that happens to exist on disk.
+ *
+ * Why three entries still get their own module. `detect.ts` imports
+ * `./types.js` with `import type` — erased at compile — and `./client-map.js`
+ * as a value. Folding the map into `types.ts` would turn that type-only edge
+ * into a real one and pull `resolveHookRuntime` (and with it all of
+ * `src/runtime.ts`, which probes the filesystem and spawns version checks)
+ * into the graph of every importer of `detect.ts` — including
+ * `src/util/claude-config.ts`, whose static import is documented as safe
+ * precisely because detect reaches only `node:` builtins, a type-only
+ * `types.js`, and this file. The module is small because the protocol fact it
+ * records is small, not because it is a fragment of something larger.
  */
 
 import type { PlatformId } from "./types.js";
 
 export const CLIENT_NAME_TO_PLATFORM: Record<string, PlatformId> = {
   "claude-code": "claude-code",
-  "gemini-cli-mcp-client": "gemini-cli",
-  "antigravity-client": "antigravity",
-  "antigravity-cli": "antigravity-cli",
-  "agy": "antigravity-cli",
-  "cursor-vscode": "cursor",
-  "Visual-Studio-Code": "vscode-copilot",
-  "copilot-cli": "copilot-cli",
-  "GitHub Copilot CLI": "copilot-cli",
-  "github-copilot-cli": "copilot-cli",
-  "JetBrains Client": "jetbrains-copilot",
-  "IntelliJ IDEA": "jetbrains-copilot",
-  "PyCharm": "jetbrains-copilot",
   "Codex": "codex",
   "codex-mcp-client": "codex",
-  "Kilo Code": "kilo",
-  "Kiro CLI": "kiro",
-  "Pi CLI": "pi",
-  "Pi Coding Agent": "pi",
-  // Issue #542 — Pi rebranded to OMP. Upstream
-  // refs/platforms/oh-my-pi/packages/coding-agent/src/mcp/client.ts:46-49
-  // ships clientInfo.name = "omp-coding-agent". Resolved to the OMP
-  // adapter (~/.omp/, PI_CODING_AGENT_DIR). Legacy "Pi CLI" /
-  // "Pi Coding Agent" entries above still resolve to the pi adapter.
-  "omp-coding-agent": "omp",
-  "Zed": "zed",
-  "zed": "zed",
-  "qwen-code": "qwen-code",
-  "qwen-cli-mcp-client": "qwen-code",
-  "kimi-code": "kimi",
-  "kimi": "kimi",
-  "Kimi Code": "kimi",
 };

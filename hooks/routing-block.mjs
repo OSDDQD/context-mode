@@ -23,7 +23,7 @@ export function createRoutingBlock(t, options = {}) {
 ${toolSearchBootstrap ? `
   <deferred_tool_bootstrap>
     The context-mode tools below may be DEFERRED in your harness — their schemas are not loaded yet, so calling them directly fails (e.g. "tool not found" / InputValidationError). Load them ONCE before your first ctx_* call:
-    ToolSearch(query: "select:${t("ctx_batch_execute")},${t("ctx_search")},${t("ctx_execute")},${t("ctx_execute_file")},${t("ctx_fetch_and_index")}")
+    ToolSearch(query: "select:${t("ctx_batch_execute")},${t("ctx_gather")},${t("ctx_search")},${t("ctx_execute")},${t("ctx_execute_file")},${t("ctx_read")},${t("ctx_find")},${t("ctx_graph")},${t("ctx_fetch_and_index")},${t("ctx_index")}")
     After that they are callable. If any ctx_* call fails as not-found, ToolSearch it and retry — do NOT fall back to Bash/Read just because the schema was not loaded yet.
   </deferred_tool_bootstrap>
 ` : ''}
@@ -33,19 +33,26 @@ ${toolSearchBootstrap ? `
     1. GATHER: ${t("ctx_batch_execute")}(commands, queries)
        - Primary research tool. Runs commands in parallel, auto-indexes each output, and (when queries are passed) returns matching sections in the same round trip — no follow-up search call.
        - Each command: {label: "section header", command: "shell command"}; the label becomes the FTS5 chunk title — descriptive labels improve search.
+       - ${t("ctx_gather")}(commands, queries) is the read-only twin: same round trip, every command proven read-only before anything runs. It is the gather path that survives plan mode, where tools that may write are refused outright.
     2. FOLLOW-UP: ${t("ctx_search")}(queries: ["q1", "q2", ...])
        - Multiple related questions about anything already indexed (your captures + session memory). Batch every question in one array; the ranking pipeline runs per-query and the round-trip cost is paid once.
-    3. PROCESSING: ${t("ctx_execute")}(language, code) | ${t("ctx_execute_file")}(path, language, code)
+    3. ONE FILE: ${t("ctx_read")}(path) | ${t("ctx_execute_file")}(path, language, code)
+       - ${t("ctx_read")} takes one argument and answers a question about a file without pulling the file in: its size and shape, its structure (declarations, headings, top-level keys), and — with intent: "exports", "where the timeout is set" — the regions that match, a few lines of context each. Reach for it whenever you want to KNOW something about a file rather than SEE all of it; there is no program to compose first.
+       - ${t("ctx_execute_file")} is the same trade with your own code, for a derivation ${t("ctx_read")} does not perform: aggregate, parse, transform.
+       - Read stays correct when you are about to Edit it. Edit matches the exact bytes in your conversation, and a slice cannot be matched against.
+    4. PROCESSING: ${t("ctx_execute")}(language, code)
        - Derive answers FROM data: filter, count, aggregate, parse, transform. Only what you console.log() enters your conversation; the raw bytes stay in the sandbox.
-    4. FIND: ${t("ctx_find")} — one search across file names, file contents, indexed memory and code structure. Use it instead of chaining Glob/Grep or reaching for a separate file-search MCP; it returns ranked paths and snippets, never whole files.
-    5. STRUCTURE: ${t("ctx_graph")}(action, symbol|file|query)
+    5. FIND: ${t("ctx_find")} — one search across file names, file contents, indexed memory and code structure. Use it instead of chaining Glob/Grep or reaching for a separate file-search MCP; it returns ranked paths and snippets, never whole files.
+    6. STRUCTURE: ${t("ctx_graph")}(action, symbol|file|query)
        - Who calls a symbol, what it calls, what breaks if it changes, what a file declares — answered from the codegraph index instead of by reading files. Actions: symbols | outline | callers | callees | impact | related | explore. Says so when the project has no index rather than guessing.
+    7. KEEP: ${t("ctx_index")}(content, source)
+       - Store something you will want back later — a spec you were handed, a decision, output you produced yourself — under a descriptive source label, and retrieve it with ${t("ctx_search")}(source: "label") instead of holding it in the conversation.
     Three retrieval tools, three questions: ${t("ctx_find")} — where it lives; ${t("ctx_search")} — what we already know about it; ${t("ctx_graph")} — how it is connected.
   </tool_selection_hierarchy>
 
   <when_not_to_use>
     - You intend to PROCESS the output (filter, count, parse, aggregate) → use ${t("ctx_batch_execute")} or ${t("ctx_execute")}. Bash stays correct when you intend to OBSERVE a short fixed output (git status on a clean tree, whoami, pwd) or when you are mutating state (git, mkdir, rm, mv, navigation).
-    - You want to analyze, summarize, or extract from a file → use ${t("ctx_execute_file")}. Read stays correct when you intend to Edit the file (Edit needs the exact bytes in your conversation to match against).
+    - You want to analyze, summarize, or extract from a file → use ${t("ctx_read")}(path) for a question about it, or ${t("ctx_execute_file")} when you need code to derive the answer. Read stays correct when you intend to Edit the file (Edit needs the exact bytes in your conversation to match against), or when you genuinely need every line.
     - WebFetch → use ${t("ctx_fetch_and_index")}; full network access, results indexed for ${t("ctx_search")}, raw page bytes never enter your conversation.
     - ${t("ctx_execute")} and ${t("ctx_execute_file")} for file writes → these run code in a subprocess and discard the sandbox FS; they are for analysis, processing, and computation only.
   </when_not_to_use>
@@ -66,16 +73,19 @@ ${toolSearchBootstrap ? `
 ${includeCommands ? `
   <ctx_commands>
     "ctx stats" | "ctx-stats" | "/ctx-stats" | context savings question
-    → Call stats MCP tool, display full output verbatim.
+    → Call ${t("ctx_stats")}, display full output verbatim.
 
     "ctx doctor" | "ctx-doctor" | "/ctx-doctor" | diagnose context-mode
-    → Call doctor MCP tool, run returned shell command, display as checklist.
+    → Call ${t("ctx_doctor")}, run returned shell command, display as checklist.
 
     "ctx upgrade" | "ctx-upgrade" | "/ctx-upgrade" | update context-mode
-    → Call upgrade MCP tool, run returned shell command, display as checklist.
+    → Call ${t("ctx_upgrade")}, run returned shell command, display as checklist.
 
     "ctx purge" | "ctx-purge" | "/ctx-purge" | wipe/reset knowledge base
-    → Call purge MCP tool with confirm: true. Warn: irreversible.
+    → Call ${t("ctx_purge")} with confirm: true. Warn: irreversible.
+
+    "ctx insight" | "ctx-insight" | "/ctx-insight" | open the dashboard
+    → Call ${t("ctx_insight")}, open the returned URL.
 
     After /clear or /compact: knowledge base preserved. Tell user: "context-mode knowledge base preserved. Use \`ctx purge\` to start fresh."
   </ctx_commands>
@@ -84,7 +94,7 @@ ${includeCommands ? `
 }
 
 export function createReadGuidance(t) {
-  return '<context_guidance>\n  <tip>\n    Reading to Edit the file? Read is correct — Edit needs the exact bytes in your conversation to match against.\n    Reading to analyze, summarize, or extract from the file? Use ' + t("ctx_execute_file") + '(path, language, code) — the bytes stay in the sandbox and only what your code prints enters your conversation.\n  </tip>\n</context_guidance>';
+  return '<context_guidance>\n  <tip>\n    Reading to Edit the file? Read is correct — Edit needs the exact bytes in your conversation to match against.\n    Reading to find something out about the file? Use ' + t("ctx_read") + '(path) — one argument, and what comes back is the file\'s shape and the regions matching your intent, not the file. Use ' + t("ctx_execute_file") + '(path, language, code) when the answer needs code to derive: the bytes stay in the sandbox and only what your code prints enters your conversation.\n  </tip>\n</context_guidance>';
 }
 
 export function createGrepGuidance(t) {

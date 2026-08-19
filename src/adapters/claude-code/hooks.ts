@@ -82,6 +82,15 @@ export const PRE_TOOL_USE_MATCHERS = [
   "WebFetch",
   "Read",
   "Grep",
+  // Glob sits next to Grep because the router treats them as one rule: an
+  // unbounded sweep is asked about, never refused. It was missing here until
+  // v1.0.172, and the cost of that was not a silent rule — it was an asymmetric
+  // one. `FLOODY_TOOLS` in hooks/core/routing.mjs has always listed Glob, so a
+  // large listing was charged on the way out (price line, unrouted tally,
+  // escalation, adherence denominator) while the matcher gave it no way in.
+  // Penalty without warning. The guard that keeps this from recurring for the
+  // next tool is in tests/hooks/matcher-coverage.test.ts.
+  "Glob",
   "Agent",
   EXTERNAL_MCP_MATCHER_PATTERN,
 ] as const;

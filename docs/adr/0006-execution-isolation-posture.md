@@ -54,6 +54,11 @@ this fork:
   `ctx_execute` behind an approval prompt, and the user who approves it has
   already decided to let this agent run code. A second, weaker gate underneath
   changes little except what we can claim.
+  <br>*Amended 2026-08-20:* VS Code and JetBrains are no longer supported
+  hosts (15a02cf). The argument narrows rather than falls — both remaining
+  hosts, Claude Code and Codex CLI, gate the tool the same way, and Codex's
+  own manifest sets `default_tools_approval_mode: approve`. The decision is
+  unchanged; only the roll call above is historical.
 - A sandbox that must let the code read the project, write temp files and reach
   the network — which is the whole job — restricts very little of what actually
   matters.

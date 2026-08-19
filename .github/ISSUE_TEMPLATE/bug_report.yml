@@ -8,7 +8,7 @@ body:
       value: |
         ## Read this before filing.
 
-        **This is a developer tool that runs on 14 platforms (Claude Code, Cursor, VS Code Copilot, JetBrains Copilot, Gemini CLI, Qwen Code, OpenCode, KiloCode, Codex CLI, OpenClaw, Pi, Kiro, Antigravity, Zed) across 3 operating systems (macOS, Linux, Windows). It is maintained by one person. I cannot reproduce every platform-specific edge case.**
+        **This is a developer tool that runs on 2 platforms (Claude Code, Codex CLI) across 3 operating systems (macOS, Linux, Windows). It is maintained by one person. I cannot reproduce every platform-specific edge case.**
 
         ### PRs > Issues. Always.
 
@@ -16,8 +16,8 @@ body:
 
         1. **Reproduce the bug** with a specific prompt (paste it below)
         2. **Ask your agent to debug it**: _"Read the context-mode hooks source and find why this error occurs"_
-        3. **Write a failing test** (RED) and fix it (GREEN) — see [CONTRIBUTING.md](https://github.com/mksglu/context-mode/blob/main/CONTRIBUTING.md)
-        4. **Open a PR** against `next` branch — CI verifies on Ubuntu, macOS, and Windows
+        3. **Write a failing test** (RED) and fix it (GREEN) — see [CONTRIBUTING.md](https://github.com/OSDDQD/context-mode/blob/main/CONTRIBUTING.md)
+        4. **Open a PR** against `main` — CI verifies on Ubuntu, macOS, and Windows
 
         **Opening an issue does NOT guarantee a fix.** I welcome issues for discussion and triage, but the fastest path to resolution is a PR. If you can describe the bug, your AI agent can fix it.
 
@@ -32,7 +32,7 @@ body:
         ---
 
         **Before you file:**
-        1. [Search existing issues](https://github.com/mksglu/context-mode/issues)
+        1. [Search existing issues](https://github.com/OSDDQD/context-mode/issues)
         2. Run `/context-mode:ctx-upgrade` and restart your session
         3. If the issue persists on the latest version, fill out every field below
 
@@ -43,19 +43,7 @@ body:
       description: Which AI agent platform are you using?
       options:
         - Claude Code
-        - Cursor
-        - VS Code Copilot (GitHub Copilot)
-        - JetBrains Copilot
-        - Gemini CLI
-        - Qwen Code
-        - OpenCode
-        - KiloCode
         - Codex CLI
-        - OpenClaw (Pi Agent)
-        - Pi
-        - Kiro
-        - Antigravity
-        - Zed
         - Other (please specify)
     validations:
       required: true

@@ -375,13 +375,7 @@ printf '| Variable | Value |\n|----------|-------|\n'
 ADAPTER_VARS=(
   CONTEXT_MODE_PLATFORM
   CLAUDE_PROJECT_DIR CLAUDE_SESSION_ID
-  GEMINI_PROJECT_DIR GEMINI_CLI
-  OPENCLAW_HOME OPENCLAW_CLI
-  KILO KILO_PID
-  OPENCODE_CLIENT OPENCODE_TERMINAL OPENCODE OPENCODE_PID
   CODEX_CI CODEX_THREAD_ID
-  CURSOR_TRACE_ID CURSOR_CLI
-  VSCODE_PID VSCODE_CWD
 )
 
 DETECTED_ADAPTER="none"
@@ -397,20 +391,8 @@ done
 # Detection logic (mirrors context-mode adapter selection)
 if [ -n "${CONTEXT_MODE_PLATFORM:-}" ]; then
   DETECTED_ADAPTER="$CONTEXT_MODE_PLATFORM (explicit)"
-elif [ -n "${CURSOR_TRACE_ID:-}${CURSOR_CLI:-}" ]; then
-  DETECTED_ADAPTER="cursor"
-elif [ -n "${VSCODE_PID:-}" ]; then
-  DETECTED_ADAPTER="vscode-copilot"
 elif [ -n "${CODEX_CI:-}${CODEX_THREAD_ID:-}" ]; then
   DETECTED_ADAPTER="codex"
-elif [ -n "${GEMINI_PROJECT_DIR:-}${GEMINI_CLI:-}" ]; then
-  DETECTED_ADAPTER="gemini-cli"
-elif [ -n "${OPENCLAW_HOME:-}${OPENCLAW_CLI:-}" ]; then
-  DETECTED_ADAPTER="openclaw"
-elif [ -n "${KILO:-}${KILO_PID:-}" ]; then
-  DETECTED_ADAPTER="kilocode"
-elif [ -n "${OPENCODE_CLIENT:-}${OPENCODE_TERMINAL:-}${OPENCODE:-}${OPENCODE_PID:-}" ]; then
-  DETECTED_ADAPTER="opencode"
 elif [ -n "${CLAUDE_SESSION_ID:-}${CLAUDE_PROJECT_DIR:-}" ]; then
   DETECTED_ADAPTER="claude-code"
 fi
@@ -422,15 +404,7 @@ kv "Active adapter (env)" "$DETECTED_ADAPTER"
 HOME_DIR_EARLY="${HOME:-$USERPROFILE}"
 INSTALLED=()
 [ -d "$HOME_DIR_EARLY/.claude" ]                && INSTALLED+=("claude-code")
-[ -d "$HOME_DIR_EARLY/.cursor" ] || [ -f ".cursor/mcp.json" ] && INSTALLED+=("cursor")
 [ -d "$HOME_DIR_EARLY/.codex" ]                 && INSTALLED+=("codex")
-[ -d "$HOME_DIR_EARLY/.gemini" ]                && INSTALLED+=("gemini-cli")
-[ -d "$HOME_DIR_EARLY/.openclaw" ]              && INSTALLED+=("openclaw")
-[ -d "$HOME_DIR_EARLY/.kiro" ]                  && INSTALLED+=("kiro")
-[ -d "$HOME_DIR_EARLY/.config/opencode" ] || [ -f "opencode.json" ] || [ -d ".opencode" ] && INSTALLED+=("opencode")
-[ -d "$HOME_DIR_EARLY/.config/kilo" ]           && INSTALLED+=("kilocode")
-[ -d "$HOME_DIR_EARLY/.config/zed" ]            && INSTALLED+=("zed")
-[ -f ".vscode/mcp.json" ]                       && INSTALLED+=("vscode-copilot")
 
 if [ ${#INSTALLED[@]} -gt 0 ]; then
   kv "Installed adapters" "${INSTALLED[*]}"
@@ -450,44 +424,9 @@ CWD="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
 config_file "Claude settings.json" "$HOME_DIR/.claude/settings.json"
 config_file "Claude settings.local.json" "$HOME_DIR/.claude/settings.local.json"
 
-# Gemini CLI
-config_file "Gemini settings.json" "$HOME_DIR/.gemini/settings.json"
-
 # Codex
 config_file "Codex config.toml" "$HOME_DIR/.codex/config.toml"
 config_file "Codex hooks.json" "$HOME_DIR/.codex/hooks.json"
-
-# Cursor (project + global)
-config_file "Cursor hooks.json (project)" "$CWD/.cursor/hooks.json"
-config_file "Cursor mcp.json (project)" "$CWD/.cursor/mcp.json"
-config_file "Cursor mcp.json (global)" "$HOME_DIR/.cursor/mcp.json"
-config_file "Cursor hooks.json (global)" "$HOME_DIR/.cursor/hooks.json"
-
-# VS Code Copilot
-config_file "VS Code mcp.json (project)" "$CWD/.vscode/mcp.json"
-
-# OpenCode
-config_file "opencode.json (project)" "$CWD/opencode.json"
-config_file "opencode.json (dotdir)" "$CWD/.opencode/opencode.json"
-config_file "opencode.json (global)" "$HOME_DIR/.config/opencode/opencode.json"
-
-# KiloCode
-config_file "KiloCode settings.json" "$HOME_DIR/.config/kilo/settings.json"
-
-# OpenClaw
-config_file "OpenClaw openclaw.json" "$HOME_DIR/.openclaw/openclaw.json"
-if [ -d "$HOME_DIR/.openclaw/extensions/context-mode" ]; then
-  printf -- '- **OpenClaw extension dir**: exists (`~/.openclaw/extensions/context-mode/`)\n'
-else
-  printf -- '- **OpenClaw extension dir**: not found\n'
-fi
-
-# Kiro
-config_file "Kiro mcp.json" "$HOME_DIR/.kiro/settings/mcp.json"
-config_file "Kiro default agent" "$HOME_DIR/.kiro/agents/default.json"
-
-# Zed
-config_file "Zed settings.json" "$HOME_DIR/.config/zed/settings.json"
 
 # ─── 7. Hook Validation ──────────────────────────────────────────────────────
 
@@ -524,9 +463,21 @@ if [ -f "$HOOKS_JSON" ]; then
   printf '\n```\n'
 fi
 
-# Check for stale paths in Claude settings.json
+# Check for stale hook paths, on BOTH supported hosts. Codex keeps its hooks in
+# ~/.codex/hooks.json, which this script already lists as a config file but used
+# to never scan — a Codex user got a clean "no stale hook paths" line that was
+# only ever an answer about Claude Code.
+#
+# Both files nest the same way (event -> [{matcher?, hooks: [{command}]}]), so
+# one walker serves both. It descends into `h.hooks[]` as well as reading the
+# entry itself: the flat read alone found nothing in either file, which is how a
+# check can pass on evidence it never gathered.
 CLAUDE_SETTINGS="$HOME_DIR/.claude/settings.json"
-if [ -f "$CLAUDE_SETTINGS" ]; then
+CODEX_HOOKS_JSON="${CODEX_HOME:-$HOME_DIR/.codex}/hooks.json"
+for HOOK_SRC_PAIR in "Claude settings.json|$CLAUDE_SETTINGS" "Codex hooks.json|$CODEX_HOOKS_JSON"; do
+  HOOK_SRC_LABEL="${HOOK_SRC_PAIR%%|*}"
+  HOOK_SRC_FILE="${HOOK_SRC_PAIR#*|}"
+  [ -f "$HOOK_SRC_FILE" ] || continue
   STALE_HOOKS=()
   while IFS= read -r hookpath; do
     # Extract paths from the hooks section
@@ -535,28 +486,29 @@ if [ -f "$CLAUDE_SETTINGS" ]; then
       STALE_HOOKS+=("$hookpath")
     fi
   done < <(safe_cmd_quiet node -e "
-    const s = require('$CLAUDE_SETTINGS');
+    const s = require('$HOOK_SRC_FILE');
     const hooks = s.hooks || {};
-    for (const [event, arr] of Object.entries(hooks)) {
-      if (Array.isArray(arr)) {
-        for (const h of arr) {
-          if (h.command) console.log(h.command);
-          if (h.script) console.log(h.script);
-        }
-      }
+    const emit = (h) => {
+      if (!h || typeof h !== 'object') return;
+      if (h.command) console.log(h.command);
+      if (h.script) console.log(h.script);
+      if (Array.isArray(h.hooks)) for (const inner of h.hooks) emit(inner);
+    };
+    for (const arr of Object.values(hooks)) {
+      if (Array.isArray(arr)) for (const h of arr) emit(h);
     }
   " 2>/dev/null)
 
   if [ ${#STALE_HOOKS[@]} -gt 0 ]; then
-    printf '\n**Stale hook paths detected:**\n'
+    printf '\n**Stale hook paths detected (%s):**\n' "$HOOK_SRC_LABEL"
     for sp in "${STALE_HOOKS[@]}"; do
       warn "Stale hook path: $sp"
     done
   else
     printf '\n'
-    check "No stale hook paths in Claude settings.json" "true"
+    check "No stale hook paths in $HOOK_SRC_LABEL" "true"
   fi
-fi
+done
 
 # Hook registration completeness — check all required hooks are registered
 if [ -f "$CLAUDE_SETTINGS" ] || [ -f "$HOOKS_JSON" ]; then
@@ -650,14 +602,13 @@ fi
 
 section "11. Session Databases"
 
-# Check session dirs for all adapters
+# Check session dirs for both adapters. A store left behind by a host this
+# fork no longer ships is not this script's business — ctx_purge and the
+# retention sweep own cleanup, and listing dead paths only invites the reader
+# to think those hosts are still supported.
 SESSION_DIRS=(
   "$HOME_DIR/.claude/context-mode/sessions"
-  "$HOME_DIR/.cursor/context-mode/sessions"
   "$HOME_DIR/.codex/context-mode/sessions"
-  "$HOME_DIR/.gemini/context-mode/sessions"
-  "$HOME_DIR/.openclaw/context-mode/sessions"
-  "$HOME_DIR/.kiro/context-mode/sessions"
 )
 TOTAL_DB_COUNT=0
 for SESSION_DIR in "${SESSION_DIRS[@]}"; do
@@ -821,7 +772,10 @@ fi
 
 section "15. SQLite Concurrency"
 
-SESSION_BASE="$HOME_DIR/.claude/context-mode/sessions"
+# Both hosts, not just Claude Code. Section 12 above already knows both paths;
+# this one used to pin ~/.claude and told a Codex-only user "no session
+# directory" while their WAL journals went unexamined.
+for SESSION_BASE in "$HOME_DIR/.claude/context-mode/sessions" "${CODEX_HOME:-$HOME_DIR/.codex}/context-mode/sessions"; do
 if [ -d "$SESSION_BASE" ]; then
   FIRST_DB="$(find "$SESSION_BASE" -name '*.db' -type f 2>/dev/null | head -1)"
   if [ -n "$FIRST_DB" ]; then
@@ -849,6 +803,7 @@ if [ -d "$SESSION_BASE" ]; then
 else
   printf -- '- No session directory at %s\n' "$(abbrev_path "$SESSION_BASE")"
 fi
+done
 
 CONCUR="$(timed 15 node -e "
   const Database = require('better-sqlite3');

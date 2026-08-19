@@ -14,9 +14,31 @@ import { workspaceEnvVarsFor } from "../adapters/detect.js";
 const UNIVERSAL_WORKSPACE_ENV = ["CONTEXT_MODE_PROJECT_DIR"] as const;
 
 /**
- * Frozen legacy candidate list — preserves bit-for-bit behavior of every
- * non-strict caller (`start.mjs` and any caller that doesn't pass
- * `strictPlatform`). Order is locked for semver compatibility.
+ * Frozen legacy candidate list for callers that pass no `strictPlatform`.
+ * Order is locked for semver compatibility.
+ *
+ * Two different things were sitting in this list, and only one of them was
+ * frozen on purpose:
+ *
+ *   • The branch and the ORDER are deliberate. A caller that supplies no
+ *     platform gets the historical cascade, unchanged, rather than an empty
+ *     one — that is the compatibility promise, and it stays.
+ *   • The five removed hosts' variables (GEMINI_PROJECT_DIR, VSCODE_CWD,
+ *     OPENCODE_PROJECT_DIR, PI_PROJECT_DIR, IDEA_INITIAL_DIRECTORY, CURSOR_CWD)
+ *     were not frozen for compatibility with anything. No shipped adapter can
+ *     set them any more, and strict mode — which every production call uses —
+ *     already refuses them as foreign. Leaving them here only kept one hazard
+ *     alive: a variable stale in the user's shell, from a host we no longer
+ *     support, silently re-rooting the project on the one path that skips
+ *     strict mode.
+ *
+ * Who that path actually is, since the previous comment named the wrong
+ * caller: `start.mjs` does NOT call this function. It ships as raw JS, cannot
+ * import TypeScript, and sets `CLAUDE_PROJECT_DIR` / `CONTEXT_MODE_PROJECT_DIR`
+ * inline before the server loads. The single production entry is
+ * `src/server.ts getProjectDir()`, which passes `strictPlatform` on every
+ * call EXCEPT when `detectPlatform()` throws and its catch leaves the field
+ * undefined. That is the case this list serves.
  *
  * If a new adapter is added, DO NOT add its workspace var here — register it
  * in `PLATFORM_ENV_VARS` and let strict callers pick it up via
@@ -24,12 +46,6 @@ const UNIVERSAL_WORKSPACE_ENV = ["CONTEXT_MODE_PROJECT_DIR"] as const;
  */
 const LEGACY_NON_STRICT_CANDIDATES: readonly string[] = [
   "CLAUDE_PROJECT_DIR",
-  "GEMINI_PROJECT_DIR",
-  "VSCODE_CWD",
-  "OPENCODE_PROJECT_DIR",
-  "PI_PROJECT_DIR",
-  "IDEA_INITIAL_DIRECTORY",
-  "CURSOR_CWD",
   "CONTEXT_MODE_PROJECT_DIR",
 ];
 

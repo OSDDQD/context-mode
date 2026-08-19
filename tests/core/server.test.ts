@@ -12,7 +12,7 @@
  */
 
 import { strict as assert } from "node:assert";
-import { spawn, spawnSync, execSync, type ChildProcess } from "node:child_process";
+import { spawn, spawnSync, type ChildProcess } from "node:child_process";
 import {
   chmodSync,
   writeFileSync,
@@ -53,8 +53,9 @@ import {
   StorageDirectoryError,
 } from "../../src/session/db.js";
 import { ROUTING_BLOCK } from "../../hooks/routing-block.mjs";
-import { sanitizeSchemaForStrictClients, resolveExecTimeout, AGY_DEFAULT_EXEC_TIMEOUT_MS, REGISTERED_CTX_TOOLS } from "../../src/server.js";
+import { sanitizeSchemaForStrictClients, REGISTERED_CTX_TOOLS } from "../../src/server.js";
 import { stripJsonComments, parseJsonc } from "../../src/util/jsonc.js";
+import { PLATFORM_ENV_VARS, workspaceEnvVarsFor } from "../../src/adapters/detect.js";
 import { serverSource } from "../shared/server-source.js";
 
 // ─── Shared setup ───────────────────────────────────────────────────────────
@@ -1231,93 +1232,108 @@ describe("ctx_index: projectRoot path resolution (#365)", () => {
     }
   }, 30_000);
 
-  // ── JetBrains regression: IDEA_INITIAL_DIRECTORY must enter the cascade ──
+  // ── Workspace-var regression: one env var alone must enter the cascade ──
   //
-  // JetBrains adapter sets only IDEA_INITIAL_DIRECTORY (no CLAUDE_PROJECT_DIR,
-  // no CONTEXT_MODE_PROJECT_DIR). Before the fix, getProjectDir() ignored that
-  // var and fell through to process.cwd(), which is the IDE bin dir on
-  // JetBrains — making `ctx_index({ path: "rel/foo.md" })` resolve to a path
-  // under the IDE installation and ENOENT.
+  // What this replaces, and what stopped existing with it: the JetBrains case.
+  // The JetBrains adapter published only IDEA_INITIAL_DIRECTORY (no
+  // CLAUDE_PROJECT_DIR, no CONTEXT_MODE_PROJECT_DIR), and getProjectDir() used
+  // to ignore that var and fall through to process.cwd() — the IDE bin dir on
+  // JetBrains — so `ctx_index({ path: "rel/foo.md" })` resolved under the IDE
+  // installation and ENOENT'd. That host is gone; IDEA_INITIAL_DIRECTORY now
+  // survives only in the frozen LEGACY_NON_STRICT_CANDIDATES list that
+  // start.mjs uses, and no strict cascade builds it any more.
   //
-  // Spawn the compiled server directly (build/server.js) instead of start.mjs
-  // so we never enter the start.mjs path that auto-populates CLAUDE_PROJECT_DIR
-  // and CONTEXT_MODE_PROJECT_DIR from cwd. This lets us isolate the cascade
-  // and prove that IDEA_INITIAL_DIRECTORY alone is enough to resolve relative
-  // paths under the JetBrains project root.
-  test("relative path resolves against IDEA_INITIAL_DIRECTORY (JetBrains)", async () => {
-    const buildEntry = resolve(__dirname, "..", "..", "build", "server.js");
-    if (!existsSync(buildEntry)) {
-      // Compile src → build/ on demand. Bundle is untouched (CI rebuilds it).
-      execSync("npx tsc --pretty false", {
-        cwd: resolve(__dirname, "..", ".."),
-        stdio: "pipe",
-        timeout: 60_000,
-      });
-    }
+  // The behaviour under test did NOT go away with the host: for each live
+  // platform, the ONE project-dir var that platform can publish must be enough
+  // to resolve a relative path when cwd points somewhere else entirely. Each
+  // row below carries that platform's own var:
+  //   • claude-code — CLAUDE_PROJECT_DIR, its registered `workspace` var.
+  //   • codex       — CONTEXT_MODE_PROJECT_DIR, the universal escape hatch;
+  //                   codex publishes no workspace var at all (see
+  //                   PLATFORM_ENV_VARS), so this IS its only env signal.
+  //
+  // Spawn the committed server.bundle.mjs directly, rather than start.mjs, so
+  // we never enter the path that auto-populates CLAUDE_PROJECT_DIR and
+  // CONTEXT_MODE_PROJECT_DIR from cwd. The predecessor spawned build/server.js
+  // — a gitignored tsc intermediate that no host loads and that nothing keeps
+  // fresh; the bundle is what start.mjs imports first and what the freshness
+  // guards actually cover.
+  const WORKSPACE_VAR_CASES: ReadonlyArray<readonly [platform: string, envVar: string]> = [
+    ["claude-code", "CLAUDE_PROJECT_DIR"],
+    ["codex", "CONTEXT_MODE_PROJECT_DIR"],
+  ];
 
-    // Simulate JetBrains: cwd is an IDE-bin-like dir (NOT the project),
-    // env carries only IDEA_INITIAL_DIRECTORY pointing at the real project.
-    const fakeIdeBin = mkdtempSync(join(tmpdir(), "ctx-jetbrains-bin-"));
+  for (const [platform, envVar] of WORKSPACE_VAR_CASES) {
+    test(`relative path resolves against ${envVar} alone (${platform})`, async () => {
+      const bundleEntry = resolve(__dirname, "..", "..", "server.bundle.mjs");
+      expect(existsSync(bundleEntry)).toBe(true);
 
-    // Strip inherited platform workspace/identification vars so the cascade is
-    // forced to consult IDEA_INITIAL_DIRECTORY. Issue #545 (v1.0.124): when a
-    // host env var (Claude Code, Codex, etc.) leaks into this child,
-    // detectPlatform() can pick that host, enter strict mode, and ban
-    // IDEA_INITIAL_DIRECTORY as a foreign var.
-    const cleanEnv = { ...process.env };
-    for (const key of Object.keys(cleanEnv)) {
-      if (
-        /^(CLAUDE|CODEX|GEMINI|VSCODE|CURSOR|OPENCODE|KILO|KIRO|PI|OMP|ZED|QWEN|KIMI|ANTIGRAVITY|OPENCLAW|COPILOT)_/.test(key) ||
-        key === "CONTEXT_MODE_PLATFORM" ||
-        key === "CONTEXT_MODE_PROJECT_DIR"
-      ) {
-        delete cleanEnv[key];
+      // cwd is a dir that is NOT the project — the analogue of the IDE bin dir.
+      const fakeHostCwd = mkdtempSync(join(tmpdir(), "ctx-host-cwd-"));
+
+      // Strip every inherited host var so the cascade has exactly one signal
+      // to work with. Issue #545 (v1.0.124): a leaked foreign workspace var
+      // can flip detectPlatform() and get the var under test banned as
+      // foreign, which would make this test pass or fail for the wrong reason.
+      const cleanEnv = { ...process.env };
+      for (const key of Object.keys(cleanEnv)) {
+        if (
+          /^(CLAUDE|CODEX)_/.test(key) ||
+          key === "CONTEXT_MODE_PLATFORM" ||
+          key === "CONTEXT_MODE_PROJECT_DIR"
+        ) {
+          delete cleanEnv[key];
+        }
       }
-    }
 
-    const proc = spawn("node", [buildEntry], {
-      stdio: ["pipe", "pipe", "pipe"],
-      cwd: fakeIdeBin,
-      env: {
-        ...cleanEnv,
-        CONTEXT_MODE_DISABLE_VERSION_CHECK: "1",
-        IDEA_INITIAL_DIRECTORY: ctxProjectDir,
-      },
-    });
-
-    try {
-      await awaitRpc(proc, 1, {
-        jsonrpc: "2.0", id: 1, method: "initialize",
-        params: { protocolVersion: "2024-11-05", capabilities: {}, clientInfo: { name: "ctx-index-jetbrains", version: "1.0" } },
-      });
-      sendRpc(proc, { jsonrpc: "2.0", method: "notifications/initialized" });
-
-      const indexResp = await awaitRpc(proc, 100, {
-        jsonrpc: "2.0", id: 100, method: "tools/call",
-        params: { name: "ctx_index", arguments: { path: ctxFileName } },
+      const proc = spawn("node", [bundleEntry], {
+        stdio: ["pipe", "pipe", "pipe"],
+        cwd: fakeHostCwd,
+        env: {
+          ...cleanEnv,
+          CONTEXT_MODE_DISABLE_VERSION_CHECK: "1",
+          // Pin the strict platform explicitly: detection from a stripped env
+          // would otherwise fall back to whatever config dir happens to exist
+          // on the machine running the suite.
+          CONTEXT_MODE_PLATFORM: platform,
+          [envVar]: ctxProjectDir,
+        },
       });
 
-      expect(indexResp?.error).toBeUndefined();
-      const indexText = indexResp?.result?.content?.[0]?.text ?? "";
-      // Must succeed — proves the relative path resolved under
-      // IDEA_INITIAL_DIRECTORY (not the fake IDE-bin cwd).
-      expect(indexText).toMatch(/Indexed \d+ section/);
-      expect(indexText).not.toMatch(/Index error/);
+      try {
+        await awaitRpc(proc, 1, {
+          jsonrpc: "2.0", id: 1, method: "initialize",
+          params: { protocolVersion: "2024-11-05", capabilities: {}, clientInfo: { name: `ctx-index-${platform}`, version: "1.0" } },
+        });
+        sendRpc(proc, { jsonrpc: "2.0", method: "notifications/initialized" });
 
-      // Round-trip via search using the unique marker only present in the
-      // file under IDEA_INITIAL_DIRECTORY — proves the right file was read.
-      const searchResp = await awaitRpc(proc, 101, {
-        jsonrpc: "2.0", id: 101, method: "tools/call",
-        params: { name: "ctx_search", arguments: { queries: [uniqueMarker] } },
-      });
-      expect(searchResp?.error).toBeUndefined();
-      const searchText = searchResp?.result?.content?.[0]?.text ?? "";
-      expect(searchText).toContain(uniqueMarker);
-    } finally {
-      try { proc.kill("SIGTERM"); } catch { /* best effort */ }
-      try { rmSync(fakeIdeBin, { recursive: true, force: true }); } catch { /* best effort */ }
-    }
-  }, 60_000);
+        const indexResp = await awaitRpc(proc, 100, {
+          jsonrpc: "2.0", id: 100, method: "tools/call",
+          params: { name: "ctx_index", arguments: { path: ctxFileName } },
+        });
+
+        expect(indexResp?.error).toBeUndefined();
+        const indexText = indexResp?.result?.content?.[0]?.text ?? "";
+        // Must succeed — proves the relative path resolved under the env var,
+        // not under the fake host cwd.
+        expect(indexText).toMatch(/Indexed \d+ section/);
+        expect(indexText).not.toMatch(/Index error/);
+
+        // Round-trip via search using the unique marker only present in the
+        // file under the env var — proves the right file was read.
+        const searchResp = await awaitRpc(proc, 101, {
+          jsonrpc: "2.0", id: 101, method: "tools/call",
+          params: { name: "ctx_search", arguments: { queries: [uniqueMarker] } },
+        });
+        expect(searchResp?.error).toBeUndefined();
+        const searchText = searchResp?.result?.content?.[0]?.text ?? "";
+        expect(searchText).toContain(uniqueMarker);
+      } finally {
+        try { proc.kill("SIGTERM"); } catch { /* best effort */ }
+        try { rmSync(fakeHostCwd, { recursive: true, force: true }); } catch { /* best effort */ }
+      }
+    }, 60_000);
+  }
 
   // Source-label dedup regression: when no explicit `source` is supplied,
   // ctx_index must default the FTS5 label to the *resolved* absolute path so
@@ -1759,11 +1775,14 @@ describe("ctx_execute_file: CONTEXT_MODE_PROJECT_DIR env cascade", () => {
   const execScriptName = "script.js";
   const execMarker = `ctx-exec-marker-${process.pid}-${Date.now()}`;
 
-  // Spawn build/server.js directly to bypass start.mjs's auto-set of
-  // CLAUDE_PROJECT_DIR = process.cwd(). That auto-set would defeat the
-  // test by injecting a CLAUDE_PROJECT_DIR before getProjectDir() can
-  // fall through to CONTEXT_MODE_PROJECT_DIR.
-  const buildServerEntry = resolve(__dirname, "..", "..", "build", "server.js");
+  // Spawn the committed server.bundle.mjs directly to bypass start.mjs's
+  // auto-set of CLAUDE_PROJECT_DIR = process.cwd(). That auto-set would defeat
+  // the test by injecting a CLAUDE_PROJECT_DIR before getProjectDir() can fall
+  // through to CONTEXT_MODE_PROJECT_DIR. The bundle, not build/server.js: the
+  // bundle is what start.mjs imports first, it is committed, and its freshness
+  // is guarded — build/ is a gitignored tsc intermediate that nothing keeps in
+  // step with src/, so a test spawning it can pass against deleted code.
+  const buildServerEntry = resolve(__dirname, "..", "..", "server.bundle.mjs");
 
   beforeAll(() => {
     mkdirSync(execScriptDir, { recursive: true });
@@ -1779,15 +1798,17 @@ describe("ctx_execute_file: CONTEXT_MODE_PROJECT_DIR env cascade", () => {
   });
 
   function spawnServerCtxModeOnly(projectDirEnv: string): ChildProcess {
-    // Strip every CLAUDE_*-style projectDir signal so the executor MUST
-    // fall back through the env cascade to CONTEXT_MODE_PROJECT_DIR.
-    const env = { ...process.env, CONTEXT_MODE_DISABLE_VERSION_CHECK: "1" };
-    delete env.CLAUDE_PROJECT_DIR;
-    delete env.GEMINI_PROJECT_DIR;
-    delete env.VSCODE_CWD;
-    delete env.OPENCODE_PROJECT_DIR;
-    delete env.PI_PROJECT_DIR;
-    delete env.IDEA_INITIAL_DIRECTORY;
+    // Strip every workspace projectDir signal any live platform can publish,
+    // so the executor MUST fall back through the env cascade to
+    // CONTEXT_MODE_PROJECT_DIR. Derived from PLATFORM_ENV_VARS rather than
+    // listed: the literal list this replaced went on deleting
+    // GEMINI_PROJECT_DIR, VSCODE_CWD, OPENCODE_PROJECT_DIR, PI_PROJECT_DIR and
+    // IDEA_INITIAL_DIRECTORY after those hosts left the cascade — deletes that
+    // did nothing, in a helper whose whole job is to leave nothing behind.
+    const env: NodeJS.ProcessEnv = { ...process.env, CONTEXT_MODE_DISABLE_VERSION_CHECK: "1" };
+    for (const platform of PLATFORM_ENV_VARS.keys()) {
+      for (const name of workspaceEnvVarsFor(platform)) delete env[name];
+    }
     env.CONTEXT_MODE_PROJECT_DIR = projectDirEnv;
     return spawn("node", [buildServerEntry], {
       stdio: ["pipe", "pipe", "pipe"],
@@ -3012,12 +3033,13 @@ describe("Version outdated warning in trackResponse", () => {
 
   test("getUpgradeHint returns platform-specific command", () => {
     expect(serverSrc).toContain("function getUpgradeHint");
-    // Claude Code gets slash command
+    // Claude Code installs as a plugin and upgrades through its own command.
     expect(serverSrc).toMatch(/claude.code.*ctx.upgrade|ctx.upgrade.*claude.code/i);
-    // npm platforms get npm update
+    // Everything else goes through npm. The third branch this used to assert
+    // (OpenClaw -> `npm run install:openclaw`) left with its host, along with
+    // the npm script it named.
     expect(serverSrc).toContain("npm update -g context-mode");
-    // OpenClaw gets its own command
-    expect(serverSrc).toContain("npm run install:openclaw");
+    expect(serverSrc).not.toContain("npm run install:openclaw");
   });
 });
 
@@ -4324,18 +4346,18 @@ describe("getSessionDirSegments — sync platform → segments map", () => {
     const { getSessionDirSegments } = await import("../../src/adapters/detect.js");
     expect(getSessionDirSegments("claude-code")).toEqual([".claude"]);
     expect(getSessionDirSegments("codex")).toEqual([".codex"]);
-    expect(getSessionDirSegments("qwen-code")).toEqual([".qwen"]);
-    expect(getSessionDirSegments("gemini-cli")).toEqual([".gemini"]);
-    expect(getSessionDirSegments("kiro")).toEqual([".kiro"]);
-    expect(getSessionDirSegments("cursor")).toEqual([".cursor"]);
-    expect(getSessionDirSegments("openclaw")).toEqual([".openclaw"]);
-    expect(getSessionDirSegments("vscode-copilot")).toEqual([".vscode"]);
-    expect(getSessionDirSegments("antigravity")).toEqual([".gemini"]);
-    expect(getSessionDirSegments("pi")).toEqual([".pi"]);
-    expect(getSessionDirSegments("kilo")).toEqual([".config", "kilo"]);
-    expect(getSessionDirSegments("opencode")).toEqual([".config", "opencode"]);
-    expect(getSessionDirSegments("zed")).toEqual([".config", "zed"]);
-    expect(getSessionDirSegments("jetbrains-copilot")).toEqual([".config", "JetBrains"]);
+  });
+
+  test("returns null for a platform removed in the fifteen-host cut", async () => {
+    // Not a formality: this function is called BEFORE an adapter exists, so a
+    // stale id resolving to a directory would point pre-detection storage at a
+    // root nothing else writes to. null makes the caller pick its own fallback.
+    const { getSessionDirSegments } = await import("../../src/adapters/detect.js");
+    for (const gone of ["qwen-code", "gemini-cli", "kiro", "cursor", "openclaw",
+                        "vscode-copilot", "antigravity", "pi", "kilo", "opencode",
+                        "zed", "jetbrains-copilot"]) {
+      expect(getSessionDirSegments(gone), `${gone} should not resolve`).toBeNull();
+    }
   });
 
   test("returns null for unknown platform", async () => {
@@ -5128,81 +5150,18 @@ test("withProjectDirOverride carries native plugin session id into currentAttrib
   }
 });
 
-test("OpenCode/Kilo legacy MCP child suppresses ctx_* tool registration while embedded plugin import keeps it", async () => {
-  const { shouldSuppressMcpToolsForNativePluginHost } = await import("../../src/server.js");
-  const legacySettings = {
-    plugin: ["context-mode"],
-    mcp: { "context-mode": { type: "local", command: ["context-mode"] } },
-  };
-  expect(shouldSuppressMcpToolsForNativePluginHost({ platform: "opencode", settings: legacySettings })).toBe(true);
-  expect(shouldSuppressMcpToolsForNativePluginHost({ platform: "kilo", settings: legacySettings })).toBe(true);
-  expect(shouldSuppressMcpToolsForNativePluginHost({ platform: "opencode", settings: { plugin: ["context-mode"] } })).toBe(false);
-  expect(shouldSuppressMcpToolsForNativePluginHost({ platform: "opencode", embedded: "1", settings: legacySettings })).toBe(false);
-  expect(shouldSuppressMcpToolsForNativePluginHost({ platform: "claude-code", embedded: undefined })).toBe(false);
-});
 
-test("OpenCode legacy MCP suppression parses JSONC URLs without stripping // inside strings", async () => {
-  const { shouldSuppressMcpToolsForNativePluginHost } = await import("../../src/server.js");
-  const dir = mkdtempSync(join(tmpdir(), "opencode-jsonc-url-"));
-  const cwd = process.cwd();
-  try {
-    writeFileSync(join(dir, "opencode.jsonc"), `{
-      // Keep this URL intact; a naive /\\/\\/.*/ stripper corrupts it.
-      "endpoint": "https://example.com/api",
-      "plugin": ["context-mode"],
-      "mcp": {
-        "context-mode": { "type": "local", "command": ["context-mode"] },
-        "other": { "type": "local", "command": ["other"] }
-      }
-    }\n`);
-    process.chdir(dir);
-    expect(shouldSuppressMcpToolsForNativePluginHost({ platform: "opencode" })).toBe(true);
-  } finally {
-    process.chdir(cwd);
-    rmSync(dir, { recursive: true, force: true });
-  }
-});
 
-// #787 review regression, applied to server.ts: its local stripJsonComments
-// ended with a whole-string trailing-comma regex that deleted commas INSIDE
-// string values ("[1, ]" -> "[1 ]"). That corruption always leaves the JSON
-// valid (only the comma char is deleted; the anchoring bracket stays), and
-// shouldSuppressMcpToolsForNativePluginHost() — the only public surface over
-// readNativePluginHostSettings() — checks just the plugin array for a
-// "context-mode" substring and the mcp object for a "context-mode" key, so a
-// deleted in-string comma can never flip the boolean ("context-mode" contains
-// no comma to delete and no bracket to leave behind). Pin the fix
-// structurally instead: server.ts must delegate to the shared string-aware
-// src/util/jsonc.ts — whose in-string-comma behavior IS pinned by the
-// "parseJsonc / stripJsonComments" suite below — and must not reintroduce a
-// local whole-string trailing-comma regex.
-test("server.ts delegates JSONC stripping to string-aware src/util/jsonc (#787 in-string trailing-comma regression)", async () => {
-  const serverSrc = serverSource();
-  expect(serverSrc).toContain('from "./util/jsonc.js"');
-  expect(serverSrc).not.toContain('.replace(/,(\\s*[}\\]])/g');
-  // End-to-end sanity through the public boolean: a JSONC config that needs
-  // the strip path (comment + real trailing comma) and embeds a
-  // trailing-comma-like pattern inside a string value still parses and
-  // suppresses.
-  const { shouldSuppressMcpToolsForNativePluginHost } = await import("../../src/server.js");
-  const dir = mkdtempSync(join(tmpdir(), "opencode-jsonc-comma-"));
-  const cwd = process.cwd();
-  try {
-    writeFileSync(join(dir, "opencode.jsonc"), `{
-      // forces the comment/trailing-comma strip path
-      "note": "array literal: [1, ]",
-      "plugin": ["context-mode"],
-      "mcp": {
-        "context-mode": { "type": "local", "command": ["context-mode"] }
-      },
-    }\n`);
-    process.chdir(dir);
-    expect(shouldSuppressMcpToolsForNativePluginHost({ platform: "opencode" })).toBe(true);
-  } finally {
-    process.chdir(cwd);
-    rmSync(dir, { recursive: true, force: true });
-  }
-});
+
+// The five tests that stood here covered the OpenCode/Kilo legacy-MCP
+// suppression path (#623, #637, #787): a host that could load context-mode as
+// an in-process plugin AND keep a legacy `mcp.context-mode` block, producing a
+// second MCP child that muted its own tool list. Both hosts and the machinery
+// went with the fifteen-host removal — no remaining host loads this module in
+// process, and an empty tools/list is now a bug rather than an intention. The
+// #787 half asserted server.ts delegates JSONC stripping to src/util/jsonc;
+// server.ts no longer parses JSONC at all, and the util's own behaviour is
+// pinned by the suite immediately below, which is where that invariant lives.
 
 // ─── src/util/jsonc — shared string-aware JSONC strip/parse (#787/#806) ─────
 // The naive regex strippers that lived in src/server.ts and the OpenCode
@@ -5253,463 +5212,7 @@ describe("parseJsonc / stripJsonComments (src/util/jsonc)", () => {
   });
 });
 
-// Issue #623: when ctx_* tool registration is suppressed for the legacy MCP
-// child on OpenCode/Kilo, an MCP client inspecting tools/list sees an empty
-// list with NO explanation. The plugin-native tools work, but a user who only
-// observes the MCP child (or another MCP host that doesn't load the plugin)
-// has no signal that ctx_* tools were intentionally hidden. Surface a stderr
-// diagnostic frame at first suppressed registerTool() call so operators can
-// tell "tools/list is empty BECAUSE the legacy mcp.context-mode block coexists
-// with plugin: ['context-mode']" — not "the server is broken".
-test("OpenCode/Kilo legacy MCP child emits stderr diagnostic when ctx_* suppression fires (#623)", async () => {
-  const { emitSuppressionDiagnostic, __resetSuppressionDiagnosticForTests } = await import("../../src/server.js");
-  __resetSuppressionDiagnosticForTests();
-  const lines: string[] = [];
-  emitSuppressionDiagnostic({ platform: "opencode", write: (c) => lines.push(c) });
-  // Second call must NOT re-emit — diagnostic is one-shot per process.
-  emitSuppressionDiagnostic({ platform: "opencode", write: (c) => lines.push(c) });
-  const joined = lines.join("");
-  expect(joined).toMatch(/context-mode/);
-  expect(joined).toMatch(/#623|plugin-native|legacy.*mcp\.context-mode|mcp\.context-mode.*legacy/i);
-  // One-shot: exactly one line containing the marker.
-  const matches = joined.match(/\[context-mode\]/g) ?? [];
-  expect(matches.length).toBe(1);
-  __resetSuppressionDiagnosticForTests();
-});
 
-// Issue #637: an operator who inspects the suppressed legacy MCP child via
-// `tools/list` (or whose MCP host probes it on connect) currently receives a
-// JSON-RPC -32601 "Method not found" error — because no `registerTool()` call
-// survives the suppression shim, the SDK's `setToolRequestHandlers()` never
-// runs and `tools/list` is therefore unregistered. To an outside observer that
-// looks identical to a broken server and they reasonably conclude "the plugin
-// never registers any ctx_* tools" (#637's headline framing). The real story
-// is "the MCP child was intentionally muted; the plugin path is serving the
-// tools natively" — already conveyed via the #623 stderr diagnostic, but
-// JSON-RPC consumers don't read stderr.
-//
-// Fix: register an explicit empty `tools/list` handler whenever suppression
-// is active, so the wire response becomes `{tools: []}` (spec-compliant,
-// matches what operators expect) paired with the existing stderr diagnostic.
-// This eliminates the misleading -32601 that started #637.
-test("registerEmptyToolsListHandler responds with {tools:[]} so operators don't see -32601 on suppressed MCP child (#637)", async () => {
-  // The user-facing failure mode that drove issue #637: an operator inspecting
-  // the suppressed legacy MCP child via `tools/list` (or whose MCP host probes
-  // it during connect) receives JSON-RPC -32601 "Method not found" because the
-  // SDK only registers tools/list when `registerTool()` actually goes through —
-  // and the #623 suppression shim returns undefined for every registration.
-  // The reporter reads -32601 as "the plugin never registers any ctx_* tools",
-  // which is the headline framing of #637.
-  //
-  // Fix: an exported helper that installs an explicit empty tools/list handler
-  // when suppression is active. The bundle entry point calls it at module-init
-  // time (alongside the prompts/resources handlers at server.ts:259-261).
-  //
-  // We test the helper in isolation against a fresh McpServer wired through an
-  // in-memory transport to a Client. This avoids the module-load-time pinning
-  // of `suppressMcpToolsForNativePluginHost` and gives a deterministic loop
-  // that does not depend on the build bundle being present.
-  const { McpServer } = await import("@modelcontextprotocol/sdk/server/mcp.js");
-  const { Client } = await import("@modelcontextprotocol/sdk/client/index.js");
-  const { InMemoryTransport } = await import("@modelcontextprotocol/sdk/inMemory.js");
-  const { registerEmptyToolsListHandler } = await import("../../src/server.js");
-
-  const mcp = new McpServer({ name: "issue-637-isolated", version: "0.0.0" });
-  registerEmptyToolsListHandler(mcp);
-
-  const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
-  await Promise.all([
-    mcp.server.connect(serverTransport),
-    (async () => {
-      const client = new Client({ name: "issue-637-probe", version: "0.0.0" }, { capabilities: {} });
-      await client.connect(clientTransport);
-      const listed = await client.listTools();
-      // Pre-fix: client.listTools() throws -32601 Method not found.
-      // Post-fix: returns { tools: [] }.
-      expect(listed).toBeDefined();
-      expect(Array.isArray(listed.tools)).toBe(true);
-      expect(listed.tools.length).toBe(0);
-      await client.close();
-    })(),
-  ]);
-}, 15_000);
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Tool description style contract (#683 ADR-0002)
-// ─────────────────────────────────────────────────────────────────────────────
-//
-// Static contract test that scans every server.registerTool() block in
-// src/server.ts and asserts the tool description meets the style policy
-// codified in docs/adr/0002-tool-description-style.md.
-//
-// Motivation: PR #654 surfaced that a single hortatory word ("blocked") in a
-// routing deny reason was misread by Opus 4.6 as a network restriction,
-// causing capitulation to training data instead of routing. The same drift
-// has accumulated organically in tool descriptions (MANDATORY:, PREFER X
-// OVER Y, NEVER, Do NOT, ✅/❌). This test is the regression guard.
-//
-// Per CONTRIBUTING.md "Test file organization", we fold the contract into
-// tests/core/server.test.ts rather than creating tests/server/*.test.ts.
-//
-// Exemptions: ctx_stats, ctx_doctor, ctx_insight have minimal one-line
-// descriptions by design — they are GUI/diagnostic affordances, not routing
-// targets, so the WHEN: structural requirement does not apply.
-describe("tool description style contract (#683 ADR-0002)", () => {
-  // Every file the server is built from, not just src/server.ts: the tools
-  // whose registration moved to src/tools/*.ts are still shipped tools, and
-  // reading one file would quietly drop them from the corpus.
-  const serverTs = serverSource();
-
-  // Extract every registered tool with its description string.
-  // Description is a template literal or "+"-concatenated string literal
-  // sitting on the `description:` key inside the registerTool config object.
-  function extractToolDescriptions(): Array<{ name: string; description: string; lineNo: number }> {
-    const out: Array<{ name: string; description: string; lineNo: number }> = [];
-    const lines = serverTs.split("\n");
-    const RE_REGISTER = /server\.registerTool\(\s*$/;
-    const RE_NAME = /^\s*"(ctx_[a-z_]+)"\s*,\s*$/;
-    for (let i = 0; i < lines.length; i++) {
-      if (!RE_REGISTER.test(lines[i])) continue;
-      const nameMatch = lines[i + 1]?.match(RE_NAME);
-      if (!nameMatch) continue;
-      const name = nameMatch[1];
-      // Description block starts at first `description:` after the name.
-      // Capture until the next `inputSchema:` line at the same indentation.
-      let descStart = -1;
-      let descEnd = -1;
-      for (let j = i + 2; j < Math.min(i + 80, lines.length); j++) {
-        if (descStart < 0 && /^\s*description:/.test(lines[j])) {
-          descStart = j;
-        } else if (descStart >= 0 && /^\s*(inputSchema|outputSchema|annotations):/.test(lines[j])) {
-          descEnd = j;
-          break;
-        }
-      }
-      if (descStart < 0 || descEnd < 0) continue;
-      const block = lines.slice(descStart, descEnd).join("\n");
-      // Strip the leading `description: ` and trailing comma.
-      // The literal text the LLM sees is just the string content — for the
-      // contract we work on the source-form block (template-literal/concat
-      // syntax), which is sufficient to detect forbidden tokens like
-      // `MANDATORY:` or `PREFER`. We do NOT execute the template here.
-      out.push({ name, description: block, lineNo: descStart + 1 });
-    }
-    return out;
-  }
-
-  const tools = extractToolDescriptions();
-
-  // Tools exempt from the WHEN: structural requirement, with documented
-  // rationale per the audit (see TOOL-DESCRIPTIONS-AUDIT.md §3 table).
-  //
-  // - ctx_stats / ctx_doctor / ctx_insight: minimal one-line descriptions by
-  //   design — diagnostic/GUI affordances, not routing targets. Audit row:
-  //   "NIT — Clean, minimal, no change."
-  // - ctx_upgrade: MUST is appropriate here (post-call obligation on the
-  //   agent to run the returned shell command). Audit row: "LOW — MUST is
-  //   appropriate here (post-call obligation), good use case. No change."
-  const EXEMPT_FROM_WHEN = new Set([
-    "ctx_stats",
-    "ctx_doctor",
-    "ctx_insight",
-    "ctx_upgrade",
-  ]);
-
-  // ctx_purge carve-out — the rewrite (PR #683 WS2) preserves the
-  // user-facing DESTRUCTIVE signal because Probe 4 empirically showed that
-  // soft framing regresses parameter fidelity on Haiku (5/5 → 3/5). The
-  // word "DESTRUCTIVE" is therefore an accurate-signaling carve-out,
-  // distinct from cross-LLM-bias negative framing the rubric forbids.
-  // ADR-0002 §Exemptions documents this; the WHEN/WHEN NOT/SCOPES/
-  // CONTRACT/RETURNS/EXAMPLE structure of the rewritten description still
-  // meets the canonical contract enforced below.
-  const EXEMPT_FROM_FORBIDDEN_TOKENS = new Set<string>([]);
-
-  // Empty by design. ctx_graph briefly sat here while its description was a
-  // `+` concat with `•` bullets; it was rewritten as an ADR-0002 template
-  // literal in the same wave. Keep this set empty — a new tool joining the
-  // corpus writes its description to the contract, it does not defer it.
-  const PENDING_DESCRIPTION_REWRITE = new Set<string>([]);
-
-  test("at least 11 ctx_* tools are registered", () => {
-    // Sanity check that the extractor found the corpus.
-    expect(tools.length).toBeGreaterThanOrEqual(11);
-  });
-
-  // Forbidden tokens per ADR-0002. Each pattern is documented inline so
-  // a future contributor reading a failure understands the rationale, not
-  // just the regex.
-  type ForbiddenRule = { name: string; pattern: RegExp; rationale: string };
-  const FORBIDDEN: ForbiddenRule[] = [
-    {
-      name: "SESSION STATE clause",
-      // Rubric #3 + GRILL-Q1-VERDICT: tool descriptions are selection cues,
-      // not in-context prompts. Skill/role/decision persistence belongs in
-      // routing-block.mjs (which already covers it more thoroughly).
-      pattern: /\bSESSION STATE\b/,
-      rationale: "Move SESSION STATE guidance to routing-block.mjs (it already lives there).",
-    },
-    {
-      name: "BLOCKED",
-      // ADR-0003: 'blocked' is reserved for CASE B (real policy restriction)
-      // in routing.mjs deny reasons. It MUST NOT appear in any ctx_* tool
-      // description, where there is no security restriction to express.
-      pattern: /\bBLOCKED\b/,
-      rationale: "Reserve 'blocked' for routing CASE B (security policy denial) per ADR-0003.",
-    },
-    {
-      name: "MANDATORY: opener",
-      // Rubric #7: MANDATORY in a tool description reads as a developer
-      // policy note rather than a tool-selection cue. Replace with WHEN:.
-      pattern: /\bMANDATORY:/,
-      rationale: "Replace 'MANDATORY:' opener with role definition + WHEN: section.",
-    },
-    {
-      name: "PREFER X OVER Y",
-      // Rubric #7: 'PREFER' is the wrong strength and frames the choice as
-      // a tradeoff. WHEN:/WHEN NOT: sections give the agent positive cues.
-      pattern: /\bPREFER\s+THIS\s+OVER\b/,
-      rationale: "Replace 'PREFER THIS OVER X' with positive WHEN: clauses.",
-    },
-    {
-      name: "Do NOT (descriptive)",
-      // Rubric #2 + #7: affirmative beats negative. 'Do NOT' inside the
-      // description is voice-of-trainer; routing-block.mjs is the right
-      // layer for prohibitions.
-      pattern: /\bDo NOT\s+(?:read|use|pull|call)\b/,
-      rationale: "Rewrite 'Do NOT read/use/pull' as positive WHEN: / WHEN NOT: clauses.",
-    },
-    {
-      name: "Never use (capitalised imperative)",
-      // Rubric #7: 'Never' as a soft imperative inside a description is
-      // a forbidding voice; sibling-tool selection should be expressed
-      // through WHEN NOT: structure instead.
-      pattern: /\bNever\s+use\b/,
-      rationale: "Rewrite 'Never use' as positive WHEN NOT: clause.",
-    },
-    {
-      name: "checkmark emoji ✅",
-      // Rubric #4 + Probe 3 evidence: emoji tokenize inconsistently across
-      // LLM families (Llama, Gemini) and ❌ bullets are precisely the
-      // negative-example leakage pattern.
-      pattern: /✅/,
-      rationale: "Replace ✅ bullets with prose 'USE concurrency 4-8 for ...' (ADR-0002).",
-    },
-    {
-      name: "cross emoji ❌",
-      pattern: /❌/,
-      rationale: "Replace ❌ bullets with prose 'KEEP concurrency 1 for ...' (ADR-0002).",
-    },
-  ];
-
-  // ── Canonical structure (ADR-0002 amendment, PR #683 WS3) ────────────
-  //
-  // Every non-exempt ctx_* tool description MUST follow the canonical
-  // structure documented in ADR-0002:
-  //
-  //   <1-line headline>
-  //   WHEN:        (mandatory — positive selection cues, bulleted with `- `)
-  //   WHEN NOT:    (optional — sibling-tool disambiguation, bulleted)
-  //   RETURNS:     (mandatory — what the agent gets back)
-  //   EXAMPLE:     (mandatory — one canonical call)
-  //
-  // Rules:
-  //   1. Section order MUST be WHEN -> WHEN NOT -> RETURNS -> EXAMPLE
-  //      (positive cues precede negative disambiguation, per audit rubric #2).
-  //   2. Bullets MUST use markdown `- ` only. `1.`, `1-`, `* `, and `•` are
-  //      rejected because they tokenize inconsistently across LLM families
-  //      and break the audit's bullet-uniformity contract.
-  //   3. Section headers MUST be UPPERCASE + colon at the start of a line
-  //      (after the `\n` escape in source form).
-  //   4. ctx_purge has an audit-approved carve-out for DESTRUCTIVE / SCOPES /
-  //      CONTRACT headers (accurate-signaling and parameter-fidelity
-  //      requirements that Probe 4 empirically validated). All four headers
-  //      coexist with the canonical WHEN/WHEN NOT/RETURNS/EXAMPLE.
-  //
-  // Helper: flatten the source-form description into the literal text the
-  // LLM eventually sees (collapse `\n` escapes, join `"..." + "..."` concat,
-  // strip template-literal backticks). This is the same shape the host LLM
-  // receives at tool-selection time.
-  function flattenDescription(d: string): string {
-    return d
-      .replace(/^\s*description:\s*/, "")
-      .replace(/\\n/g, "\n")
-      .replace(/\\"/g, '"')
-      .replace(/"\s*\+\s*\n\s*"/g, "")
-      .replace(/"\s*\+\s*"/g, "")
-      .replace(/^"|"$/gm, "")
-      .replace(/`/g, "");
-  }
-
-  // Per-tool carve-outs that allow non-canonical UPPERCASE: section headers.
-  // Each entry is justified inline so a future contributor reading a failure
-  // understands why the carve-out exists.
-  const ALLOWED_EXTRA_SECTIONS: Record<string, string[]> = {
-    // ctx_purge: heavy framing is empirically validated by Probe 4. The
-    // DESTRUCTIVE prefix preserves accurate user-facing signaling and
-    // SCOPES/CONTRACT preserve parameter-fidelity discipline on Haiku.
-    ctx_purge: ["DESTRUCTIVE", "SCOPES", "CONTRACT"],
-  };
-
-  // Canonical mandatory + optional sections.
-  const CANONICAL_ORDER = ["WHEN", "WHEN NOT", "RETURNS", "EXAMPLE"] as const;
-  const MANDATORY = ["WHEN", "RETURNS", "EXAMPLE"] as const;
-
-  // Bullet patterns the contract rejects in routing-target descriptions.
-  const BAD_BULLETS = [
-    { name: "numeric-dot bullet (e.g. '1.')", pattern: /^\s*\d+\.\s/m },
-    { name: "numeric-dash bullet (e.g. '1-')", pattern: /^\s*\d+-\s/m },
-    { name: "asterisk bullet (e.g. '* foo')", pattern: /^\s*\*\s/m },
-    { name: "unicode bullet (e.g. '• foo')", pattern: /^\s*•\s/m },
-  ];
-
-  for (const tool of tools) {
-    // Tools exempt from BOTH groups have no assertions to make — emit a
-    // placeholder test so vitest doesn't error on empty describe blocks.
-    const isFullyExempt =
-      EXEMPT_FROM_FORBIDDEN_TOKENS.has(tool.name) && EXEMPT_FROM_WHEN.has(tool.name);
-    describe(tool.name, () => {
-      if (isFullyExempt) {
-        test("deferred to follow-up PR (see EXEMPT_FROM_FORBIDDEN_TOKENS rationale)", () => {
-          expect(EXEMPT_FROM_FORBIDDEN_TOKENS.has(tool.name)).toBe(true);
-        });
-        return;
-      }
-      if (!EXEMPT_FROM_FORBIDDEN_TOKENS.has(tool.name)) {
-        for (const rule of FORBIDDEN) {
-          test(`MUST NOT contain '${rule.name}'`, () => {
-            const match = tool.description.match(rule.pattern);
-            if (match) {
-              throw new Error(
-                `${tool.name} description (src/server.ts:${tool.lineNo}) contains forbidden token '${match[0]}' ` +
-                `(rule: ${rule.name}). ${rule.rationale}`,
-              );
-            }
-          });
-        }
-      }
-
-      if (!EXEMPT_FROM_WHEN.has(tool.name) && !PENDING_DESCRIPTION_REWRITE.has(tool.name)) {
-        test("MUST contain a WHEN: section (or WHEN TO USE: legacy)", () => {
-          // Per ADR-0002: every routing-target ctx_* tool MUST have a
-          // positive selection cue. The legacy alias `WHEN TO USE:` is
-          // accepted because ctx_index already uses it and rewriting that
-          // header is out of scope for this PR (audit MEDIUM, separate work).
-          //
-          // We can't use `\bWHEN` because in source-form descriptions the
-          // preceding token is often the literal two-char sequence `\n`
-          // (from the JS escape) — `n` is a word character so `\b` fails.
-          // Likewise, for `+ "WHEN:..."` concat style the preceding char is
-          // `"`. Match any of those legitimate prefixes explicitly so both
-          // template-literal and string-concat description shapes pass.
-          const hasWhen = /(?:\\n|^|\s|")WHEN(?:\s+TO\s+USE)?:/.test(tool.description);
-          expect(hasWhen, `${tool.name} description (src/server.ts:${tool.lineNo}) must contain a WHEN: section`).toBe(true);
-        });
-
-        // ── Canonical structure assertions (PR #683 WS3) ─────────────
-        const flat = flattenDescription(tool.description);
-
-        test("MUST contain RETURNS: and EXAMPLE: sections (canonical structure)", () => {
-          for (const section of MANDATORY) {
-            expect(
-              flat.includes(section + ":"),
-              `${tool.name} (src/server.ts:${tool.lineNo}) missing mandatory section '${section}:' per ADR-0002 canonical structure.`,
-            ).toBe(true);
-          }
-        });
-
-        test("section order MUST be WHEN -> WHEN NOT -> RETURNS -> EXAMPLE", () => {
-          // For each canonical section present, its position in the flattened
-          // description must be strictly greater than the previous canonical
-          // section's position. Carve-out headers (DESTRUCTIVE, SCOPES,
-          // CONTRACT for ctx_purge) are allowed between canonical sections
-          // — only the relative order of the canonical four is enforced.
-          let lastPos = -1;
-          for (const section of CANONICAL_ORDER) {
-            const pos = flat.indexOf(section + ":");
-            if (pos < 0) continue;
-            expect(
-              pos,
-              `${tool.name} (src/server.ts:${tool.lineNo}) section '${section}:' appears before a sibling that should follow it (positions: ${CANONICAL_ORDER.map(s => `${s}=${flat.indexOf(s + ":")}`).join(", ")}). Canonical order: WHEN -> WHEN NOT -> RETURNS -> EXAMPLE.`,
-            ).toBeGreaterThan(lastPos);
-            lastPos = pos;
-          }
-        });
-
-        test("section headers MUST be UPPERCASE + colon (no off-spec UPPERCASE sections)", () => {
-          // Extract every UPPERCASE-header occurrence (two or more uppercase
-          // chars, optional space, then colon at line start). Reject any
-          // that aren't in the canonical set or the per-tool carve-out.
-          const headerMatches = [...flat.matchAll(/^([A-Z][A-Z _]+):/gm)].map(m => m[1]);
-          const allowed = new Set<string>([...CANONICAL_ORDER, ...(ALLOWED_EXTRA_SECTIONS[tool.name] ?? [])]);
-          const offSpec = [...new Set(headerMatches.filter(h => !allowed.has(h)))];
-          expect(
-            offSpec,
-            `${tool.name} (src/server.ts:${tool.lineNo}) uses off-spec UPPERCASE sections [${offSpec.join(", ")}]. ` +
-            `Allowed: [${[...allowed].join(", ")}]. Fold operational sub-guidance (CONCURRENCY, TIPS, ...) into WHEN: / RETURNS: prose.`,
-          ).toEqual([]);
-        });
-
-        test("bullets MUST use '- ' markdown only (no '1.', '1-', '* ', or '•')", () => {
-          // Scan the flattened description. The rubric requires uniform
-          // markdown bullets so the host LLM tokenizes them consistently
-          // across Claude / GPT / Gemini / Llama. Numbered ordering inside
-          // a routing-target description is also discouraged because each
-          // bullet should be independently true, not sequenced.
-          const failures: string[] = [];
-          for (const rule of BAD_BULLETS) {
-            const m = flat.match(rule.pattern);
-            if (m) {
-              const lineNo = flat.slice(0, flat.indexOf(m[0])).split("\n").length;
-              failures.push(`${rule.name} at description-line ${lineNo}: '${m[0].trim()}'`);
-            }
-          }
-          expect(
-            failures,
-            `${tool.name} (src/server.ts:${tool.lineNo}) bullet uniformity violation: ${failures.join("; ")}. ` +
-            `Use markdown '- ' bullets only (ADR-0002 §Canonical structure).`,
-          ).toEqual([]);
-        });
-
-        // ── PR #683 second amendment (Mert flag): RETURNS form uniformity ──
-        //
-        // ADR-0002 L56-57 specifies RETURNS as a header on its own line with
-        // the body on the next line indented (matching WHEN: / WHEN NOT:
-        // shape). Three tools (ctx_execute, ctx_execute_file, ctx_purge)
-        // historically used inline form ("RETURNS: only your printed output.")
-        // while four tools (ctx_index, ctx_search, ctx_fetch_and_index,
-        // ctx_batch_execute) used the canonical header+body form. Mert flagged
-        // the visual inconsistency on review. This guard locks the canonical
-        // form so the regression can't slip back.
-        //
-        // EXAMPLE: stays inline per ADR-0002 L59 ("EXAMPLE: <one canonical
-        // call>"). The asymmetry is intentional — RETURNS prose is multi-line
-        // capable, EXAMPLE values are one-call-per-line.
-        test("RETURNS: header MUST be on its own line, body indented below (ADR-0002 L56-57)", () => {
-          // Match RETURNS: followed by anything other than \n on the same
-          // line (treating \\n source escape as the same boundary as a real
-          // newline). Inline form like "RETURNS: only your printed output."
-          // fails; header+body form like "RETURNS:\n  Only your printed
-          // output." passes.
-          //
-          // Source descriptions live either as template literals with real
-          // newlines OR as `+ "...\n"` concat strings with escape sequences.
-          // Match both shapes via a non-newline-non-backslash assertion.
-          const inlineRe = /RETURNS:[ \t]+[^\n\\]/;
-          const m = tool.description.match(inlineRe);
-          expect(
-            m,
-            m
-              ? `${tool.name} (src/server.ts:${tool.lineNo}) uses inline RETURNS form: '${m[0]}…'. ` +
-                `ADR-0002 L56-57 requires header on its own line with body indented below. ` +
-                `Rewrite as 'RETURNS:\\n  <body>'.`
-              : "RETURNS: header on own line.",
-          ).toBeNull();
-        });
-      }
-    });
-  }
-});
 
 // ──────────────────────────────────────────────────────────────────────────
 // Hook routing prompt-surface contract (#683 ADR-0002 + ADR-0003 extension)
@@ -6686,38 +6189,52 @@ describe("parseJsonc / stripJsonComments (src/util/jsonc)", () => {
   });
 });
 
-describe("resolveExecTimeout (agy default execution timeout)", () => {
-  const savedPlatform = process.env.CONTEXT_MODE_PLATFORM;
-  const savedOverride = process.env.CONTEXT_MODE_AGY_EXEC_TIMEOUT_MS;
-  afterEach(() => {
-    if (savedPlatform === undefined) delete process.env.CONTEXT_MODE_PLATFORM;
-    else process.env.CONTEXT_MODE_PLATFORM = savedPlatform;
-    if (savedOverride === undefined) delete process.env.CONTEXT_MODE_AGY_EXEC_TIMEOUT_MS;
-    else process.env.CONTEXT_MODE_AGY_EXEC_TIMEOUT_MS = savedOverride;
+describe("exec timeout policy — none unless the caller asks", () => {
+  // This block used to test \`resolveExecTimeout\`, a seam that applied a
+  // per-host default when the caller passed none. It existed for exactly one
+  // host: Antigravity CLI (\`agy\`) enforced no MCP RPC timeout of its own, so a
+  // runaway ctx_execute hung until the user interrupted, and the seam gave that
+  // host — and only that host — a 120 s default via AGY_DEFAULT_EXEC_TIMEOUT_MS
+  // and CONTEXT_MODE_AGY_EXEC_TIMEOUT_MS. The host left; the seam stayed behind
+  // as \`timeout => timeout\` threaded through ToolDeps into batch.ts, and has
+  // now left too.
+  //
+  // Worth recording how the suite behaved in between: three of its four tests
+  // kept passing after the constant was deleted, because
+  // \`expect(undefined).toBe(AGY_DEFAULT_EXEC_TIMEOUT_MS)\` compares undefined to
+  // undefined. A test that passes because both sides evaporated is worse than
+  // one that fails, which is why the rule below is asserted against the source
+  // that carries it rather than through a function that no longer decides
+  // anything.
+
+  test("the sandbox receives the caller timeout unmodified — ctx_execute and ctx_execute_file", () => {
+    const src = serverSource();
+    expect(src).toContain("executor.execute({ language, code: instrumentedCode, timeout, background, cwd })");
+    const fileCall = src.slice(src.indexOf("await executor.executeFile({"));
+    expect(fileCall.slice(0, 200)).toContain("timeout,");
   });
 
-  test("passes an explicit timeout through on any platform", () => {
-    process.env.CONTEXT_MODE_PLATFORM = "antigravity-cli";
-    expect(resolveExecTimeout(5000)).toBe(5000);
-    process.env.CONTEXT_MODE_PLATFORM = "claude-code";
-    expect(resolveExecTimeout(5000)).toBe(5000);
+  test("no default timeout is injected anywhere on the exec paths", () => {
+    // Both remaining hosts enforce their own RPC timeout, so a server-side
+    // timer would only cut short a long build the host was willing to allow
+    // (Issue #406). Any reappearance of a resolver is a policy change.
+    const src = serverSource();
+    expect(src).not.toContain("resolveExecTimeout");
+    expect(src).not.toContain("AGY_DEFAULT_EXEC_TIMEOUT_MS");
+    expect(src).not.toContain("CONTEXT_MODE_AGY_EXEC_TIMEOUT_MS");
+    const batchSrc = readFileSync(
+      resolve(__dirname, "..", "..", "src", "tools", "batch.ts"),
+      "utf-8",
+    );
+    expect(batchSrc).not.toContain("resolveExecTimeout");
   });
 
-  test("applies the agy default ONLY under antigravity-cli when no timeout is given", () => {
-    process.env.CONTEXT_MODE_PLATFORM = "antigravity-cli";
-    delete process.env.CONTEXT_MODE_AGY_EXEC_TIMEOUT_MS;
-    expect(resolveExecTimeout(undefined)).toBe(AGY_DEFAULT_EXEC_TIMEOUT_MS);
-  });
-
-  test("leaves the timeout unbounded (undefined) on non-agy hosts", () => {
-    process.env.CONTEXT_MODE_PLATFORM = "claude-code";
-    expect(resolveExecTimeout(undefined)).toBeUndefined();
-  });
-
-  test("honors CONTEXT_MODE_AGY_EXEC_TIMEOUT_MS override under agy", () => {
-    process.env.CONTEXT_MODE_PLATFORM = "antigravity-cli";
-    process.env.CONTEXT_MODE_AGY_EXEC_TIMEOUT_MS = "1500";
-    expect(resolveExecTimeout(undefined)).toBe(1500);
+  test("ToolDeps no longer carries a timeout resolver", () => {
+    const depsSrc = readFileSync(
+      resolve(__dirname, "..", "..", "src", "tools", "shared", "deps.ts"),
+      "utf-8",
+    );
+    expect(depsSrc).not.toContain("resolveExecTimeout");
   });
 });
 

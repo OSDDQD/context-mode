@@ -46,7 +46,7 @@ interface BatchExecuteArgs {
 export function registerBatchTools(deps: BatchToolDeps): void {
   const {
     getStore, trackResponse, trackIndexed, currentAttribution, checkDenyPolicy,
-    coerceJsonArray, coerceCommandsArray, runBatchCommands, resolveExecTimeout,
+    coerceJsonArray, coerceCommandsArray, runBatchCommands,
     truncateCommandForEcho, formatBatchQueryResults,
   } = deps;
 
@@ -176,11 +176,10 @@ EXAMPLE: ctx_batch_execute(
       // NODE_OPTIONS for FS read tracking is injected by the bound runner —
       // the executor denies NODE_OPTIONS in its env (security), so it goes in
       // as an inline shell prefix that only affects child `node` invocations.
-      const effTimeout = resolveExecTimeout(timeout);
       const { outputs: perCommandOutputs, timedOut } = await runBatchCommands(
         commands,
         {
-          timeout: effTimeout,
+          timeout,
           concurrency: concurrency ?? 1,
           cwd,
           onFsBytes: (bytes) => { sessionStats.bytesSandboxed += bytes; },
@@ -196,7 +195,7 @@ EXAMPLE: ctx_batch_execute(
           content: [
             {
               type: "text" as const,
-              text: `Batch timed out after ${effTimeout}ms. No output captured.`,
+              text: `Batch timed out after ${timeout}ms. No output captured.`,
             },
           ],
           isError: true,

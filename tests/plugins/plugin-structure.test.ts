@@ -35,6 +35,7 @@ import {
   HOOK_TIMEOUTS,
   HOOK_TYPES,
 } from "../../src/adapters/claude-code/hooks.js";
+import { ROUTING_BLOCK } from "../../hooks/routing-block.mjs";
 
 const repoRoot = resolve(__dirname, "..", "..");
 
@@ -69,7 +70,7 @@ describe("plugin layout", () => {
   it("keeps the manifest in .claude-plugin/ and every component at the repo root", () => {
     expect(existsSync(join(repoRoot, ".claude-plugin", "plugin.json"))).toBe(true);
 
-    for (const component of ["commands", "agents", "skills", "hooks", "platform-skills"]) {
+    for (const component of ["commands", "agents", "skills", "hooks"]) {
       expect(
         existsSync(join(repoRoot, component)),
         `${component}/ must live at the repo root`,
@@ -84,13 +85,11 @@ describe("plugin layout", () => {
   });
 
   it("gives every skill directory a SKILL.md", () => {
-    for (const root of ["skills", "platform-skills"]) {
-      for (const name of dirsIn(root)) {
-        expect(
-          existsSync(join(repoRoot, root, name, "SKILL.md")),
-          `${root}/${name}/ has no SKILL.md — the host will skip it silently`,
-        ).toBe(true);
-      }
+    for (const name of dirsIn("skills")) {
+      expect(
+        existsSync(join(repoRoot, "skills", name, "SKILL.md")),
+        `skills/${name}/ has no SKILL.md — the host will skip it silently`,
+      ).toBe(true);
     }
   });
 
@@ -120,21 +119,40 @@ describe("plugin layout", () => {
 });
 
 // ─────────────────────────────────────────────────────────
-// 2. Command ↔ platform-skill parity
+// 2. Command ↔ second-surface parity
 // ─────────────────────────────────────────────────────────
+//
+// What this rule used to be, and why it changed: every `commands/ctx-*.md`
+// had to have a `platform-skills/ctx-*/SKILL.md` twin, so hosts without slash
+// commands still learned the utility existed. That directory had no consumer
+// left — it was read through `package.json` → `pi.skills`, which went with
+// Pi, and neither manifest ever pointed at it. It was deleted rather than
+// wired into a manifest: doing that would put nine skill descriptions back
+// into the standing prompt of every session, which is the cost the move out
+// of `skills/` existed to remove.
+//
+// The second surface is now the injected routing block: it is host-neutral,
+// spells each tool with the calling host's own naming, and reaches Codex —
+// which has no slash commands — on every SessionStart. So the parity rule
+// stands, pointed at the surface that is actually delivered.
 
 describe("command parity", () => {
-  it("mirrors every commands/ctx-*.md as a platform-skills/ctx-*/SKILL.md twin", () => {
+  it("names every commands/ctx-*.md in the injected routing block", () => {
     const commands = readdirSync(join(repoRoot, "commands"))
       .filter((name) => name.endsWith(".md"))
       .map((name) => name.replace(/\.md$/, ""))
       .sort();
-    const platformSkills = dirsIn("platform-skills").sort();
 
-    // Hosts without slash commands get the skill copy; a command added on one
-    // side only reaches half the platforms, and nothing anywhere fails.
-    expect(platformSkills, "commands/ and platform-skills/ have drifted apart").toEqual(commands);
     expect(commands.length).toBeGreaterThanOrEqual(9);
+    for (const command of commands) {
+      // /context-mode:ctx-find ↔ the ctx_find the block names.
+      const tool = command.replace(/-/g, "_");
+      expect(
+        ROUTING_BLOCK.includes(tool),
+        `${command}: reachable as a slash command on Claude Code and nowhere on a host without them — ` +
+          `the routing block never mentions ${tool}`,
+      ).toBe(true);
+    }
   });
 
   it("gives every command the frontmatter that keeps it out of the standing prompt", () => {
@@ -151,14 +169,22 @@ describe("command parity", () => {
     }
   });
 
-  it("ships a command and a skill twin for every user-facing ctx tool", () => {
+  it("ships a command and a routing-block mention for every user-facing ctx tool", () => {
+    // F3: /ctx-find and /ctx-graph existed on neither surface.
     for (const tool of ["ctx-find", "ctx-graph"]) {
       expect(existsSync(join(repoRoot, "commands", `${tool}.md`)), `commands/${tool}.md missing`).toBe(true);
       expect(
-        existsSync(join(repoRoot, "platform-skills", tool, "SKILL.md")),
-        `platform-skills/${tool}/SKILL.md missing`,
+        ROUTING_BLOCK.includes(tool.replace(/-/g, "_")),
+        `${tool} is missing from the routing block`,
       ).toBe(true);
     }
+  });
+
+  it("has no platform-skills/ directory left to drift", () => {
+    // Deleted with its consumer. The check stays for one reason: the twin
+    // rule above was satisfied by a directory nothing shipped, and a
+    // half-restored copy would satisfy a reader's memory of it just as well.
+    expect(existsSync(join(repoRoot, "platform-skills"))).toBe(false);
   });
 });
 

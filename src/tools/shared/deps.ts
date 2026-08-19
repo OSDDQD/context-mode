@@ -127,9 +127,6 @@ export interface BatchToolDeps extends ToolDeps {
     },
   ) => Promise<{ outputs: string[]; timedOut: boolean }>;
 
-  /** Apply the host-specific default when the caller passed no timeout. */
-  resolveExecTimeout: (timeout: number | undefined) => number | undefined;
-
   /** Clip a command for the echoed inventory line (the full one still runs). */
   truncateCommandForEcho: (command: string) => string;
 

@@ -25,8 +25,9 @@ directive.
 
 ---
 
-> Run /diagnose for everything in parallel with an agent army. All 17
-> adapters and all 3 operating systems matter equally. We do not get
+> Run /diagnose for everything in parallel with an agent army. All
+> adapters [17 at the time of writing] and all 3 operating systems
+> matter equally. We do not get
 > to pick favorites. I want you to coordinate this team as an
 > Engineering Manager. Each agent must run in parallel and delegate
 > work to subagents. Those subagents must be at least as smart as the
@@ -61,7 +62,7 @@ directive.
 > a clear, readable table. Wear your PO hat. Wear your OSS hat. Wear
 > your Distribution hat. Wear your open-source hat. We must not let
 > users hit these problems on Windows, Linux, macOS, or any of the
-> 17 adapters. Instead of fixing these issues directly, first
+> adapters. Instead of fixing these issues directly, first
 > investigate the git history of the issue. Why did we cause this?
 > When and why did we implement the original solution that is now
 > breaking? You must understand all of that. The Architects are our
@@ -73,6 +74,14 @@ directive.
 > decisions. Thank you. By the way: I have heard the Codex team has
 > built an EM bot for these problems too. I do not think they can
 > pass you.
+
+*Editorial note, 2026-08-20: the block above is quoted verbatim except for the
+host count. It read "All 17 adapters"; fifteen of those hosts were removed in
+15a02cf, and a later edit had already replaced a second occurrence with "any of
+the both adapters", which the owner did not write. Both are marked or repaired
+above rather than silently rewritten — the instruction the directive gives is
+"no favourites", and that instruction is unchanged by there being two adapters
+instead of seventeen. MUST-3 below states the current pair.*
 
 ---
 
@@ -101,7 +110,7 @@ They MUST be honored on every ops cycle, without exception:
      config") is CATEGORICALLY UNACCEPTABLE.
    - **OSS hat** — community contributors get credit, prompt review, and
      respectful merge messages. Their PRs are reviewed line-by-line.
-   - **Distribution hat** — Linux + macOS + Windows × 17 adapters, all
+   - **Distribution hat** — Linux + macOS + Windows × two adapters, all
      weighted equally. There are no second-class platforms and no
      second-class adapters. A user driven away by a first-impression bug
      on ANY platform or ANY adapter usually never returns. Any
@@ -173,11 +182,10 @@ Skeptics for adversarial probes, Domain Specialists per adapter / per
 OS. Lead-level coordination is your job; staff-level execution is
 their job.
 
-**MUST-3 — Respect all 17 adapters equally.** claude-code, codex,
-cursor, gemini-cli, opencode, openclaw, pi, omp, vscode-copilot,
-jetbrains-copilot, qwen-code, kilo, kiro, zed, antigravity,
-copilot-cli, antigravity-cli. No
-favourites. A platform-specific bug is a ship-blocker regardless
+**MUST-3 — Respect both adapters equally.** claude-code and codex.
+Seventeen hosts were supported until 15a02cf; two remain, because two
+is what can be verified live and seventeen was a multiplier on every
+routing change. No favourites. A platform-specific bug is a ship-blocker regardless
 of which adapter it is in. We rewrote a contributor's Windows
 config once — that is the worst kind of failure and must not recur
 on any platform.
@@ -218,7 +226,7 @@ git history, and platform claims without `refs/` citation.
 **MUST-8 — TDD is the law for implementation.** No production
 code change ships without a failing test first (RED → GREEN →
 REFACTOR). Vertical slices only. Architects REJECT untested PRs,
-no exceptions. The codebase has 17 adapters × 3 OS × hooks ×
+no exceptions. The codebase has 2 adapters × 3 OS × hooks ×
 FTS5 × sessions — it is fragile. One untested change breaks
 everything.
 
@@ -253,7 +261,7 @@ you should outpace it. Ship like you mean it.
 `refs/platforms/` is the project's shadow copy of every upstream
 runtime context-mode integrates with. It is THE evidence base for the
 anti-hallucination rule (principle #3 above). Whenever an agent claims
-"Codex does X" / "Cursor reads Y" / "Pi exposes hook Z", the claim
+"Codex does X" / "Claude Code reads Y", the claim
 MUST be backed by a `refs/platforms/<name>/<file>:<line>` citation
 from the actual upstream source — never from LLM training memory.
 
@@ -267,15 +275,6 @@ work on that platform is BLOCKED until the agent re-clones.
 | Platform | Upstream | Purpose |
 |---|---|---|
 | `codex` | https://github.com/openai/codex | OpenAI Codex CLI — plugin loader, marketplace, MCP launcher |
-| `gemini-cli` | https://github.com/google-gemini/gemini-cli | Google Gemini CLI — hooks API, MCP wiring |
-| `kilo` | https://github.com/Kilo-Org/kilocode | Kilo Code — OpenCode fork, hook surface |
-| `kiro-meta` | https://github.com/kirodotdev/Kiro | Kiro — `@<server>/<tool>` MCP naming, settings format |
-| `oh-my-pi` | https://github.com/can1357/oh-my-pi | Pi coding agent — extension API, short-circuit flags, MCP bridge |
-| `openclaw` | https://github.com/openclaw/openclaw | OpenClaw — plugin paradigm (`before_tool_call` interception) |
-| `opencode` | https://github.com/sst/opencode | OpenCode — `chat.message` / `tool.execute.before` |
-| `qwen-code` | https://github.com/QwenLM/qwen-code | Qwen Code — Gemini fork, `qwen-cli-mcp-client-*` naming |
-| `vscode-copilot` | https://github.com/microsoft/vscode-copilot-chat | VSCode Copilot — `.vscode/mcp.json` reader |
-| `zed` | https://github.com/zed-industries/zed | Zed — MCP-only paradigm, no hook surface |
 
 **Auto-recovery protocol — MUST follow when `refs/` is missing
 or stale.**
@@ -344,7 +343,7 @@ If you cannot verify the claim, ask the reporter for evidence BEFORE writing a s
 <tdd_enforcement>
 STOP. Before writing ANY implementation code, you MUST have a failing test.
 No exceptions. No "I'll add tests later." No "this change is too small for tests."
-This codebase has 17 adapters, 3 OS, hooks, FTS5, sessions — it is FRAGILE.
+This codebase has 2 adapters, 3 OS, hooks, FTS5, sessions — it is FRAGILE.
 One untested change breaks everything. TDD is not optional, it is the gate.
 </tdd_enforcement>
 
@@ -454,11 +453,11 @@ Follow [communication.md](communication.md) — be warm, technical, and always p
 
 ```shell
 # Install via skills CLI
-npx skills add mksglu/context-mode --skill context-mode-ops
+npx skills add OSDDQD/context-mode --skill context-mode-ops
 
 # Or install all context-mode skills
-npx skills add mksglu/context-mode
+npx skills add OSDDQD/context-mode
 
 # Or direct path
-npx skills add https://github.com/mksglu/context-mode/tree/main/skills/context-mode-ops
+npx skills add https://github.com/OSDDQD/context-mode/tree/main/skills/context-mode-ops
 ```

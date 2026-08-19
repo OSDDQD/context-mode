@@ -260,9 +260,9 @@ await runHook(async () => {
 
       // Emit lifecycle anchor BEFORE close — engine joins on
       // category='session_start' to compute per-session aggregates.
-      // Cross-platform projectDir via getInputProjectDir (covers cursor's
-      // workspace_roots[], codex/gemini/qwen's *_PROJECT_DIR env vars,
-      // CC's CLAUDE_PROJECT_DIR, falls back to input.cwd and process.cwd).
+      // Cross-platform projectDir via getInputProjectDir (covers CC's
+      // CLAUDE_PROJECT_DIR and Codex's stdin cwd, falling back to input.cwd
+      // and process.cwd).
       const projectDirCompact = getInputProjectDir(input);
       await emitSessionStartLifecycle(db, sessionId, "compact", projectDirCompact, input);
       db.close();
@@ -287,8 +287,7 @@ await runHook(async () => {
       } else if (sessionId) {
         // 2) Snapshot fallback (#413). /resume hands us a *new* active session
         //    id whose live event table is empty; the prior conversation lives
-        //    in `session_resume.snapshot`. Mirrors the OpenCode/OpenClaw resume
-        //    injection path (opencode-plugin.ts:454). claimLatestUnconsumedResume
+        //    in `session_resume.snapshot`. claimLatestUnconsumedResume
         //    excludes the current id, so we surface the latest unconsumed
         //    snapshot from any prior session in this project.
         const row = db.claimLatestUnconsumedResume(sessionId);

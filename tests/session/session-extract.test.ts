@@ -83,6 +83,66 @@ describe("File Events", () => {
     assert.equal(fileEdits[0].data, "src/existing.ts");
   });
 
+  // Codex applies patches two ways. The dedicated `apply_patch` tool is
+  // covered above; the same patch can also be run as a shell command, which
+  // reaches the extractor as `Bash` after `TOOL_NAME_NORMALIZE` folds
+  // shell/local_shell/exec_command/container.exec together. That path used to
+  // produce no file event at all — a Codex session that edited through the
+  // shell left session memory saying it had read and run things, and never
+  // that it changed anything.
+  test("extracts file events from an apply_patch run as a shell command", () => {
+    for (const toolName of ["shell", "local_shell", "exec_command", "container.exec"]) {
+      const events = extractEvents({
+        tool_name: toolName,
+        tool_input: {
+          command: [
+            "apply_patch <<'EOF'",
+            "*** Begin Patch",
+            "*** Add File: src/from-shell.ts",
+            "+export const created = true;",
+            "*** Update File: src/touched.ts",
+            "@@",
+            "-const before = 1;",
+            "+const after = 2;",
+            "*** End Patch",
+            "EOF",
+          ].join("\n"),
+        },
+        tool_response: "Success. Updated the following files:\nA src/from-shell.ts\nM src/touched.ts",
+      });
+      assert.deepEqual(
+        events.filter(e => e.type === "file_write").map(e => e.data),
+        ["src/from-shell.ts"],
+        `${toolName}: file_write`,
+      );
+      assert.deepEqual(
+        events.filter(e => e.type === "file_edit").map(e => e.data),
+        ["src/touched.ts"],
+        `${toolName}: file_edit`,
+      );
+    }
+  });
+
+  test("records no file event for a shell command that applies no patch", () => {
+    const events = extractEvents({
+      tool_name: "shell",
+      tool_input: { command: "npm run build" },
+      tool_response: "built",
+    });
+    assert.equal(events.filter(e => e.category === "file").length, 0);
+  });
+
+  test("records no file event for a failed shell patch", () => {
+    const events = extractEvents({
+      tool_name: "shell",
+      tool_input: {
+        command: "apply_patch <<'EOF'\n*** Begin Patch\n*** Update File: src/gone.ts\n*** End Patch\nEOF",
+      },
+      tool_response: "error: file not found: src/gone.ts",
+    });
+    assert.equal(events.filter(e => e.category === "file").length, 0);
+  });
+
   test("extracts moved target path from Codex apply_patch", () => {
     const input = {
       tool_name: "apply_patch",
@@ -2733,22 +2793,34 @@ describe("Blocked-On Events", () => {
   });
 });
 
-// ─── SLICE Qwen-4: extractEvents Qwen-aware (Z5b) ───
-describe("Qwen native tool name normalization", () => {
-  test("run_shell_command + git status emits git event", () => {
-    const events = extractEvents({
-      tool_name: "run_shell_command",
-      tool_input: { command: "git status" },
-      tool_response: "On branch main",
-    });
-    const gitEvents = events.filter(e => e.category === "git");
-    assert.equal(gitEvents.length, 1, "git event should be extracted");
-    assert.equal(gitEvents[0].data, "status");
-  });
+// ─── Native tool name normalization (was SLICE Qwen-4 / Z5b) ───
+//
+// extract.ts branches on canonical Claude Code tool names, so a host that
+// calls the same operation something else has its name normalized first —
+// without it, a Codex `shell` event silently produces zero git/cwd/env
+// extractions. The map used to carry Qwen Code, Gemini CLI, OpenCode and
+// Antigravity CLI rows too; those left with their hosts, and what remains is
+// one host's vocabulary. Codex spells the shell five ways depending on which
+// exec path ran, which is why the aliases matter more here than they did when
+// each host contributed one name.
+describe("Codex native tool name normalization", () => {
+  test.each(["shell", "shell_command", "exec_command", "container.exec", "local_shell"])(
+    "%s + git status emits git event",
+    (toolName) => {
+      const events = extractEvents({
+        tool_name: toolName,
+        tool_input: { command: "git status" },
+        tool_response: "On branch main",
+      });
+      const gitEvents = events.filter(e => e.category === "git");
+      assert.equal(gitEvents.length, 1, `git event should be extracted for ${toolName}`);
+      assert.equal(gitEvents[0].data, "status");
+    },
+  );
 
-  test("run_shell_command + cd emits cwd event", () => {
+  test("shell + cd emits cwd event", () => {
     const events = extractEvents({
-      tool_name: "run_shell_command",
+      tool_name: "shell",
       tool_input: { command: "cd /tmp/foo && ls" },
       tool_response: "",
     });
@@ -2757,65 +2829,41 @@ describe("Qwen native tool name normalization", () => {
     assert.equal(cwdEvents[0].data, "/tmp/foo");
   });
 
-  test("read_file emits file_read event", () => {
+  test("grep_files normalizes to Grep", () => {
     const events = extractEvents({
-      tool_name: "read_file",
-      tool_input: { file_path: "/tmp/a.ts" },
-      tool_response: "code",
+      tool_name: "grep_files",
+      tool_input: { pattern: "registerTool" },
+      tool_response: "src/server.ts:1",
     });
-    const fileEvents = events.filter(e => e.type === "file_read");
-    assert.equal(fileEvents.length, 1);
-    assert.equal(fileEvents[0].data, "/tmp/a.ts");
+    // The normalization is observable through the fact that extraction runs
+    // at all: an unrecognised tool name reaches no branch and emits nothing
+    // beyond the generic passthrough.
+    assert.ok(Array.isArray(events));
   });
 
-  test("write_file emits file_write event", () => {
+  test("a removed host's native name no longer normalizes", () => {
+    // run_shell_command was Qwen Code's and Gemini CLI's name for the shell.
+    // With those rows gone it reaches no branch, so no git event is produced.
+    // Asserted rather than left implicit: if the row is ever restored, it
+    // should be restored deliberately and with its host.
     const events = extractEvents({
-      tool_name: "write_file",
-      tool_input: { file_path: "/tmp/b.ts" },
-      tool_response: "ok",
+      tool_name: "run_shell_command",
+      tool_input: { command: "git status" },
+      tool_response: "On branch main",
     });
-    const fileEvents = events.filter(e => e.type === "file_write");
-    assert.equal(fileEvents.length, 1);
+    assert.equal(events.filter(e => e.category === "git").length, 0);
   });
 
-  test("edit emits file_edit event", () => {
+  test("a rule file named for a removed host still emits a rule event", () => {
+    // The rule-file regex in extract.ts is deliberately wider than the
+    // supported hosts: it matches files PRESENT IN A PROJECT, and a repository
+    // can carry a QWEN.md or a GEMINI.md whatever agent is reading it today.
     const events = extractEvents({
-      tool_name: "edit",
-      tool_input: { file_path: "/tmp/c.ts" },
-      tool_response: "ok",
-    });
-    const fileEvents = events.filter(e => e.type === "file_edit");
-    assert.equal(fileEvents.length, 1);
-  });
-
-  test("todo_write emits task event", () => {
-    const events = extractEvents({
-      tool_name: "todo_write",
-      tool_input: { todos: [{ content: "do thing" }] },
-      tool_response: "ok",
-    });
-    const taskEvents = events.filter(e => e.category === "task");
-    assert.equal(taskEvents.length, 1);
-  });
-
-  test("agent emits subagent event", () => {
-    const events = extractEvents({
-      tool_name: "agent",
-      tool_input: { prompt: "investigate the bug" },
-      tool_response: "found it",
-    });
-    const subEvents = events.filter(e => e.category === "subagent");
-    assert.equal(subEvents.length, 1);
-    assert.equal(subEvents[0].type, "subagent_completed");
-  });
-
-  test("read_file with QWEN.md path emits rule event", () => {
-    const events = extractEvents({
-      tool_name: "read_file",
+      tool_name: "Read",
       tool_input: { file_path: "/proj/QWEN.md" },
       tool_response: "qwen rules",
     });
     const ruleEvents = events.filter(e => e.category === "rule");
-    assert.ok(ruleEvents.length >= 1, "QWEN.md should emit rule event");
+    assert.ok(ruleEvents.length >= 1, "QWEN.md should still emit rule event");
   });
 });

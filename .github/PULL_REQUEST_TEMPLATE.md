@@ -7,20 +7,8 @@
 <!-- Check all platforms affected by this change -->
 
 - [ ] Claude Code
-- [ ] Cursor
-- [ ] VS Code Copilot (GitHub Copilot)
-- [ ] JetBrains Copilot
-- [ ] Gemini CLI
-- [ ] Qwen Code
-- [ ] OpenCode
-- [ ] KiloCode
 - [ ] Codex CLI
-- [ ] OpenClaw (Pi Agent)
-- [ ] Pi
-- [ ] Kiro
-- [ ] Antigravity
-- [ ] Zed
-- [ ] All platforms
+- [ ] Both
 
 ## Test plan
 
@@ -33,7 +21,7 @@
 - [ ] `npm run typecheck` passes
 - [ ] Docs updated if needed (README, platform-support.md)
 - [ ] No Windows path regressions (forward slashes only)
-- [ ] Targets `next` branch (unless hotfix)
+- [ ] Targets `main`
 
 <details>
 <summary><strong>Cross-platform notes</strong></summary>

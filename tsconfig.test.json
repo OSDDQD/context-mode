@@ -1,0 +1,46 @@
+{
+  // Typecheck-only project for everything the build's tsconfig cannot see.
+  //
+  // tsconfig.json compiles `src` and nothing else, because `rootDir: "./src"`
+  // and `outDir: "./build"` describe the shipped artifact. That is correct for
+  // the build and wrong for the tree: `tests/**` and the loose `scripts/*.ts`
+  // were never typechecked by anything. vitest runs them but does not check
+  // types, so a test could name a platform, a symbol or a path that no longer
+  // exists and stay green — which is exactly how a seventeen-entry
+  // `ReadonlyArray<PlatformId>` survived the fifteen-host removal, and how a
+  // test for a deleted adapter survived the deletion that removed the adapter.
+  //
+  // This project emits nothing. It exists to be run, not to produce output.
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "noEmit": true,
+    "rootDir": ".",
+    // The build declares types for its own output; a check that emits nothing
+    // has no output to declare, and `declaration` without `emitDeclarationOnly`
+    // is a needless constraint on test files.
+    "declaration": false,
+    "types": ["node"],
+    // Tests import the hooks directly, and hooks are plain .mjs with no
+    // declarations. Without allowJs every such import is TS7016 ("no
+    // declaration file") — 113 of them, uniform noise that buries the errors
+    // worth reading. With it, TypeScript infers the hook API from the source
+    // and checks the calls against it, which is the check we actually want.
+    // checkJs stays off: this project judges the callers, not the .mjs.
+    //
+    // Known cost: three `@ts-expect-error — JS module, no TS declarations`
+    // directives in src/cli.ts sit above such imports. They are required under
+    // tsconfig.json (no allowJs) and unused under this one, so src/cli.ts
+    // reports three TS2578 here and zero there. The permanent fix is a .d.ts
+    // for scripts/heal-installed-plugins.mjs and heal-better-sqlite3.mjs plus
+    // deleting the three directives — one change touching both configs at
+    // once, which is why it is not made here in passing.
+    "allowJs": true,
+    "checkJs": false
+  },
+  "include": ["tests", "scripts", "vitest.config.ts"],
+  // tests/fixtures holds sample INPUT, not code: an Express + Prisma router
+  // that exists to be chunked, transcripts, logs, JSON payloads. It imports
+  // packages this repo does not depend on, on purpose, because that is what
+  // the corpus under test looks like. Typechecking it asks data to compile.
+  "exclude": ["tests/fixtures"]
+}

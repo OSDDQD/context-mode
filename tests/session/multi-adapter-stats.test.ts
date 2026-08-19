@@ -13,7 +13,7 @@
  * Cited code:
  *   src/session/analytics.ts:592-731  — current getLifetimeStats (single-dir)
  *   src/session/analytics.ts:887-989  — current getRealBytesStats (single-dir)
- *   src/adapters/detect.ts:92-111     — getSessionDirSegments map (17 platforms)
+ *   src/adapters/detect.ts            — getSessionDirSegments map (2 platforms)
  *
  * Filter (decided in /diagnose conversation, B3a PRD):
  *   real = eventCount >= 100
@@ -28,6 +28,7 @@ import { join, sep } from "node:path";
 import { randomUUID } from "node:crypto";
 import { afterAll, describe, expect, test } from "vitest";
 import { SessionDB } from "../../src/session/db.js";
+import { getSessionDirSegments, PLATFORM_ENV_VARS } from "../../src/adapters/detect.js";
 import {
   enumerateAdapterDirs,
   getMultiAdapterLifetimeStats,
@@ -97,30 +98,13 @@ function seed(
 // ─────────────────────────────────────────────────────────
 
 describe("Slice 2.1 — enumerateAdapterDirs()", () => {
-  test("returns one entry for each of the 17 known adapters", () => {
+  test("returns one entry for each supported adapter", () => {
     const dirs = enumerateAdapterDirs({ home: "/HOME" });
     const names = dirs.map((d) => d.name).sort();
-    expect(names).toEqual(
-      [
-        "antigravity",
-        "antigravity-cli",
-        "claude-code",
-        "codex",
-        "copilot-cli",
-        "cursor",
-        "gemini-cli",
-        "jetbrains-copilot",
-        "kilo",
-        "kiro",
-        "omp",
-        "opencode",
-        "openclaw",
-        "pi",
-        "qwen-code",
-        "vscode-copilot",
-        "zed",
-      ].sort(),
-    );
+    // Two rows since the fifteen-host removal (15a02cf). Spelled out rather
+    // than derived, so that growing the enumeration without updating this
+    // list is a failure and not a silent pass.
+    expect(names).toEqual(["claude-code", "codex"]);
   });
 
   test("each entry exposes sessionsDir and contentDir under <home>/<segments>/context-mode/", () => {
@@ -143,21 +127,40 @@ describe("Slice 2.1 — enumerateAdapterDirs()", () => {
     }
   });
 
-  test("uses the same segment map as src/adapters/detect.ts:92-111 (claude-code under .claude, kilo under .config/kilo, pi under .pi)", () => {
+  test("agrees with getSessionDirSegments() in src/adapters/detect.ts, in both directions", () => {
     const home = "/HOME";
     const dirs = enumerateAdapterDirs({ home });
+    // analytics.ts deliberately keeps a SECOND copy of the segment map: the
+    // stats report renders in contexts where no adapter has been
+    // instantiated, so it cannot import one. A copy is only safe while
+    // something proves the two agree, and this is that something. The old
+    // version spelled out five hand-picked rows (.config/kilo, .pi, .gemini
+    // for antigravity, .config/JetBrains); with those hosts gone, checking
+    // EVERY enumerated row against the source of truth covers strictly more
+    // than the sample did and needs no editing when a host is added.
+    for (const d of dirs) {
+      const segments = getSessionDirSegments(d.name);
+      expect(segments, `detect.ts knows no session dir for ${d.name}`).not.toBeNull();
+      expect(d.sessionsDir).toBe(join(home, ...segments!, "context-mode", "sessions"));
+      expect(d.contentDir).toBe(join(home, ...segments!, "context-mode", "content"));
+    }
+    // Reverse direction: a platform the rest of the code supports must not be
+    // missing from the enumeration, or its lifetime stats silently vanish.
+    // PLATFORM_ENV_VARS is the runtime registry of supported platforms
+    // (PlatformId is a type and cannot be iterated).
+    const enumerated = new Set(dirs.map((d) => d.name));
+    for (const platform of PLATFORM_ENV_VARS.keys()) {
+      expect(enumerated.has(platform), `${platform} is missing from enumerateAdapterDirs()`).toBe(true);
+    }
+    // The concrete path anchor the old test carried, kept for one host so a
+    // matching drift in both maps at once still fails here.
     const byName = Object.fromEntries(dirs.map((d) => [d.name, d]));
-    // Build expectations through path.join so backslashes on Windows match.
     expect(byName["claude-code"].sessionsDir).toBe(join(home, ".claude", "context-mode", "sessions"));
-    expect(byName["kilo"].sessionsDir).toBe(join(home, ".config", "kilo", "context-mode", "sessions"));
-    expect(byName["pi"].sessionsDir).toBe(join(home, ".pi", "context-mode", "sessions"));
-    expect(byName["antigravity"].sessionsDir).toBe(join(home, ".gemini", "context-mode", "sessions"));
-    expect(byName["jetbrains-copilot"].sessionsDir).toBe(join(home, ".config", "JetBrains", "context-mode", "sessions"));
   });
 
   test("defaults to os.homedir() when no override passed", () => {
     const dirs = enumerateAdapterDirs();
-    expect(dirs.length).toBe(17);
+    expect(dirs.length).toBe(2);
     const expectedSuffix = sep + join("context-mode", "sessions");
     expect(dirs.every((d) => d.sessionsDir.includes(expectedSuffix))).toBe(true);
   });

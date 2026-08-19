@@ -25,7 +25,8 @@ import {
   fileGlobToRegex,
   evaluateFilePath,
   extractShellCommands,
-} from "../build/security.js";
+} from "../src/security.js";
+import { PLATFORM_ENV_VARS, getSessionDirSegments } from "../src/adapters/detect.js";
 
 describe("parseBashPattern", () => {
   test("parseBashPattern: extracts glob from Bash(glob)", () => {
@@ -858,11 +859,11 @@ describe("CLAUDE_CONFIG_DIR honors security policy reader", () => {
 /**
  * Issue #451 round-3 — cross-adapter deny-policy parity.
  *
- * `resolveClaudeGlobalSettingsPath` hardcoded the `.claude` segment, so
- * non-Claude adapters (Cursor, Codex, Qwen, Gemini, JetBrains, VS Code, etc.)
- * received zero file-deny enforcement: their global settings.json (e.g.
- * ~/.cursor/settings.json) was never consulted by `readBashPolicies` or
- * `readToolDenyPatterns`. This is a cross-adapter security parity gap.
+ * `resolveClaudeGlobalSettingsPath` hardcoded the `.claude` segment, so a
+ * non-Claude adapter received zero file-deny enforcement: its global
+ * settings.json (e.g. ~/.codex/settings.json) was never consulted by
+ * `readBashPolicies` or `readToolDenyPatterns`. This is a cross-adapter
+ * security parity gap.
  *
  * Behavior under test:
  *   - When CONTEXT_MODE_PLATFORM identifies a non-claude adapter, the security
@@ -870,17 +871,37 @@ describe("CLAUDE_CONFIG_DIR honors security policy reader", () => {
  *   - Union semantics (defense in depth): even when an adapter is detected,
  *     ~/.claude/settings.json is ALSO read so a rule defined there still wins.
  *
+ * The adapter table is DERIVED from `PLATFORM_ENV_VARS` + `getSessionDirSegments`
+ * rather than written out here. The hardcoded list this replaced outlived the
+ * adapters it named: it kept asserting on cursor, qwen-code, gemini-cli,
+ * jetbrains-copilot and vscode-copilot after those adapters were deleted from
+ * src/, and stayed green only because the suite was importing a stale
+ * `build/security.js` compiled before the deletion. Derivation means a host
+ * added tomorrow is covered without an edit here, and a host removed stops
+ * being asserted on without one either.
+ *
  * Each test sandboxes HOME so the home-rooted lookup hits a tmp dir.
  */
 describe("cross-adapter deny-policy parity (#451 round-3)", () => {
-  const ADAPTER_SEGMENTS: ReadonlyArray<readonly [string, readonly string[]]> = [
-    ["cursor",            [".cursor"]],
-    ["codex",             [".codex"]],
-    ["qwen-code",         [".qwen"]],
-    ["gemini-cli",        [".gemini"]],
-    ["jetbrains-copilot", [".config", "JetBrains"]],
-    ["vscode-copilot",    [".vscode"]],
-  ];
+  const ADAPTER_SEGMENTS: ReadonlyArray<readonly [string, readonly string[]]> =
+    [...PLATFORM_ENV_VARS.keys()].flatMap((platform) => {
+      const segments = getSessionDirSegments(platform);
+      return segments && segments.length > 0
+        ? [[platform, segments] as readonly [string, readonly string[]]]
+        : [];
+    });
+
+  // A derived table can go empty (bad import, renamed export) and take every
+  // assertion below with it in silence. Two live hosts is the floor: one of
+  // them is claude, so anything less means the cross-adapter case — the whole
+  // point of this block — is no longer exercised.
+  test("the derived adapter table still covers both live hosts", () => {
+    const names = ADAPTER_SEGMENTS.map(([n]) => n);
+    assert.ok(
+      names.includes("claude-code") && names.includes("codex"),
+      `expected claude-code and codex in the derived table, got ${JSON.stringify(names)}`,
+    );
+  });
 
   let parityTmpBase: string;
   let savedHome: string | undefined;
@@ -964,13 +985,13 @@ describe("cross-adapter deny-policy parity (#451 round-3)", () => {
 
   test("union semantics: claude global is also read when non-claude adapter active", () => {
     const fakeHome = join(parityTmpBase, "union-home");
-    const cursorDir = join(fakeHome, ".cursor");
+    const codexDir = join(fakeHome, ".codex");
     const claudeDir = join(fakeHome, ".claude");
-    mkdirSync(cursorDir, { recursive: true });
+    mkdirSync(codexDir, { recursive: true });
     mkdirSync(claudeDir, { recursive: true });
     writeFileSync(
-      join(cursorDir, "settings.json"),
-      JSON.stringify({ permissions: { allow: [], deny: ["Bash(cursor-only *)"] } }),
+      join(codexDir, "settings.json"),
+      JSON.stringify({ permissions: { allow: [], deny: ["Bash(codex-only *)"] } }),
     );
     writeFileSync(
       join(claudeDir, "settings.json"),
@@ -979,14 +1000,14 @@ describe("cross-adapter deny-policy parity (#451 round-3)", () => {
 
     process.env.HOME = fakeHome;
     process.env.USERPROFILE = fakeHome;
-    process.env.CONTEXT_MODE_PLATFORM = "cursor";
+    process.env.CONTEXT_MODE_PLATFORM = "codex";
     delete process.env.CLAUDE_CONFIG_DIR;
 
     const policies = readBashPolicies();
     const allDeny = policies.flatMap((p) => p.deny);
     assert.ok(
-      allDeny.includes("Bash(cursor-only *)"),
-      `expected cursor deny in union, got ${JSON.stringify(allDeny)}`,
+      allDeny.includes("Bash(codex-only *)"),
+      `expected codex deny in union, got ${JSON.stringify(allDeny)}`,
     );
     assert.ok(
       allDeny.includes("Bash(claude-only *)"),

@@ -5,7 +5,7 @@ import { join, resolve, sep } from "node:path";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { ClaudeCodeAdapter } from "../../src/adapters/claude-code/index.js";
 import { hashProjectDirCanonical, resolveSessionDbPath } from "../../src/session/db.js";
-import { fakeHome, realHome } from "../setup-home";
+import { fakeHome, realHome } from "../setup-home.js";
 import {
   PRE_TOOL_USE_MATCHERS,
   POST_TOOL_USE_MATCHERS,
@@ -33,9 +33,6 @@ describe("ClaudeCodeAdapter", () => {
       expect(adapter.capabilities.canInjectSessionContext).toBe(true);
     });
 
-    it("paradigm is json-stdio", () => {
-      expect(adapter.paradigm).toBe("json-stdio");
-    });
   });
 
   // ── parsePreToolUseInput ──────────────────────────────

@@ -93,13 +93,15 @@ function browserOpenArgv(
 
 // ── Adapter imports ──────────────────────────────────────
 import { detectPlatform, getAdapter } from "./adapters/detect.js";
-import { isInProcessPluginPlatform } from "./adapters/types.js";
 
 /* -------------------------------------------------------
  * Hook dispatcher — `context-mode hook <platform> <event>`
  * ------------------------------------------------------- */
 
 const HOOK_MAP: Record<string, Record<string, string>> = {
+  // claude-code's scripts sit at the root of hooks/ rather than in a
+  // per-platform directory: it was the first host, and everything shared lives
+  // beside it. Codex gets its own directory because its wire protocol differs.
   "claude-code": {
     pretooluse: "hooks/pretooluse.mjs",
     posttooluse: "hooks/posttooluse.mjs",
@@ -108,26 +110,6 @@ const HOOK_MAP: Record<string, Record<string, string>> = {
     userpromptsubmit: "hooks/userpromptsubmit.mjs",
     stop: "hooks/stop.mjs",
   },
-  "gemini-cli": {
-    beforeagent: "hooks/gemini-cli/beforeagent.mjs",
-    beforetool: "hooks/gemini-cli/beforetool.mjs",
-    aftertool: "hooks/gemini-cli/aftertool.mjs",
-    precompress: "hooks/gemini-cli/precompress.mjs",
-    sessionstart: "hooks/gemini-cli/sessionstart.mjs",
-  },
-  "vscode-copilot": {
-    pretooluse: "hooks/vscode-copilot/pretooluse.mjs",
-    posttooluse: "hooks/vscode-copilot/posttooluse.mjs",
-    precompact: "hooks/vscode-copilot/precompact.mjs",
-    sessionstart: "hooks/vscode-copilot/sessionstart.mjs",
-  },
-  "cursor": {
-    pretooluse: "hooks/cursor/pretooluse.mjs",
-    posttooluse: "hooks/cursor/posttooluse.mjs",
-    sessionstart: "hooks/cursor/sessionstart.mjs",
-    stop: "hooks/cursor/stop.mjs",
-    afteragentresponse: "hooks/cursor/afteragentresponse.mjs",
-  },
   "codex": {
     pretooluse: "hooks/codex/pretooluse.mjs",
     posttooluse: "hooks/codex/posttooluse.mjs",
@@ -135,48 +117,6 @@ const HOOK_MAP: Record<string, Record<string, string>> = {
     sessionstart: "hooks/codex/sessionstart.mjs",
     userpromptsubmit: "hooks/codex/userpromptsubmit.mjs",
     stop: "hooks/codex/stop.mjs",
-  },
-  "kiro": {
-    pretooluse: "hooks/kiro/pretooluse.mjs",
-    posttooluse: "hooks/kiro/posttooluse.mjs",
-  },
-  "jetbrains-copilot": {
-    pretooluse: "hooks/jetbrains-copilot/pretooluse.mjs",
-    posttooluse: "hooks/jetbrains-copilot/posttooluse.mjs",
-    precompact: "hooks/jetbrains-copilot/precompact.mjs",
-    sessionstart: "hooks/jetbrains-copilot/sessionstart.mjs",
-  },
-  "copilot-cli": {
-    pretooluse: "hooks/copilot-cli/pretooluse.mjs",
-    posttooluse: "hooks/copilot-cli/posttooluse.mjs",
-    precompact: "hooks/copilot-cli/precompact.mjs",
-    sessionstart: "hooks/copilot-cli/sessionstart.mjs",
-    userpromptsubmit: "hooks/copilot-cli/userpromptsubmit.mjs",
-    stop: "hooks/copilot-cli/stop.mjs",
-  },
-  // Antigravity CLI (`agy`) — bounded PreToolUse enforcement plus capture-only
-  // PostToolUse/Stop hooks. Configured via an installed agy plugin's
-  // hooks/hooks.json or ~/.gemini/config/hooks.json.
-  "antigravity-cli": {
-    pretooluse: "hooks/antigravity-cli/pretooluse.mjs",
-    posttooluse: "hooks/antigravity-cli/posttooluse.mjs",
-    stop: "hooks/antigravity-cli/stop.mjs",
-  },
-  "kimi": {
-    pretooluse: "hooks/kimi/pretooluse.mjs",
-    posttooluse: "hooks/kimi/posttooluse.mjs",
-    precompact: "hooks/kimi/precompact.mjs",
-    sessionstart: "hooks/kimi/sessionstart.mjs",
-    sessionend: "hooks/kimi/sessionend.mjs",
-    userpromptsubmit: "hooks/kimi/userpromptsubmit.mjs",
-    stop: "hooks/kimi/stop.mjs",
-  },
-  "qwen-code": {
-    pretooluse: "hooks/pretooluse.mjs",
-    posttooluse: "hooks/posttooluse.mjs",
-    precompact: "hooks/precompact.mjs",
-    sessionstart: "hooks/sessionstart.mjs",
-    userpromptsubmit: "hooks/userpromptsubmit.mjs",
   },
 };
 
@@ -194,15 +134,15 @@ async function hookDispatch(platform: string, event: string): Promise<void> {
 
   const scriptPath = HOOK_MAP[platform]?.[event];
   if (!scriptPath) {
-    // Fail OPEN. context-mode has no hook for this platform/event — most often
-    // because a newer adapter's hook command (`context-mode hook copilot-cli …`)
-    // is running against an OLDER global binary that predates that adapter
-    // (version skew). Exit 0 (no decision) so the host ALLOWS the tool. Exiting
-    // non-zero here makes some hosts treat it as a hook ERROR and DENY the tool:
-    // verified against GitHub Copilot CLI 1.0.59, where an exit-1 + empty-stdout
-    // PreToolUse hook blocks EVERY tool ("Denied by preToolUse hook (hook
-    // errored)") — bricking the agent during a skew instead of just disabling
-    // context-mode's instrumentation.
+    // Fail OPEN. context-mode has no hook for this platform/event. The case
+    // that made this urgent was version skew — a hook command written by a
+    // newer install running against an older global binary — and it now also
+    // covers a hook line left behind on disk by one of the fifteen removed
+    // hosts. Exit 0 (no decision) so the host ALLOWS the tool. Exiting non-zero
+    // makes some hosts treat it as a hook ERROR and DENY the tool: verified
+    // against GitHub Copilot CLI 1.0.59, where an exit-1 + empty-stdout
+    // PreToolUse hook blocked EVERY tool — bricking the agent instead of just
+    // disabling context-mode's instrumentation.
     process.exit(0);
   }
   const pluginRoot = getPluginRoot();
@@ -271,8 +211,9 @@ if (args[0] === "--help" || args[0] === "-h" || args[0] === "help") {
   // Issue #542 — accept --platform <id> from the ctx_upgrade MCP handler,
   // which forwards the live MCP clientInfo's resolved PlatformId. The flag
   // wins over upgrade()'s own detectPlatform() heuristic chain so an
-  // ambiguous config-dir collision (e.g. ~/.cursor + ~/.pi both present)
-  // can never misroute the upgrade.
+  // ambiguous config-dir collision can never misroute the upgrade. With two
+  // hosts left the collision is far less likely, but the handshake is still
+  // better evidence than a directory on disk.
   const platformFlagIdx = args.indexOf("--platform");
   const platformArg =
     platformFlagIdx >= 0 && args[platformFlagIdx + 1]
@@ -386,25 +327,13 @@ function defaultPluginRoot(): string {
   return __dirname;
 }
 
-// Opencode/Kilocode install plugins from npm into a per-package cache folder.
-// Layout (changed silently in late 2024 — see PR #376 / KiloCode#9503):
-//   POSIX  : ~/.cache/<platform>/packages/context-mode@latest/node_modules/context-mode
-//   Windows: %LOCALAPPDATA%\<platform>\packages\context-mode@latest\node_modules\context-mode
-function cachePluginRoot(platform: string): string {
-  const subPath = ["packages", "context-mode@latest", "node_modules", "context-mode"];
-  if (process.platform === "win32") {
-    const localApp = process.env.LOCALAPPDATA;
-    if (localApp) return resolve(localApp, platform, ...subPath);
-    return resolve(homedir(), "AppData", "Local", platform, ...subPath);
-  }
-  return resolve(homedir(), ".cache", platform, ...subPath);
-}
-
+// The plugin root is where this file was loaded from. Both remaining hosts run
+// context-mode as an out-of-process MCP server started from an unpacked
+// directory, so there is one answer and no platform argument to branch on. The
+// per-package npm cache resolver that used to live here (`~/.cache/<platform>/
+// packages/context-mode@latest/...`, PR #376) served hosts that loaded the
+// plugin in-process; it left with them.
 function getPluginRoot(): string {
-  const platform = detectPlatform().platform;
-  if (isInProcessPluginPlatform(platform)) {
-    return cachePluginRoot(platform);
-  }
   return defaultPluginRoot();
 }
 
@@ -1390,15 +1319,15 @@ async function doctor(): Promise<number> {
   }
 
   // ── Issue #613 — proactive Tier C absolute-path detection ───────────
-  // PR #620 fixed `buildHookCommand` for vscode-copilot + jetbrains-copilot
-  // so future writes are CLI-dispatcher-shape. But users who ran
-  // /ctx-upgrade on v1.0.136 or earlier are still carrying poisoned
-  // committable files in their workspace:
-  //   - `.github/hooks/context-mode.json`      (vscode-copilot, team-shared)
-  //   - `.jetbrains/copilot/hooks.json`        (jetbrains-copilot, team-shared)
-  //   - `.cursor/hooks.json`                   (cursor, team-shared)
-  // Per ISSUE-613-VERDICT §6.1 these are Tier C — workspace-committed
-  // cross-machine config. Doctor scans them for absolute paths and
+  // Users who ran /ctx-upgrade on v1.0.136 or earlier are still carrying
+  // poisoned committable files in their workspace:
+  //   - `.github/hooks/context-mode.json`      (team-shared)
+  //   - `.jetbrains/copilot/hooks.json`        (team-shared)
+  //   - `.cursor/hooks.json`                   (team-shared)
+  // The hosts that wrote them are gone, which makes the scan MORE useful, not
+  // less: nothing rewrites those files any more, so a poisoned one just sits
+  // in the repo. Per ISSUE-613-VERDICT §6.1 these are Tier C — workspace-
+  // committed cross-machine config. Doctor scans them for absolute paths and
   // fnm_multishells shims; if found, FAIL with `ctx_upgrade` remediation.
   // Per ISSUE-604-VERDICT §11 ("silent-green doctor while hooks are dead
   // is itself a P0 trust bug") — surface poison BEFORE the user hits a
@@ -1804,10 +1733,9 @@ async function upgrade(opts?: { platform?: string }) {
 
   // Issue #542 — when the MCP ctx_upgrade handler threads through an
   // explicit --platform <id> (resolved from live clientInfo), trust it
-  // over the local heuristic chain. detectPlatform() with no args cannot
-  // see the MCP handshake and falls through to the config-dir tier,
-  // which misdetects Pi/OMP installs as Cursor on systems where both
-  // ~/.cursor/ and ~/.pi/ exist.
+  // over the local heuristic chain. detectPlatform() with no args cannot see
+  // the MCP handshake and falls through to the config-dir tier, which reads a
+  // directory rather than the running host.
   const detection = opts?.platform
     ? { platform: opts.platform as Parameters<typeof getAdapter>[0], confidence: "high" as const, reason: `--platform ${opts.platform} from ctx_upgrade handler` }
     : detectPlatform();
@@ -2099,10 +2027,10 @@ async function upgrade(opts?: { platform?: string }) {
       // Layer 2 (sessionstart.mjs) heals any session that started before
       // /ctx-upgrade ran.
       //
-      // claude-code only — no other adapter uses shell-snapshots. Skip
-      // when running under a non-claude-code adapter (Codex/Cursor/Gemini
-      // etc. spawn Bash differently and have no `~/.claude/shell-snapshots`
-      // tree). Best-effort, idempotent, never throws.
+      // claude-code only — no other adapter uses shell-snapshots. Skip under
+      // Codex, which spawns Bash differently and has no
+      // `~/.claude/shell-snapshots` tree. Best-effort, idempotent, never
+      // throws.
       try {
         if (detection.platform === "claude-code") {
           const { rewriteShellSnapshots } = await import(
@@ -2279,102 +2207,100 @@ async function upgrade(opts?: { platform?: string }) {
       });
       s.stop("Dependencies ready");
 
-      if (!isInProcessPluginPlatform(detection.platform)) {
-        // Verify native addons through the same bootstrap start.mjs imports.
-        // On modern Node, the ABI-specific cache file is the compatibility marker;
-        // the active binding alone may be stale from a previous Node ABI.
-        s.start("Verifying native addon ABI");
-        const bsqAbiCachePath = resolve(
-          pluginRoot,
-          "node_modules",
-          "better-sqlite3",
-          "build",
-          "Release",
-          `better_sqlite3.abi${process.versions.modules}.node`,
-        );
-        try {
-          const ensureDepsPath = resolve(pluginRoot, "hooks", "ensure-deps.mjs");
-          if (!existsSync(ensureDepsPath)) {
-            throw new Error(`missing ${ensureDepsPath}`);
-          }
-          await import(`${pathToFileURL(ensureDepsPath).href}?upgrade=${Date.now()}`);
-          if (existsSync(bsqAbiCachePath)) {
-            s.stop(color.green("Native addons OK") + color.dim(" — ABI cache present"));
-            changes.push(`better-sqlite3 ABI ${process.versions.modules} cache ready`);
-          } else {
-            s.stop(color.yellow("Native addon ABI cache missing"));
-            p.log.warn(
-              color.dim(`  Try manually: cd "${pluginRoot}" && npm rebuild better-sqlite3`),
-            );
-          }
-        } catch (err: unknown) {
-          const message = err instanceof Error ? err.message : String(err);
-          s.stop(color.yellow("Native addon ABI bootstrap unavailable"));
+      // Verify native addons through the same bootstrap start.mjs imports.
+      // On modern Node, the ABI-specific cache file is the compatibility marker;
+      // the active binding alone may be stale from a previous Node ABI.
+      s.start("Verifying native addon ABI");
+      const bsqAbiCachePath = resolve(
+        pluginRoot,
+        "node_modules",
+        "better-sqlite3",
+        "build",
+        "Release",
+        `better_sqlite3.abi${process.versions.modules}.node`,
+      );
+      try {
+        const ensureDepsPath = resolve(pluginRoot, "hooks", "ensure-deps.mjs");
+        if (!existsSync(ensureDepsPath)) {
+          throw new Error(`missing ${ensureDepsPath}`);
+        }
+        await import(`${pathToFileURL(ensureDepsPath).href}?upgrade=${Date.now()}`);
+        if (existsSync(bsqAbiCachePath)) {
+          s.stop(color.green("Native addons OK") + color.dim(" — ABI cache present"));
+          changes.push(`better-sqlite3 ABI ${process.versions.modules} cache ready`);
+        } else {
+          s.stop(color.yellow("Native addon ABI cache missing"));
           p.log.warn(
-            color.yellow("better-sqlite3 ABI repair did not run") +
-              ` — ${message}` +
-              color.dim(`\n  Try manually: cd "${pluginRoot}" && npm rebuild better-sqlite3`),
+            color.dim(`  Try manually: cd "${pluginRoot}" && npm rebuild better-sqlite3`),
           );
         }
-
-        // ── Post-install binding verifier (#514) ────────────────────
-        // npm@7+ silently drops optionalDependencies whose engines
-        // field excludes the running Node (e.g. Node 26 vs
-        // better-sqlite3@12.x). On a silent skip the package directory
-        // is missing entirely and ensure-deps cannot recover. Fail
-        // loud so /ctx-upgrade no longer reports success while the
-        // knowledge base is unusable.
-        const bsqBindingPath = resolve(
-          pluginRoot,
-          "node_modules",
-          "better-sqlite3",
-          "build",
-          "Release",
-          "better_sqlite3.node",
+      } catch (err: unknown) {
+        const message = err instanceof Error ? err.message : String(err);
+        s.stop(color.yellow("Native addon ABI bootstrap unavailable"));
+        p.log.warn(
+          color.yellow("better-sqlite3 ABI repair did not run") +
+            ` — ${message}` +
+            color.dim(`\n  Try manually: cd "${pluginRoot}" && npm rebuild better-sqlite3`),
         );
-        if (!existsSync(bsqBindingPath)) {
-          // Try one last self-heal — explicit, named install bypasses
-          // the optionalDependency silent-skip path even if the dep
-          // somehow regressed back to optional.
-          try {
-            const healPath = resolve(pluginRoot, "scripts", "heal-better-sqlite3.mjs");
-            if (existsSync(healPath)) {
-              const mod = await import(
-                `${pathToFileURL(healPath).href}?upgrade=${Date.now()}`
-              );
-              if (typeof mod.healBetterSqlite3Binding === "function") {
-                mod.healBetterSqlite3Binding(pluginRoot);
-              }
-            }
-          } catch { /* best effort — verifier below will fail loud */ }
-        }
-        if (!existsSync(bsqBindingPath)) {
-          // Mark the upgrade process for a non-zero exit at completion.
-          // Stays in scope only for the rest of upgrade(); the actual
-          // exit-code wiring sits below the top-level changes report.
-          process.exitCode = 1;
-          p.log.error(
-            color.red("better-sqlite3 native binding: MISSING") +
-              color.dim(`\n  Path: ${bsqBindingPath}`) +
-              color.dim("\n  Cause: npm silently skipped the package (Node engine mismatch, issue #514)") +
-              color.dim(`\n  Try (primary): cd "${pluginRoot}" && npm install better-sqlite3 --no-optional`) +
-              color.dim("\n  Try (fallback): /context-mode:ctx-doctor"),
-          );
-        }
-        
-        // Update global npm
-        s.start("Updating npm global package");
+      }
+
+      // ── Post-install binding verifier (#514) ────────────────────
+      // npm@7+ silently drops optionalDependencies whose engines
+      // field excludes the running Node (e.g. Node 26 vs
+      // better-sqlite3@12.x). On a silent skip the package directory
+      // is missing entirely and ensure-deps cannot recover. Fail
+      // loud so /ctx-upgrade no longer reports success while the
+      // knowledge base is unusable.
+      const bsqBindingPath = resolve(
+        pluginRoot,
+        "node_modules",
+        "better-sqlite3",
+        "build",
+        "Release",
+        "better_sqlite3.node",
+      );
+      if (!existsSync(bsqBindingPath)) {
+        // Try one last self-heal — explicit, named install bypasses
+        // the optionalDependency silent-skip path even if the dep
+        // somehow regressed back to optional.
         try {
-          npmExecFile(["install", "-g", pluginRoot, "--no-audit", "--no-fund"], {
-            stdio: "pipe",
-            timeout: 30000,
-          });
-          s.stop(color.green("npm global updated"));
-          changes.push("Updated npm global package");
-        } catch {
-          s.stop(color.yellow("npm global update skipped"));
-          p.log.info(color.dim("  Could not update global npm — may need sudo or standalone install"));
-        }
+          const healPath = resolve(pluginRoot, "scripts", "heal-better-sqlite3.mjs");
+          if (existsSync(healPath)) {
+            const mod = await import(
+              `${pathToFileURL(healPath).href}?upgrade=${Date.now()}`
+            );
+            if (typeof mod.healBetterSqlite3Binding === "function") {
+              mod.healBetterSqlite3Binding(pluginRoot);
+            }
+          }
+        } catch { /* best effort — verifier below will fail loud */ }
+      }
+      if (!existsSync(bsqBindingPath)) {
+        // Mark the upgrade process for a non-zero exit at completion.
+        // Stays in scope only for the rest of upgrade(); the actual
+        // exit-code wiring sits below the top-level changes report.
+        process.exitCode = 1;
+        p.log.error(
+          color.red("better-sqlite3 native binding: MISSING") +
+            color.dim(`\n  Path: ${bsqBindingPath}`) +
+            color.dim("\n  Cause: npm silently skipped the package (Node engine mismatch, issue #514)") +
+            color.dim(`\n  Try (primary): cd "${pluginRoot}" && npm install better-sqlite3 --no-optional`) +
+            color.dim("\n  Try (fallback): /context-mode:ctx-doctor"),
+        );
+      }
+      
+      // Update global npm
+      s.start("Updating npm global package");
+      try {
+        npmExecFile(["install", "-g", pluginRoot, "--no-audit", "--no-fund"], {
+          stdio: "pipe",
+          timeout: 30000,
+        });
+        s.stop(color.green("npm global updated"));
+        changes.push("Updated npm global package");
+      } catch {
+        s.stop(color.yellow("npm global update skipped"));
+        p.log.info(color.dim("  Could not update global npm — may need sudo or standalone install"));
       }
 
       // Cleanup
@@ -2423,7 +2349,7 @@ async function upgrade(opts?: { platform?: string }) {
               try { realInstallPath = realpathSync(resolvedInstallPath); }
               catch { continue; }
               if (!(realInstallPath + sep).startsWith(cacheRootWithSep)) continue;
-              for (const dir of ["skills", "platform-skills", "commands", "agents"]) {
+              for (const dir of ["skills", "commands", "agents"]) {
                 const srcSub = resolve(srcDir, dir);
                 if (existsSync(srcSub)) {
                   cpSync(srcSub, resolve(realInstallPath, dir), { recursive: true });

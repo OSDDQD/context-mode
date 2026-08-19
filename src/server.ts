@@ -103,12 +103,14 @@ import {
   resolveProjectScope,
 } from "./search/ctx-search-schema.js";
 import { FloodGuard } from "./search/flood-guard.js";
-import { buildNodeCommand, type HookAdapter, type PlatformId, isInProcessPluginPlatform } from "./adapters/types.js";
+import { buildNodeCommand, type HookAdapter, type PlatformId } from "./adapters/types.js";
 import { detectPlatform, getSessionDirSegments } from "./adapters/detect.js";
 import { CLIENT_NAME_TO_PLATFORM } from "./adapters/client-map.js";
 import { parseCodexContextModePluginRoot } from "./adapters/codex/index.js";
 import { getHookScriptPaths } from "./util/hook-config.js";
-import { stripJsonComments } from "./util/jsonc.js";
+// Which repository an upgrade pulls from — resolved from the install, because
+// a fork that upgrades from upstream downgrades itself. See util/fork-info.ts.
+import { resolveUpgradeRepo } from "./util/fork-info.js";
 import { resolveClaudeConfigDir } from "./util/claude-config.js";
 import { resolveProjectDir } from "./util/project-dir.js";
 import { loadDatabase } from "./db-base.js";
@@ -163,11 +165,13 @@ function getRuntimeAwarePackageRoot(platformId?: PlatformId): string {
 
 // Prevent silent MCP server death from unhandled async errors.
 //
-// Guarded for plugin-native OpenCode/Kilo imports (#574): when server.js is
+// Guarded on CONTEXT_MODE_EMBEDDED_PLUGIN_TOOLS (#574): when server.js is
 // imported only to reuse the ctx_* tool registry, these handlers would become
-// process-wide OpenCode/Kilo host handlers. In Node, adding an
+// process-wide handlers of whatever host did the importing. In Node, adding an
 // `uncaughtException` listener changes default crash behavior, so only the
-// standalone MCP process may install them.
+// standalone MCP process may install them. The hosts that imported this way
+// (OpenCode, Kilo) are gone; the flag is not host-keyed and still governs any
+// future embedder.
 if (process.env.CONTEXT_MODE_EMBEDDED_PLUGIN_TOOLS !== "1") {
   process.on("unhandledRejection", (err) => {
     process.stderr.write(`[context-mode] unhandledRejection: ${err}\n`);
@@ -200,140 +204,52 @@ export interface RegisteredCtxTool {
 
 export const REGISTERED_CTX_TOOLS: RegisteredCtxTool[] = [];
 
-export function shouldSuppressMcpToolsForNativePluginHost(
-  opts: { embedded?: string; platform?: PlatformId; settings?: Record<string, unknown> | null } = {},
-): boolean {
-  const embedded = opts.embedded ?? process.env.CONTEXT_MODE_EMBEDDED_PLUGIN_TOOLS;
-  if (embedded === "1") return false;
-  const platform = opts.platform ?? detectPlatform().platform;
-  if (platform !== "opencode" && platform !== "kilo") return false;
-  const settings = opts.settings ?? readNativePluginHostSettings(platform);
-  return settingsHasContextModePlugin(settings) && settingsHasLegacyContextModeMcp(settings);
-}
-
-function readNativePluginHostSettings(platform: PlatformId): Record<string, unknown> | null {
-  const base = platform === "kilo" ? "kilo" : "opencode";
-  const paths = [
-    resolve(`${base}.json`),
-    resolve(`${base}.jsonc`),
-    resolve(`.${base}`, `${base}.json`),
-    resolve(`.${base}`, `${base}.jsonc`),
-    join(homedir(), ".config", base, `${base}.json`),
-    join(homedir(), ".config", base, `${base}.jsonc`),
-  ];
-  for (const p of paths) {
-    try {
-      if (!existsSync(p)) continue;
-      return JSON.parse(stripJsonComments(readFileSync(p, "utf8"))) as Record<string, unknown>;
-    } catch { /* try next config path */ }
-  }
-  return null;
-}
-
-function settingsHasContextModePlugin(settings: Record<string, unknown> | null | undefined): boolean {
-  const plugins = settings?.plugin;
-  return Array.isArray(plugins) && plugins.some((p) => typeof p === "string" && p.includes("context-mode"));
-}
-
-function settingsHasLegacyContextModeMcp(settings: Record<string, unknown> | null | undefined): boolean {
-  const mcp = settings?.mcp;
-  return !!(
-    mcp &&
-    typeof mcp === "object" &&
-    !Array.isArray(mcp) &&
-    Object.prototype.hasOwnProperty.call(mcp, "context-mode")
-  );
-}
-
-const suppressMcpToolsForNativePluginHost = shouldSuppressMcpToolsForNativePluginHost();
-
 /**
- * Issue #623 — surface why ctx_* tools/list is empty on suppressed legacy MCP
- * children. When a user upgrades OpenCode/Kilo from v1.0.136 → v1.0.137+ without
- * running `context-mode upgrade`, their opencode.json still has BOTH the legacy
- * mcp.context-mode block AND the plugin entry. The plugin path registers the
- * tools natively, but the legacy MCP child runs in parallel and used to expose
- * duplicate tools — v1.0.137 suppressed those duplicates. The suppression was
- * silent, leaving any MCP client that inspected the child via tools/list with
- * an empty list and no diagnostic. Emit one stderr line per process so an
- * operator running the child directly (or any non-plugin MCP host) sees the
- * exact reason and the `context-mode upgrade` fix.
+ * Issues #623 / #637 — the suppressed-tools path, removed with its hosts.
  *
- * Exported for test (suppression-diagnostic regression guard).
+ * It existed for one shape: OpenCode and Kilo could load context-mode as an
+ * in-process plugin AND keep a legacy `mcp.context-mode` block, so a second,
+ * redundant MCP child came up alongside the plugin. That child suppressed its
+ * own tool list, emitted a stderr line explaining why, and answered
+ * `tools/list` with an empty array rather than -32601.
+ *
+ * Both hosts are gone, and neither remaining one loads this module in
+ * process — Claude Code and Codex both speak MCP over stdio, where an empty
+ * tool list is a bug and never an intention. Keeping the machinery would have
+ * meant a predicate that cannot return true guarding three helpers nothing
+ * calls.
  */
-let __suppressionDiagnosticEmitted = false;
-export function emitSuppressionDiagnostic(
-  opts: { platform?: string; write?: (chunk: string) => void } = {},
-): void {
-  if (__suppressionDiagnosticEmitted) return;
-  __suppressionDiagnosticEmitted = true;
-  const write = opts.write ?? ((c: string) => { process.stderr.write(c); });
-  const platform = opts.platform ?? "opencode/kilo";
-  write(
-    `[context-mode] ctx_* tools/list intentionally empty on this MCP child: ` +
-    `legacy mcp.context-mode block coexists with plugin: ["context-mode"] in ` +
-    `${platform}.json — plugin-native tools are the supported path (#623). ` +
-    `Run \`context-mode upgrade\` to remove the legacy block (preserves other ` +
-    `MCP servers).\n`
-  );
-}
-/** Test-only: reset the one-shot emission flag so suites can re-exercise. */
-export function __resetSuppressionDiagnosticForTests(): void {
-  __suppressionDiagnosticEmitted = false;
-}
-
-/**
- * Issue #637 — register an explicit empty `tools/list` handler on the McpServer.
- *
- * Background: when `suppressMcpToolsForNativePluginHost` is true, every
- * `server.registerTool()` call is short-circuited (returns `undefined` above).
- * The MCP SDK only installs the SDK-default `tools/list` handler when at least
- * one `registerTool()` reaches `setToolRequestHandlers()` internally
- * (mcp.js:56-67). Suppressing every registration leaves `tools/list`
- * unregistered, and the framework's RPC layer answers it with
- * `-32601 "Method not found"`.
- *
- * The reporter of #637 (SquirrelRat) inspected the suppressed child via
- * `tools/list` and read the JSON-RPC error as "the plugin never registers any
- * ctx_* tools" — when in fact the plugin DOES register all 11 tools natively
- * (verified at `src/adapters/opencode/plugin.ts:469` and
- * `tests/opencode-plugin.test.ts:88`). The misleading -32601 is the seed of
- * the #637 perception.
- *
- * This helper installs an explicit handler that returns `{tools: []}` — a
- * spec-compliant empty list. Paired with the existing #623 stderr diagnostic,
- * an operator now sees:
- *   - wire response: `{tools: []}` (matches expectation, no JSON-RPC error)
- *   - stderr: `[context-mode] ctx_* tools/list intentionally empty… (#623)`
- *
- * Idempotent: throws inside SDK if called twice on the same server because
- * `assertCanSetRequestHandler` (mcp.js:60) rejects duplicate registrations;
- * we therefore install the SDK's default tool handlers FIRST (via a no-op
- * registerTool of a fake tool, immediately removed) only if needed. To keep
- * the public surface minimal, we just call `server.server.setRequestHandler`
- * directly — that is the same low-level call used for prompts/resources at
- * server.ts:259-261 and avoids the SDK guard entirely.
- *
- * Exported for test (#637 in-memory regression guard).
- */
-export function registerEmptyToolsListHandler(target: McpServer = server): void {
-  target.server.registerCapabilities({ tools: { listChanged: false } });
-  target.server.setRequestHandler(ListToolsRequestSchema, async () => ({ tools: [] }));
-}
 
 /**
  * Compact tool descriptions (#1031).
  *
  * The verbose descriptions below are steering prose: they teach a cold model
  * when to reach for the sandbox instead of Bash. That teaching is not free —
- * the full set costs ~6K tokens of tool definitions on EVERY request, in a
- * project whose entire purpose is to not spend tokens on bytes the model does
- * not need. Once the routing block (SessionStart) and the project rules have
- * already said "think in code", most of that prose is a second copy.
+ * the full set is 29,419 characters, roughly 7.4K tokens of tool definitions
+ * on EVERY request, in a project whose entire purpose is to not spend tokens
+ * on bytes the model does not need. Once the routing block (SessionStart) and
+ * the project rules have already said "think in code", most of that prose is
+ * a second copy.
  *
  * So the long form stays in the source as the reference, and this table is
- * what actually ships. `CONTEXT_MODE_TOOL_DESCRIPTIONS=full` restores the
- * verbose text for hosts that inject no routing block of their own.
+ * what actually ships: 5,644 characters, about 1.4K tokens.
+ * `CONTEXT_MODE_TOOL_DESCRIPTIONS=full` restores the verbose text for hosts
+ * that inject no routing block of their own.
+ *
+ * EVERY registered tool must appear here. `resolveToolDescription` falls back
+ * to the full text for anything missing, silently, so a tool absent from this
+ * table ships its long form on every request and nothing says so. That is not
+ * hypothetical: the table held seven entries while fifteen tools were
+ * registered, and the eight left out were the newest and wordiest — ctx_find,
+ * ctx_graph and ctx_read among them — costing ~1.9K tokens a request that the
+ * mechanism above was written to save. `tests/core/compact-descriptions.test.ts`
+ * now fails when a registered tool has neither an entry nor a stated exemption.
+ *
+ * What compaction may cut: examples, enumerations, the RETURNS block. What it
+ * may not cut: the name of the native tool each entry displaces ("instead of
+ * Grep", "instead of Read") and the honest WHEN NOT. Those are the two things
+ * the model reads immediately before choosing, and a description that saves
+ * tokens by dropping them has sold the wrong half.
  */
 const COMPACT_TOOL_DESCRIPTIONS: Record<string, string> = {
   ctx_execute:
@@ -365,6 +281,43 @@ const COMPACT_TOOL_DESCRIPTIONS: Record<string, string> = {
   ctx_gather:
     "Read-only ctx_batch_execute: inspection commands only (cat/ls/grep/find/jq, git log|show|diff|status, docker ps, kubectl get, npm ls). " +
     "Refuses redirections, command substitution, sudo, and unknown binaries. Use it to gather context in plan mode.",
+  ctx_find:
+    "One ranked list from five fused signals: file names, literal grep, the FTS5 knowledge base, chunk vectors and the codegraph. " +
+    "Use instead of Grep or Glob when the question is where something lives and the answer is one path rather than a page of matches. " +
+    "`scope` narrows to a subtree, `type` to a kind of source. Signals that cannot run are reported as blind; the rest still fuse. " +
+    "NOT for an exhaustive literal sweep — this ranks, it does not enumerate, so Grep is right when every occurrence must be counted. " +
+    "NOT before an edit: Read the file, because Edit matches the exact bytes in your conversation.",
+  ctx_graph:
+    "Structural questions answered from the codegraph index instead of by reading files: " +
+    "`symbols` (where a name is defined), `outline` (every declaration in one file, in order), `callers`/`callees` (transitive, depth-limited), " +
+    "`impact` (what breaks if this changes), `related` (the graph neighbourhood of a file), `explore` (source bodies plus the paths reaching them). " +
+    "Use instead of Grep on a symbol when you want the edges rather than matching lines, and instead of Read on a file when you want its shape. " +
+    "NOT for arbitrary text, comments or string literals — that is lexical, so use ctx_find. NOT before an edit — Read the file. " +
+    "Needs `codegraph init` once per project; a stale index is reported inline rather than answered from.",
+  ctx_read:
+    "Answer a question about one file without pulling the file into your conversation: size, structure (declarations, headings, JSON keys, CSV header), " +
+    "and, when `intent` is given, the matching regions with a little context. One required argument, `path`. " +
+    "This is ctx_execute_file with the program already written, so nothing has to be composed to ask. " +
+    "Use instead of Read when you want to KNOW something about a file rather than SEE all of it. " +
+    "NOT when you intend to edit it, and NOT when you need it verbatim — Read is the honest call for both, because Edit matches the exact bytes " +
+    "in your conversation. NOT for a derivation this program does not perform — ctx_execute_file takes the code to do it.",
+  ctx_purge:
+    "DESTRUCTIVE: permanently deletes indexed content. Cannot be undone. Requires `confirm: true` and exactly one scope: " +
+    "`source` (one indexed label), `sessionId` (one session's events and chunks), or `scope: \"project\"` (knowledge base, session rows, stats). " +
+    "Combining scopes returns 'ambiguous - pick one'; a label matching nothing is an error, not a silent success. " +
+    "Call it only when the user names what to delete — on a bare 'reset' or 'clear', ask which scope first. " +
+    "Not a way to free memory or speed anything up: run ctx_stats instead.",
+  // ctx_stats and ctx_doctor are deliberately absent: their authored text is
+  // 184 and 196 characters, already shorter than anything a rewrite would buy.
+  // An entry here earns its place by saving about a quarter or more; below
+  // that, a second text to keep in sync costs more than it saves. The test
+  // pins the exemption to that reason — it fails if either description grows.
+  ctx_upgrade:
+    "Upgrade context-mode. Returns a shell command that you MUST then run with your shell tool, displaying the output as a checklist. " +
+    "Tell the user to restart their session afterwards.",
+  ctx_insight:
+    "Opens the context-mode Insight dashboard in the browser — a launcher, not a Q&A engine. " +
+    "For questions over indexed content use ctx_search.",
 };
 
 /**
@@ -452,10 +405,6 @@ const originalRegisterTool = server.registerTool.bind(server);
     Record<string, unknown>,
     (toolArgs: Record<string, unknown>) => Promise<unknown> | unknown,
   ];
-  if (suppressMcpToolsForNativePluginHost) {
-    emitSuppressionDiagnostic();
-    return undefined;
-  }
   let fullDescription: string | undefined;
   if (config && typeof config === "object" && "description" in config) {
     if (typeof config.description === "string") fullDescription = config.description;
@@ -500,17 +449,6 @@ function wrapToolHandler(
   };
 }
 
-// Issue #637 — when suppression is active, install the empty tools/list handler
-// once at module-init time so the suppressed MCP child responds with
-// `{tools: []}` instead of JSON-RPC `-32601 Method not found`. Pair with the
-// #623 stderr diagnostic that explains WHY the list is empty. Skipped for the
-// embedded plugin-import path because the embedded process is not the stdio
-// MCP child an operator would inspect — it lives inside the OpenCode/Kilo
-// host and never speaks JSON-RPC over stdio.
-if (suppressMcpToolsForNativePluginHost && process.env.CONTEXT_MODE_EMBEDDED_PLUGIN_TOOLS !== "1") {
-  registerEmptyToolsListHandler(server);
-}
-
 type ToolContextOverride = { projectDir: string; sessionId?: string };
 const projectDirOverride = new AsyncLocalStorage<ToolContextOverride>();
 
@@ -523,26 +461,33 @@ export async function withProjectDirOverride<T>(
 }
 
 // Register empty prompts/resources handlers so MCP clients don't get -32601 (#168).
-// OpenCode calls listPrompts()/listResources() unconditionally — the error can poison
-// the SDK transport layer, causing subsequent listTools() calls to fail permanently.
+// The client that forced this was OpenCode, which called listPrompts() and
+// listResources() unconditionally and let the error poison the SDK transport
+// layer, so every later listTools() failed permanently. The handlers stay: the
+// -32601 hazard is a property of the SDK, not of the client that found it.
 import { ListPromptsRequestSchema, ListResourcesRequestSchema, ListResourceTemplatesRequestSchema, ListToolsRequestSchema } from "@modelcontextprotocol/sdk/types.js";
 server.server.registerCapabilities({ prompts: { listChanged: false }, resources: { listChanged: false } });
 server.server.setRequestHandler(ListPromptsRequestSchema, async () => ({ prompts: [] }));
 server.server.setRequestHandler(ListResourcesRequestSchema, async () => ({ resources: [] }));
 server.server.setRequestHandler(ListResourceTemplatesRequestSchema, async () => ({ resourceTemplates: [] }));
 
-// ── Strict-client (Gemini function-calling) schema compatibility ──────────────
-// Gemini's function-calling API — used by Antigravity CLI (`agy`) and Gemini CLI
-// — rejects JSON Schema `const` and `additionalProperties`. A rejected parameter
-// schema makes the host SILENTLY DROP that tool from the model's function list,
-// so the agent never sees our ctx_* tools and falls back to hand-rolling the MCP
-// protocol through its Bash tool. Sanitize the EMITTED tools/list schema:
+// ── Strict-client (function-calling) schema compatibility ────────────────────
+// Gemini's function-calling API rejects JSON Schema `const` and
+// `additionalProperties`, and a rejected parameter schema makes the host
+// SILENTLY DROP that tool from the model's function list — the agent never sees
+// our ctx_* tools and falls back to hand-rolling the MCP protocol through its
+// Bash tool. The two hosts that hit this (Antigravity CLI, Gemini CLI) are
+// gone, and neither remaining host is strict in that way. The sanitizer stays
+// because it is unconditional and behavior-preserving for every client: it
+// costs one pass over the emitted schema and it is what a future strict host
+// would need on day one, not after a bug report. Sanitize the EMITTED
+// tools/list schema:
 //   • `const: X`  →  `enum: [X]`   — an identical single-value constraint
 //   • drop `additionalProperties`  — advisory only; every ctx_* handler parses
 //     args with Zod (which strips unknown keys server-side), so removing it
 //     changes no validation and no call behavior.
-// Both transforms are behavior-preserving for every other client (Claude Code,
-// Copilot, Cursor, …): `const` and a one-value `enum` are equivalent, and no
+// Both transforms are behavior-preserving for every client: `const` and a
+// one-value `enum` are equivalent, and no
 // model sends undeclared properties. Only the wire schema changes — never
 // validation or how any tool is invoked.
 export function sanitizeSchemaForStrictClients(node: unknown): unknown {
@@ -610,9 +555,9 @@ writeFileSync(
   `(function(){var __cm_fs=0;process.on('exit',function(){if(__cm_fs>0)try{process.stderr.write('__CM_FS__:'+__cm_fs+'\\n')}catch(e){}});try{var f=require('fs');var ors=f.readFileSync;f.readFileSync=function(){var r=ors.apply(this,arguments);if(Buffer.isBuffer(r))__cm_fs+=r.length;else if(typeof r==='string')__cm_fs+=Buffer.byteLength(r);return r;};}catch(e){}})();\n`,
 );
 // In the stdio MCP path, main() also removes this file during graceful
-// shutdown. Plugin-native OpenCode/Kilo imports skip main() (#574), so
-// register a top-level best-effort cleanup too to avoid leaking preload
-// snippets under /tmp when the host process exits.
+// shutdown. An embedded import skips main() (#574), so register a top-level
+// best-effort cleanup too to avoid leaking preload snippets under /tmp when
+// the host process exits.
 process.on("exit", () => { try { unlinkSync(CM_FS_PRELOAD); } catch { /* best effort */ } });
 
 // The lazy store singleton itself lives in ./tools/shared/state.ts so the tool
@@ -633,11 +578,10 @@ export function currentAttribution(): { sessionId?: string } | undefined {
   if (override?.sessionId) return { sessionId: override.sessionId };
 
   // CLAUDE_SESSION_ID env var is NOT propagated to MCP servers (only to hooks).
-  // Cross-adapter resolution: every adapter (15 of them) sets *_PROJECT_DIR env
-  // and writes session_events via hooks. Read the most-recent session_id from
-  // THIS project's session DB. Works for claude-code/cursor/gemini-cli/codex/
-  // kiro/opencode/zed/kilo/openclaw/qwen-code/vscode-copilot/jetbrains-copilot/
-  // omp/pi/antigravity — no adapter-specific transcript path required.
+  // Cross-adapter resolution: each adapter writes session_events via hooks, so
+  // the most-recent session_id is read from THIS project's session DB rather
+  // than from any host-specific transcript path. That indirection is why the
+  // fifteen-host removal did not touch this function.
   const sessionId = process.env.CLAUDE_SESSION_ID ?? resolveSessionIdFromSessionDB();
   if (!sessionId) return undefined;
   return { sessionId };
@@ -775,8 +719,9 @@ function getSessionDir(): string {
  *   2. CONTEXT_MODE_PROJECT_DIR (set by start.mjs for ALL platforms — universal)
  *   3. process.cwd() (last resort)
  *
- * CONTEXT_MODE_PROJECT_DIR guarantees correct projectDir even for platforms
- * that don't set their own env var (Cursor, OpenClaw, Codex, Kiro, Zed).
+ * CONTEXT_MODE_PROJECT_DIR guarantees correct projectDir even for a platform
+ * that sets no workspace env var of its own — Codex, which passes cwd in hook
+ * stdin and nowhere else.
  */
 export function getProjectDir(): string {
   const override = projectDirOverride.getStore();
@@ -791,23 +736,21 @@ export function getProjectDir(): string {
   // app launch, /ctx-upgrade respawn). See src/util/project-dir.ts.
   //
   // Issue #521 (v1.0.119): the transcript heuristic ONLY applies on Claude
-  // Code. Other platforms (Cursor, OpenCode, Codex, ...) either have no
-  // transcript at that path or use a different schema without `cwd`. Worse,
-  // a Cursor user who also runs Claude Code would pick up the most-recently-
-  // modified Claude Code session's cwd — wrong project entirely. Gate the
-  // path on detected platform so non-Claude hosts skip the heuristic and
-  // fall through to PWD/cwd cleanly.
+  // Code. Codex has no transcript at that path. Worse, a Codex user who also
+  // runs Claude Code would pick up the most-recently-modified Claude Code
+  // session's cwd — wrong project entirely. Gate the path on detected platform
+  // so a non-Claude host skips the heuristic and falls through to PWD/cwd.
   //
-  // The Claude heuristic must also be fresh. Hosts such as Pi can be
-  // misdetected as Claude Code solely because ~/.claude exists; without a
-  // freshness guard an old Claude transcript can globally hijack ctx shell cwd
-  // after reboot. Active Claude sessions update their transcript as the user
-  // interacts, so stale transcripts should fall through to PWD/cwd.
+  // The Claude heuristic must also be fresh. A host can be misdetected as
+  // Claude Code solely because ~/.claude exists; without a freshness guard an
+  // old Claude transcript can globally hijack ctx shell cwd after reboot.
+  // Active Claude sessions update their transcript as the user interacts, so
+  // stale transcripts should fall through to PWD/cwd.
   //
   // Issue #545 (v1.0.124): pass strictPlatform for ALL adapters so the
   // env-var cascade is built ALGORITHMICALLY from the platform's own
-  // workspace vars + universal escape hatch — foreign workspace vars (e.g.
-  // CLAUDE_PROJECT_DIR leaked into Pi's MCP child env from the user's shell)
+  // workspace vars + universal escape hatch — a foreign workspace var (e.g.
+  // CLAUDE_PROJECT_DIR leaked from the user's shell into a Codex MCP child)
   // cannot win, regardless of cascade order. start.mjs intentionally does
   // NOT pass strictPlatform — host detection is unreliable at the entrypoint
   // and the legacy literal cascade is preserved there for semver safety.
@@ -869,7 +812,7 @@ function getSessionDbPath(): string {
  *
  * Layout: ~/<configDir>/context-mode/content/<hash>.db
  *   e.g.  ~/.claude/context-mode/content/87c28c41ddb64d38.db
- *         ~/.cursor/context-mode/content/87c28c41ddb64d38.db
+ *         ~/.codex/context-mode/content/87c28c41ddb64d38.db
  */
 function getStorePath(): string {
   const dir = ensureWritableStorageDir(resolveContentStorageDir(getDefaultSessionDir));
@@ -1143,11 +1086,9 @@ async function fetchLatestVersion(): Promise<string> {
 }
 
 function getUpgradeHint(): string {
-  const name = detectedAdapter()?.name;
-  if (name === "Claude Code") return "/ctx-upgrade";
-  if (name === "OpenClaw") return "npm run install:openclaw";
-  if (name === "Pi") return "npm run build";
-  return "npm update -g context-mode";
+  // Claude Code installs as a plugin and upgrades through its own command;
+  // Codex and anything unrecognised go through npm.
+  return detectedAdapter()?.name === "Claude Code" ? "/ctx-upgrade" : "npm update -g context-mode";
 }
 
 function semverNewer(a: string, b: string): boolean {
@@ -1350,7 +1291,7 @@ let _lifetimeCache: { tokens: number; computedAt: number } | undefined;
  * (`pid-<parent pid>`), so a status line script can derive
  * the same id from `$PPID` without coupling to MCP.
  */
-// CLAUDE_SESSION_ID flows from the hosting process (Claude Code, pi, etc.)
+// CLAUDE_SESSION_ID flows from the hosting process
 // straight into a path.join, and path.join collapses ".." into the result,
 // so a host env CLAUDE_SESSION_ID=../../evil writes "stats-evil.json" two
 // levels above statsDir. The env var is not under direct MCP-tool-caller
@@ -1506,8 +1447,7 @@ function persistStats(): void {
       reduction_pct: reductionPct,
       tokens_saved: tokensSaved,
       // statusline-facing $ values — pre-computed at the current per-token
-      // rate (dynamic when PI_CONTEXT_MODE_PRICE_OUTPUT_PER_TOKEN is set by a
-      // Pi host; Opus $15/1M otherwise). Resolved on every persist via
+      // rate (Opus $15/1M unless overridden). Resolved on every persist via
       // pricePerToken() so the env override picks up without an MCP restart.
       dollars_saved_session: +(tokensSaved * pricePerToken()).toFixed(2),
       tokens_saved_lifetime: lifetimeTokens,
@@ -2025,25 +1965,6 @@ function truncateCommandForEcho(command: string): string {
 }
 
 /**
- * Default execution timeout (ms) applied ONLY under Antigravity CLI (`agy`).
- * agy does not enforce an MCP RPC timeout, so a ctx_execute with a runaway or
- * blocking script hangs forever — the host never kills it and the user must
- * interrupt. Every other host enforces its own RPC timeout, so we keep the
- * no-server-timer behavior there (Issue #406 — long builds need an unbounded
- * run). A caller can still pass an explicit `timeout` to override on any host.
- */
-export const AGY_DEFAULT_EXEC_TIMEOUT_MS = 120_000;
-export function resolveExecTimeout(timeout: number | undefined): number | undefined {
-  if (timeout !== undefined) return timeout;
-  // Only agy gets a default — every other host enforces its own RPC timeout, so
-  // keep the unbounded behavior there. Detected via the env the agy bundle pins
-  // (CONTEXT_MODE_PLATFORM=antigravity-cli). Tunable via CONTEXT_MODE_AGY_EXEC_TIMEOUT_MS.
-  if (detectPlatform().platform !== "antigravity-cli") return undefined;
-  const override = Number(process.env.CONTEXT_MODE_AGY_EXEC_TIMEOUT_MS);
-  return Number.isFinite(override) && override > 0 ? override : AGY_DEFAULT_EXEC_TIMEOUT_MS;
-}
-
-/**
  * Per-call budget for the source-code echo prepended by `ctx_execute` and
  * `ctx_execute_file` (Issues #717 + #736). The full code always reaches the
  * sandbox — only the echo is clipped so massive payloads don't dominate
@@ -2361,8 +2282,7 @@ ${code}
 __cm_main().catch(e=>{console.error(e);process.exitCode=1});${background ? '\nsetInterval(()=>{},2147483647);' : ''}
 })(typeof require!=='undefined'?require:null);`;
       }
-      const effTimeout = resolveExecTimeout(timeout);
-      const result = await executor.execute({ language, code: instrumentedCode, timeout: effTimeout, background, cwd });
+      const result = await executor.execute({ language, code: instrumentedCode, timeout, background, cwd });
 
       // Echo the executed source code before stdout so users can audit
       // and tooling can block command patterns (Issues #717 + #736).
@@ -2392,7 +2312,7 @@ __cm_main().catch(e=>{console.error(e);process.exitCode=1});${background ? '\nse
             content: [
               {
                 type: "text" as const,
-                text: `${echo}${partialOutput}\n\n_(process backgrounded after ${effTimeout}ms — still running)_`,
+                text: `${echo}${partialOutput}\n\n_(process backgrounded after ${timeout}ms — still running)_`,
               },
             ],
           });
@@ -2403,7 +2323,7 @@ __cm_main().catch(e=>{console.error(e);process.exitCode=1});${background ? '\nse
             content: [
               {
                 type: "text" as const,
-                text: `${echo}${partialOutput}\n\n_(timed out after ${effTimeout}ms — partial output shown above)_`,
+                text: `${echo}${partialOutput}\n\n_(timed out after ${timeout}ms — partial output shown above)_`,
               },
             ],
           });
@@ -2412,7 +2332,7 @@ __cm_main().catch(e=>{console.error(e);process.exitCode=1});${background ? '\nse
           content: [
             {
               type: "text" as const,
-              text: `${echo}Execution timed out after ${effTimeout}ms\n\nstderr:\n${result.stderr}`,
+              text: `${echo}Execution timed out after ${timeout}ms\n\nstderr:\n${result.stderr}`,
             },
           ],
           isError: true,
@@ -2714,12 +2634,11 @@ async function executeFileHandler({
   }
 
   try {
-    const effTimeout = resolveExecTimeout(timeout);
     const result = await executor.executeFile({
       path,
       language,
       code,
-      timeout: effTimeout,
+      timeout,
     });
 
     // Echo path + executed source code before stdout for audit/debug
@@ -2731,7 +2650,7 @@ async function executeFileHandler({
         content: [
           {
             type: "text" as const,
-            text: `${echo}Timed out processing ${path} after ${effTimeout}ms`,
+            text: `${echo}Timed out processing ${path} after ${timeout}ms`,
           },
         ],
         isError: true,
@@ -3178,7 +3097,6 @@ function batchToolDeps(): BatchToolDeps {
       { ...opts, nodeOptsPrefix: buildBatchNodeOptionsPrefix(runtimes.shell, CM_FS_PRELOAD) },
       executor,
     ),
-    resolveExecTimeout,
     truncateCommandForEcho,
     formatBatchQueryResults,
   };
@@ -4050,17 +3968,12 @@ server.registerTool(
     // and cmd.exe — unlike env-var prefixes). If detection fails we
     // skip the flag and let upgrade()'s own detectPlatform() fall back.
     let platformFlag = "";
-    let nodeOpts: { platform: string; jsRuntime: string } | undefined =
-      undefined;
     let platformId: PlatformId | undefined;
     try {
       const clientInfo = server.server.getClientVersion();
       const signal = detectPlatform(clientInfo ?? undefined);
       platformId = signal.platform;
       platformFlag = ` --platform ${signal.platform}`;
-      nodeOpts = isInProcessPluginPlatform(signal.platform) && runtimes.javascript
-        ? { platform: signal.platform, jsRuntime: runtimes.javascript }
-        : undefined;
     } catch {
       try { platformId = detectPlatform().platform; } catch { /* best effort — fall back to upgrade()'s own detect */ }
     }
@@ -4092,13 +4005,20 @@ server.registerTool(
     let cmd: string;
 
     if (existsSync(bundlePath)) {
-      cmd = `${buildNodeCommand(bundlePath, nodeOpts)} upgrade${platformFlag}`;
+      cmd = `${buildNodeCommand(bundlePath)} upgrade${platformFlag}`;
     } else if (existsSync(fallbackPath)) {
-      cmd = `${buildNodeCommand(fallbackPath, nodeOpts)} upgrade${platformFlag}`;
+      cmd = `${buildNodeCommand(fallbackPath)} upgrade${platformFlag}`;
     } else {
       // Inline fallback: neither CLI file exists (e.g. marketplace installs).
       // Generate a self-contained node -e script that performs the upgrade.
-      const repoUrl = "https://github.com/mksglu/context-mode.git";
+      //
+      // The repo is resolved, never hardcoded. This branch used to clone
+      // upstream unconditionally — which, run from a fork install, is not an
+      // upgrade but a silent downgrade that overwrites every local commit and
+      // says nothing about having done so. src/util/fork-info.ts exists for
+      // exactly this and the CLI path already used it; this branch, the one a
+      // marketplace install actually takes, was still pinned to upstream.
+      const repoUrl = resolveUpgradeRepo({ pluginRoot }).url;
       // Write inline script to a temp .mjs file — avoids quote-escaping issues
       // across cmd.exe, PowerShell, and bash (node -e '...' breaks on Windows).
       const scriptLines = [
@@ -4149,7 +4069,7 @@ server.registerTool(
       const tmpScript = resolve(pluginRoot, ".ctx-upgrade-inline.mjs");
       const { writeFileSync: writeTmp } = await import("node:fs");
       writeTmp(tmpScript, scriptLines);
-      cmd = buildNodeCommand(tmpScript, nodeOpts);
+      cmd = buildNodeCommand(tmpScript);
     }
 
     const text = [
@@ -4793,7 +4713,7 @@ async function main() {
 
   // #854: refresh the bridge-child idle clock on each inbound MCP message so an
   // abandoned bridge child (CONTEXT_MODE_BRIDGE_DEPTH>0) self-terminates instead
-  // of accumulating under a long-lived Pi/omp parent. Best-effort; no stdin touch.
+  // of accumulating under a long-lived parent. Best-effort; no stdin touch.
   attachMcpActivityTap(
     transport as unknown as { onmessage?: (message: unknown, extra?: unknown) => unknown },
   );
@@ -4875,8 +4795,9 @@ async function main() {
 }
 
 // Runs after every registerTool() above, so the SDK's default tools/list handler
-// exists and can be wrapped. Makes ctx_* schemas safe for strict (Gemini
-// function-calling) clients like Antigravity CLI (`agy`) / Gemini CLI.
+// exists and can be wrapped. Makes ctx_* schemas safe for a strict
+// (function-calling) client; see sanitizeSchemaForStrictClients for why it
+// stays now that no such client is supported.
 installStrictClientSchemaCompat();
 
 if (process.env.CONTEXT_MODE_EMBEDDED_PLUGIN_TOOLS !== "1") {

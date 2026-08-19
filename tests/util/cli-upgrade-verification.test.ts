@@ -118,24 +118,28 @@ describe("cli.ts upgrade() pre-bump verification (v1.0.114 hotfix)", () => {
     expect(throwIdx).toBeLessThan(updateIdx);
   });
 
-  test("upgrade() gates 'npm install -g' behind the opencode/kilo exclusion (PR #650)", () => {
+  // PR #650 wrapped the native-addon verifier and the \`npm install -g\` that
+  // follows it in a platform gate: hosts that loaded context-mode in-process
+  // had no npm global to update and no better-sqlite3 to verify. Both such
+  // hosts are gone, the gate is gone with them, and what has to hold now is
+  // that the two steps still run in that order for every host — unconditionally.
+  test("upgrade() verifies the native addon ABI, then updates the npm global", () => {
     const upgradeIdx = cliSrc.indexOf("async function upgrade");
     const upgradeBody = cliSrc.slice(upgradeIdx, upgradeIdx + 30000);
 
-    const gateIdx = upgradeBody.indexOf("!isInProcessPluginPlatform(detection.platform)");
+    const abiIdx = upgradeBody.indexOf("Verifying native addon ABI");
     const npmGIdx = upgradeBody.indexOf('"install", "-g"');
+    expect(abiIdx).toBeGreaterThan(0);
+    expect(npmGIdx).toBeGreaterThan(abiIdx);
+  });
 
-    // Gate must exist, and the '-g' call must sit AFTER it (i.e. inside the block).
-    expect(gateIdx).toBeGreaterThan(0);
-    expect(npmGIdx).toBeGreaterThan(gateIdx);
-
-    // The closing brace of the gate must come AFTER the '-g' call,
-    // not between the ABI verifier and the global install (the pre-PR shape).
-    const closeBefore = upgradeBody.lastIndexOf(
-      "      }",
-      upgradeBody.indexOf("// Cleanup"),
-    );
-    expect(closeBefore).toBeGreaterThan(npmGIdx);
+  test("no platform gate stands between the ABI verifier and the npm global install", () => {
+    // The failure this replaces was silent: a host that matched the gate got
+    // an upgrade that reported success while skipping both steps. With the
+    // predicate deleted, the way that shape comes back is a new gate, so the
+    // assertion is on its absence rather than on its correct placement.
+    expect(cliSrc).not.toContain("isInProcessPluginPlatform");
+    expect(cliSrc).not.toContain("cachePluginRoot");
   });
 });
 
@@ -196,8 +200,15 @@ describe("cli.ts upgrade() marketplace post-pull assertion (v1.0.114 hotfix)", (
     // The warn appears inside the marketplace assertion block; slice from
     // the assertion start to end of upgrade body capture so we cover both
     // the warn-string flow and any catch-block fallback.
+    // Bound the window by the next statement in upgrade(), not by a byte
+    // count: a fixed 2000-char slice reached past the assertion into the
+    // dependency-install step below it, and the unrelated \`throw\` there made
+    // this test fail for a change that never touched the marketplace block.
     const assertIdx = upgradeBody.indexOf("marketplace post-pull assertion");
-    const block = upgradeBody.slice(assertIdx, assertIdx + 2000);
+    const blockEnd = upgradeBody.indexOf("// Install production deps", assertIdx);
+    expect(assertIdx).toBeGreaterThan(-1);
+    expect(blockEnd).toBeGreaterThan(assertIdx);
+    const block = upgradeBody.slice(assertIdx, blockEnd);
     expect(block).toMatch(/p\.log\.warn/);
     expect(block).not.toMatch(/throw new Error/);
   });

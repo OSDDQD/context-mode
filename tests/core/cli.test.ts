@@ -156,32 +156,37 @@ describe("cli.bundle.mjs — marketplace install support", () => {
     expect(src).toMatch(/for\s*\(.*\["build\/cli\.js",\s*"cli\.bundle\.mjs"\]/);
   });
 
-  // ── Skill files ────────────────────────────────────────────
+  // ── Utility commands ───────────────────────────────────────
+  //
+  // These read commands/ rather than the platform-skills/ copies they used
+  // to read: that directory's only consumer was `package.json` → `pi.skills`
+  // and it went with Pi, so the assertions were pinning prose no host loaded.
+  // The rules themselves are unchanged.
 
-  it("ctx-upgrade skill uses cli.bundle.mjs with fallback", () => {
-    const skill = readFileSync(resolve(ROOT, "platform-skills", "ctx-upgrade", "SKILL.md"), "utf-8");
-    expect(skill).toContain("cli.bundle.mjs");
-    expect(skill).toContain("build/cli.js");
+  it("ctx-upgrade command uses cli.bundle.mjs with fallback", () => {
+    const command = readFileSync(resolve(ROOT, "commands", "ctx-upgrade.md"), "utf-8");
+    expect(command).toContain("cli.bundle.mjs");
+    expect(command).toContain("build/cli.js");
     // Fallback pattern: try bundle first, then build
-    expect(skill).toMatch(/CLI=.*cli\.bundle\.mjs.*\[ ! -f.*\].*build\/cli\.js/);
+    expect(command).toMatch(/CLI=.*cli\.bundle\.mjs.*\[ ! -f.*\].*build\/cli\.js/);
   });
 
-  it("ctx-doctor skill uses cli.bundle.mjs with fallback", () => {
-    const skill = readFileSync(resolve(ROOT, "platform-skills", "ctx-doctor", "SKILL.md"), "utf-8");
-    expect(skill).toContain("cli.bundle.mjs");
-    expect(skill).toContain("build/cli.js");
-    expect(skill).toMatch(/CLI=.*cli\.bundle\.mjs.*\[ ! -f.*\].*build\/cli\.js/);
+  it("ctx-doctor command uses cli.bundle.mjs with fallback", () => {
+    const command = readFileSync(resolve(ROOT, "commands", "ctx-doctor.md"), "utf-8");
+    expect(command).toContain("cli.bundle.mjs");
+    expect(command).toContain("build/cli.js");
+    expect(command).toMatch(/CLI=.*cli\.bundle\.mjs.*\[ ! -f.*\].*build\/cli\.js/);
   });
 
-  it("ctx-index and ctx-search skills expose slash-style triggers", () => {
-    const indexSkill = readFileSync(resolve(ROOT, "platform-skills", "ctx-index", "SKILL.md"), "utf-8");
-    const searchSkill = readFileSync(resolve(ROOT, "platform-skills", "ctx-search", "SKILL.md"), "utf-8");
-    expect(indexSkill).toContain("Trigger: /context-mode:ctx-index");
-    expect(indexSkill).toContain("user-invocable: true");
-    expect(indexSkill).toContain("context-mode index");
-    expect(searchSkill).toContain("Trigger: /context-mode:ctx-search");
-    expect(searchSkill).toContain("user-invocable: true");
-    expect(searchSkill).toContain("context-mode search");
+  it("ctx-index and ctx-search commands keep a CLI route and stay out of the standing prompt", () => {
+    const indexCmd = readFileSync(resolve(ROOT, "commands", "ctx-index.md"), "utf-8");
+    const searchCmd = readFileSync(resolve(ROOT, "commands", "ctx-search.md"), "utf-8");
+    expect(indexCmd).toContain("context-mode index");
+    expect(indexCmd).toMatch(/^disable-model-invocation:\s*true$/m);
+    expect(searchCmd).toContain("context-mode search");
+    expect(searchCmd).toMatch(/^disable-model-invocation:\s*true$/m);
+    // The slash invocation the prose points users at still has to exist.
+    expect(searchCmd).toContain("/context-mode:ctx-index");
   });
 
   // ── .gitignore ─────────────────────────────────────────────
@@ -987,11 +992,6 @@ describe("Cross-OS compatibility", () => {
     expect(pkg.files).toContain("scripts/postinstall.mjs");
   });
 
-  it("install:openclaw gracefully handles missing bash on Windows", () => {
-    // Direct 'bash' invocation fails on Windows without Git Bash
-    expect(pkg.scripts["install:openclaw"]).not.toMatch(/^bash /);
-  });
-
   it("cli.ts chmodSync in setup/upgrade is guarded by platform check", () => {
     // chmodSync must only run on non-Windows
     const chmodIdx = src.indexOf('chmodSync(binPath');
@@ -1118,20 +1118,6 @@ describe("Bin entry uses cli.bundle.mjs", () => {
     // Must return empty arrays
     expect(src).toContain("prompts: []");
     expect(src).toContain("resources: []");
-  });
-
-  it("openclaw-plugin.ts doctor/upgrade use cli.bundle.mjs with fallback", () => {
-    const src = readFileSync(resolve(ROOT, "src", "adapters", "openclaw", "plugin.ts"), "utf-8");
-    expect(src).toContain("cli.bundle.mjs");
-    // Find the registerCommand blocks, not comments
-    const doctorIdx = src.indexOf('name: "ctx-doctor"');
-    const upgradeIdx = src.indexOf('name: "ctx-upgrade"');
-    expect(doctorIdx).toBeGreaterThan(-1);
-    expect(upgradeIdx).toBeGreaterThan(-1);
-    const doctorSection = src.slice(doctorIdx, doctorIdx + 500);
-    const upgradeSection = src.slice(upgradeIdx, upgradeIdx + 500);
-    expect(doctorSection).toContain("cli.bundle.mjs");
-    expect(upgradeSection).toContain("cli.bundle.mjs");
   });
 });
 
@@ -2553,11 +2539,11 @@ describe("session-loaders.mjs fallback to build/session/*.js", () => {
   });
 });
 
-// ── SKILL.md MCP-first pattern ────────────────────────────────────────
+// ── Utility-command MCP-first pattern ─────────────────────────────────
 
-describe("SKILL.md prefers MCP tool over Bash", () => {
-  it("ctx-doctor SKILL.md prefers MCP tool over Bash", () => {
-    const skill = readFileSync(resolve(ROOT, "platform-skills", "ctx-doctor", "SKILL.md"), "utf-8");
+describe("utility commands prefer the MCP tool over Bash", () => {
+  it("ctx-doctor command prefers MCP tool over Bash", () => {
+    const skill = readFileSync(resolve(ROOT, "commands", "ctx-doctor.md"), "utf-8");
     // Must mention the MCP tool
     expect(skill).toContain("ctx_doctor");
     expect(skill).toContain("MCP tool");
@@ -2569,8 +2555,8 @@ describe("SKILL.md prefers MCP tool over Bash", () => {
     expect(mcpIdx).toBeLessThan(fallbackIdx);
   });
 
-  it("ctx-upgrade SKILL.md prefers MCP tool over Bash", () => {
-    const skill = readFileSync(resolve(ROOT, "platform-skills", "ctx-upgrade", "SKILL.md"), "utf-8");
+  it("ctx-upgrade command prefers MCP tool over Bash", () => {
+    const skill = readFileSync(resolve(ROOT, "commands", "ctx-upgrade.md"), "utf-8");
     // Must mention the MCP tool
     expect(skill).toContain("ctx_upgrade");
     expect(skill).toContain("MCP tool");
@@ -2585,26 +2571,11 @@ describe("SKILL.md prefers MCP tool over Bash", () => {
 
 // ── Package exports ───────────────────────────────────────────────────
 
-describe("Package exports", () => {
-  test("named export exposes ContextModePlugin factory", async () => {
-    const mod = await import("../../src/adapters/opencode/plugin.js");
-    expect(mod.ContextModePlugin).toBeDefined();
-    expect(typeof mod.ContextModePlugin).toBe("function");
-  });
-
-  test("default export has KiloCode PluginModule shape { server }", async () => {
-    const mod = (await import("../../src/adapters/opencode/plugin.js")) as any;
-    expect(mod.default).toBeDefined();
-    expect(typeof mod.default.server).toBe("function");
-  });
-
-  test("default export does not leak CLI internals", async () => {
-    const mod = (await import("../../src/adapters/opencode/plugin.js")) as any;
-    expect(mod.toUnixPath).toBeUndefined();
-    expect(mod.doctor).toBeUndefined();
-    expect(mod.upgrade).toBeUndefined();
-  });
-});
+// The "Package exports" describe stood here and pinned the shape of
+// src/adapters/opencode/plugin.ts — a named ContextModePlugin factory, a
+// default export shaped as KiloCode expects ({ server }), and the absence of
+// CLI internals on that default. All three were properties of a module that
+// only OpenCode and Kilo loaded, and it went with them.
 
 // ── Issue #181: upgrade must not delete sibling version dirs mid-session ──
 
@@ -3016,23 +2987,11 @@ describe("Self-heal hook-path rewriting (#187 + #415 follow-up)", () => {
   });
 });
 
-// ── PR #183 fix: path traversal prevention in OpenClaw sessionKey ──
-
-describe("OpenClaw sessionKey safety (#183)", () => {
-  const WR_SOURCE = readFileSync(resolve(ROOT, "src/adapters/openclaw/workspace-router.ts"), "utf-8");
-
-  test("workspace regex only allows safe characters (no path traversal)", () => {
-    // Must use [a-zA-Z0-9_-]+ not [^:]+ to prevent ../../ in agent name
-    expect(WR_SOURCE).toContain('[a-zA-Z0-9_-]+');
-  });
-
-  test("workspace path is scoped to /openclaw/workspace- prefix", () => {
-    // extractWorkspace must only match recognised /openclaw/workspace-<name> paths
-    expect(WR_SOURCE).toContain('/openclaw/workspace-');
-    // workspaceFromKey derives workspace from sessionKey agent:<name>:<channel>
-    expect(WR_SOURCE).toContain('`/openclaw/workspace-');
-  });
-});
+// PR #183 pinned path-traversal safety in OpenClaw's workspace router: the
+// sessionKey regex had to be [a-zA-Z0-9_-]+ rather than [^:]+ so an agent name
+// could not carry ../.. into a filesystem path. The router and its host were
+// removed in the fifteen-host cut, and the traversal surface went with them —
+// no remaining adapter derives a path from a session key.
 
 // ── PR #190 fix: getRuntimeSummary handles full bun path ──
 
@@ -3047,30 +3006,39 @@ describe("Runtime summary bun detection (#190)", () => {
   });
 });
 
-// ── Plugin root detection for Opencode/Kilocode platforms ────────────────
+// ── Plugin root detection ────────────────────────────────────────────────
+//
+// This block used to pin a two-way answer: hosts that loaded context-mode
+// in-process installed it from npm into \`~/.cache/<platform>/packages/\`
+// (\`%LOCALAPPDATA%\\<platform>\\packages\\\` on Windows), everyone else read it
+// from where cli.ts itself was loaded. Both such hosts are gone, so the
+// per-package cache resolver and the platform branch that chose it are gone
+// too. What is worth pinning now is that there is exactly ONE answer — a
+// second one cannot come back by accident, only by someone writing it.
 
-describe("Plugin root detection (#PR refactor/opencode-improvements)", () => {
+describe("Plugin root detection", () => {
   const CLI_SOURCE = readFileSync(resolve(ROOT, "src", "cli.ts"), "utf-8");
 
-  test("cachePluginRoot uses LOCALAPPDATA on Windows", () => {
-    const cacheRootStart = CLI_SOURCE.indexOf("function cachePluginRoot");
-    const cacheRootBody = CLI_SOURCE.slice(cacheRootStart, cacheRootStart + 500);
-    expect(cacheRootBody).toContain("process.env.LOCALAPPDATA");
-    expect(cacheRootBody).toContain('process.platform === "win32"');
+  test("getPluginRoot has no platform branch — it returns defaultPluginRoot", () => {
+    const start = CLI_SOURCE.indexOf("function getPluginRoot");
+    expect(start).toBeGreaterThan(-1);
+    const body = CLI_SOURCE.slice(start, CLI_SOURCE.indexOf("\n}", start) + 2);
+    expect(body).toContain("return defaultPluginRoot();");
+    expect(body).not.toContain("detectPlatform");
+    expect(body).not.toContain("if (");
   });
 
-  test("cachePluginRoot uses ~/.cache as default on non-Windows", () => {
-    const cacheRootStart = CLI_SOURCE.indexOf("function cachePluginRoot");
-    const cacheRootBody = CLI_SOURCE.slice(cacheRootStart, cacheRootStart + 500);
-    expect(cacheRootBody).toContain('".cache"');
-    expect(cacheRootBody).toContain("homedir");
+  test("no per-package cache root resolver survives in the CLI", () => {
+    expect(CLI_SOURCE).not.toContain("cachePluginRoot");
+    expect(CLI_SOURCE).not.toContain("LOCALAPPDATA");
   });
 
-  test("getPluginRoot uses cache path for opencode/kilo platform", () => {
-    const getPluginRootStart = CLI_SOURCE.indexOf("function getPluginRoot");
-    const getPluginRootBody = CLI_SOURCE.slice(getPluginRootStart, getPluginRootStart + 300);
-    expect(getPluginRootBody).toContain("isInProcessPluginPlatform(platform)");
-    expect(getPluginRootBody).toContain("cachePluginRoot");
+  test("defaultPluginRoot still resolves build/ and src/ up one level", () => {
+    const start = CLI_SOURCE.indexOf("function defaultPluginRoot");
+    const body = CLI_SOURCE.slice(start, CLI_SOURCE.indexOf("\n}", start) + 2);
+    expect(body).toContain('endsWith("/build")');
+    expect(body).toContain('endsWith("/src")');
+    expect(body).toContain('resolve(__dirname, "..")');
   });
 });
 
@@ -3186,101 +3154,12 @@ describe("Codex CLI hook dispatch (#225)", () => {
 
 // ── Kimi Code CLI hook dispatch (#729) ───────────────────────────────────
 
-describe("Kimi Code CLI hook dispatch (#729)", () => {
-  const CLI_SOURCE = readFileSync(resolve(ROOT, "src", "cli.ts"), "utf-8");
-
-  test("HOOK_MAP includes kimi platform", () => {
-    const mapStart = CLI_SOURCE.indexOf("const HOOK_MAP");
-    const mapEnd = CLI_SOURCE.indexOf("};", mapStart) + 2;
-    const hookMap = CLI_SOURCE.slice(mapStart, mapEnd);
-    expect(hookMap).toContain('"kimi"');
-  });
-
-  test("kimi HOOK_MAP has all Kimi hook dispatches including sessionend", () => {
-    const mapStart = CLI_SOURCE.indexOf("const HOOK_MAP");
-    const mapEnd = CLI_SOURCE.indexOf("};", mapStart) + 2;
-    const hookMap = CLI_SOURCE.slice(mapStart, mapEnd);
-    const kimiStart = hookMap.indexOf('"kimi"');
-    const kimiEnd = hookMap.indexOf("}", kimiStart + 10) + 1;
-    const kimiBlock = hookMap.slice(kimiStart, kimiEnd);
-    expect(kimiBlock).toContain("pretooluse");
-    expect(kimiBlock).toContain("posttooluse");
-    expect(kimiBlock).toContain("precompact");
-    expect(kimiBlock).toContain("sessionstart");
-    expect(kimiBlock).toContain("sessionend");
-    expect(kimiBlock).toContain("userpromptsubmit");
-    expect(kimiBlock).toContain("stop");
-  });
-
-  test("kimi hooks point to dedicated hooks/kimi/ directory", () => {
-    const mapStart = CLI_SOURCE.indexOf("const HOOK_MAP");
-    const mapEnd = CLI_SOURCE.indexOf("};", mapStart) + 2;
-    const hookMap = CLI_SOURCE.slice(mapStart, mapEnd);
-    const kimiStart = hookMap.indexOf('"kimi"');
-    const kimiEnd = hookMap.indexOf("}", kimiStart + 10) + 1;
-    const kimiBlock = hookMap.slice(kimiStart, kimiEnd);
-    expect(kimiBlock).toContain("hooks/kimi/pretooluse.mjs");
-    expect(kimiBlock).toContain("hooks/kimi/posttooluse.mjs");
-    expect(kimiBlock).toContain("hooks/kimi/precompact.mjs");
-    expect(kimiBlock).toContain("hooks/kimi/sessionstart.mjs");
-    expect(kimiBlock).toContain("hooks/kimi/sessionend.mjs");
-    expect(kimiBlock).toContain("hooks/kimi/userpromptsubmit.mjs");
-    expect(kimiBlock).toContain("hooks/kimi/stop.mjs");
-  });
-
-  test("configs/kimi/hooks.json commands match HOOK_MAP platform name", () => {
-    const hooksJson = JSON.parse(readFileSync(resolve(ROOT, "configs/kimi/hooks.json"), "utf-8"));
-    for (const [eventType, entries] of Object.entries(hooksJson.hooks)) {
-      for (const entry of entries as any[]) {
-        for (const hook of entry.hooks) {
-          expect(hook.command).toMatch(/context-mode hook kimi \w+/);
-        }
-      }
-    }
-  });
-
-  test("session-helpers.mjs exports KIMI_OPTS", () => {
-    const helpers = readFileSync(resolve(ROOT, "hooks/session-helpers.mjs"), "utf-8");
-    expect(helpers).toContain("export const KIMI_OPTS");
-  });
-
-  test("KIMI_OPTS uses .kimi-code config dir", () => {
-    const helpers = readFileSync(resolve(ROOT, "hooks/session-helpers.mjs"), "utf-8");
-    const optsStart = helpers.indexOf("KIMI_OPTS");
-    const optsEnd = helpers.indexOf("};", optsStart) + 2;
-    const optsBlock = helpers.slice(optsStart, optsEnd);
-    expect(optsBlock).toContain('".kimi-code"');
-  });
-
-  test("KIMI_OPTS honours KIMI_CODE_HOME env var", () => {
-    const helpers = readFileSync(resolve(ROOT, "hooks/session-helpers.mjs"), "utf-8");
-    const optsStart = helpers.indexOf("KIMI_OPTS");
-    const optsEnd = helpers.indexOf("};", optsStart) + 2;
-    const optsBlock = helpers.slice(optsStart, optsEnd);
-    expect(optsBlock).toContain('configDirEnv: "KIMI_CODE_HOME"');
-  });
-
-  test("kimi pretooluse formatter includes hookEventName in deny response", () => {
-    const formatters = readFileSync(resolve(ROOT, "hooks/core/formatters.mjs"), "utf-8");
-    const kimiStart = formatters.indexOf('"kimi"');
-    const kimiEnd = formatters.indexOf("},", kimiStart + 50);
-    const kimiBlock = formatters.slice(kimiStart, kimiEnd);
-    expect(kimiBlock).toContain('hookEventName: "PreToolUse"');
-  });
-});
-
-// ── Cursor stop hook (#HOOK_MAP cursor stop) ─────────────────────────────
-
-describe("Cursor CLI hook dispatch — stop event", () => {
-  const CLI_SOURCE = readFileSync(resolve(ROOT, "src", "cli.ts"), "utf-8");
-
-  test("HOOK_MAP cursor entry includes stop event", () => {
-    const cursorEntry = CLI_SOURCE.match(/"cursor"\s*:\s*\{[\s\S]*?\}/);
-    expect(cursorEntry).not.toBeNull();
-    expect(cursorEntry![0]).toContain("stop");
-    expect(cursorEntry![0]).toContain("hooks/cursor/stop.mjs");
-  });
-});
+// Two hook-dispatch describes stood here. "Kimi Code CLI hook dispatch (#729)"
+// pinned the kimi HOOK_MAP rows, the hooks/kimi/ script layout, KIMI_OPTS in
+// hooks/session-helpers.mjs and the kimi deny formatter; "Cursor CLI hook
+// dispatch — stop event" pinned cursor's stop row. HOOK_MAP now holds two
+// platforms, and the Codex dispatch describe above covers the surviving
+// non-claude-code half of the same contract.
 
 // ── Upgrade skill sync to marketplace/cache directories ───────────────────
 
@@ -3360,7 +3239,7 @@ describe("installed_plugins.json installPath containment", () => {
     expect(skillsBlock![0]).toMatch(/realpathSync\(cacheRoot\)/);
     expect(skillsBlock![0]).toMatch(/realpathSync\(resolvedInstallPath\)/);
     expect(skillsBlock![0]).toMatch(/\(realInstallPath \+ sep\)\.startsWith\(cacheRootWithSep\)/);
-    // Fork: the sync loops over skills + platform-skills + commands + agents,
+    // Fork: the sync loops over skills + commands + agents,
     // but every cpSync target must still be anchored at realInstallPath.
     expect(skillsBlock![0]).toMatch(/cpSync\(srcSub, resolve\(realInstallPath, dir\)/);
     expect(skillsBlock![0]).not.toMatch(/cpSync\((?!srcSub, resolve\(realInstallPath, dir\))/);

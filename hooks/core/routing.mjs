@@ -36,9 +36,9 @@ import { resolve } from "node:path";
 
 // Guidance throttle: show each advisory type at most once per session.
 // Hybrid approach:
-//   - In-memory Set for same-process (OpenCode ts-plugin, vitest)
+//   - In-memory Set for same-process callers (vitest)
 //   - File-based markers with O_EXCL for cross-process atomicity
-//     (Claude Code, Gemini, Cursor, VS Code Copilot)
+//     (Claude Code and Codex both spawn a fresh hook process per call)
 //
 // Session identity is resolved in this order:
 //   1. sessionId passed in by the caller (stable across hook invocations)
@@ -81,10 +81,9 @@ function getExternalMcpNudgeEvery() {
 //
 // PreToolUse fires BEFORE the command runs, so the actual output size is
 // unknowable here. The only deterministic pre-execution signal is the command
-// string itself. The Gemini CLI adapter solves the same over-interception
-// problem with a matcher that only fires on large-output tools — "avoids
-// unnecessary hook overhead on lightweight tools" (README). We mirror that at
-// the routing layer: when CONTEXT_MODE_BASH_NUDGE_MIN_COMMAND_BYTES is set to
+// string itself. The answer is a matcher that only fires on plausibly
+// large-output calls, so lightweight ones pay no hook overhead: when
+// CONTEXT_MODE_BASH_NUDGE_MIN_COMMAND_BYTES is set to
 // N>0, an unbounded Bash command whose UTF-8 byte length is below N is treated
 // as expected-lightweight and the generic routing nudge is suppressed.
 //
@@ -132,6 +131,19 @@ function getBashNudgeMinCommandBytes() {
 // ─────────────────────────────────────────────────────────────────────────
 
 const READ_DENY_BYTES_ENV = "CONTEXT_MODE_READ_DENY_BYTES";
+/** Historical large-read threshold, kept as the default for both uses below. */
+const READ_ACCOUNTING_DEFAULT_BYTES = 50_000;
+
+/**
+ * Marker type meaning "this call is already accounted for, and saved nothing".
+ *
+ * Exported so hooks/posttooluse.mjs recognises it without a second copy of the
+ * string: PostToolUse treats a marker of this type as proof the call was
+ * routed, and emits no savings event for it. Shared constant rather than two
+ * literals, because a typo on either side silently restores the loop the
+ * marker exists to break.
+ */
+export const READ_EDIT_EXEMPT_TYPE = "read-edit-exempt";
 const READ_EDIT_WINDOW_ENV = "CONTEXT_MODE_READ_EDIT_WINDOW_MS";
 const BASH_DENY_COMMANDS_ENV = "CONTEXT_MODE_BASH_DENY_COMMANDS";
 const GREP_ASK_ENV = "CONTEXT_MODE_GREP_ASK";
@@ -147,8 +159,26 @@ const GREP_ASK_ENV = "CONTEXT_MODE_GREP_ASK";
  */
 function readDenyBytes(env = process.env) {
   const raw = Number.parseInt(env[READ_DENY_BYTES_ENV] ?? "", 10);
-  if (!Number.isFinite(raw) || raw < 0) return 50_000;
+  if (!Number.isFinite(raw) || raw < 0) return READ_ACCOUNTING_DEFAULT_BYTES;
   return raw;
+}
+
+/**
+ * Size above which a read is recorded as a large one, whatever happened to it.
+ *
+ * This is where the promise above is actually kept. It used to be a literal
+ * 50 000 in two branches, which made the two numbers one number only on the
+ * default: with CONTEXT_MODE_READ_DENY_BYTES=10000 the refusal fired at 10 KB
+ * while the accounting still started at 50 KB, so every file between them was
+ * refused and never counted — the tool reported saving nothing on exactly the
+ * reads the operator had asked it to be strictest about.
+ *
+ * The one case where they legitimately part: `0` turns the refusal off, and a
+ * threshold of zero would then mark every read of any size as large. With no
+ * refusal number to agree with, accounting keeps its own default.
+ */
+function readAccountingBytes(env = process.env) {
+  return readDenyBytes(env) || READ_ACCOUNTING_DEFAULT_BYTES;
 }
 
 /**
@@ -294,7 +324,7 @@ function readDenyReason(t, filePath, size, env = process.env) {
   const seconds = Math.round(readEditWindowMs(env) / 1000);
   const pathJson = JSON.stringify(filePath);
   return (
-    `context-mode: Read redirected — this file is ${kb} KB and would enter your conversation whole. Call ${t("ctx_execute_file")}(path: ${pathJson}, language: "javascript", code: "…") to answer from it in a subprocess; only what your code prints comes back.\n` +
+    `context-mode: Read redirected — this file is ${kb} KB and would enter your conversation whole. Call ${t("ctx_read")}(path: ${pathJson}) to get its shape and the regions you asked for, or ${t("ctx_execute_file")}(path: ${pathJson}, language: "javascript", code: "…") when the answer needs code; either way only the answer comes back, not the file.\n` +
     `Reading it in order to EDIT it? Call Read again on this same path — the repeat is allowed for the next ${seconds}s, because Edit matches against the exact bytes in your conversation and a summary is not those bytes.\n` +
     `Reading one region? Pass offset and limit and it goes through unchanged. Tune with ${READ_DENY_BYTES_ENV} (bytes; 0 turns this off) and ${READ_EDIT_WINDOW_ENV} (retry window).`
   );
@@ -931,68 +961,30 @@ export function buildSecurityWarningContext() {
 /**
  * Normalize platform-specific tool names to canonical (Claude Code) names.
  *
- * Evidence:
- * - Gemini CLI: https://github.com/google-gemini/gemini-cli (run_shell_command, read_file, grep_search, web_fetch, activate_skill)
- * - OpenCode:   https://github.com/opencode-ai/opencode (bash, view, grep, fetch, agent)
- * - Codex CLI:  https://github.com/openai/codex (shell, read_file, grep_files, container.exec)
- * - VS Code Copilot: run_in_terminal (command field), read_file, run_vs_code_task
+ * Evidence: https://github.com/openai/codex (shell, read_file, grep_files,
+ * container.exec).
+ */
+/**
+ * Native tool names that mean the same thing as a Claude Code tool.
+ *
+ * Claude Code needs no entries — its names are the canonical ones. Codex has
+ * several names for running a command (the executor changed shape across
+ * releases and the older ones still appear in the wild), plus its own name for
+ * search, and all of them have to reach the same routing branch or the
+ * enforcement rules simply do not fire on that host.
+ *
+ * `Shell` is kept as an alias in its own right: the Codex PostToolUse hook
+ * normalises to it, and the missed-redirect classifier lists it among the
+ * tools whose payload lands in the conversation whole.
  */
 const TOOL_ALIASES = {
-  // Gemini CLI / Qwen Code (share native tool names — Qwen is Gemini fork:
-  // refs/platforms/qwen-code/packages/core/src/tools/tool-names.ts)
-  "run_shell_command": "Bash",
-  "read_file": "Read",
-  "read_many_files": "Read",
-  "grep_search": "Grep",
-  "search_file_content": "Grep",
-  "web_fetch": "WebFetch",
-  "read_url_content": "WebFetch",
-  // Antigravity CLI (`agy`) native tool names. Keep in sync with the two other
-  // agy maps: hooks/antigravity-cli/payload.mjs (normalizeAgyToolName) and
-  // src/session/extract.ts (TOOL_NAME_NORMALIZE).
-  "run_command": "Bash",
-  "view_file": "Read",
-  "list_dir": "LS",
-  "search_web": "WebSearch",
-  // Qwen Code additional tool names (no routing branch yet but normalized
-  // so future routing logic works without per-platform fallback):
-  "write_file": "Write",
-  "edit": "Edit",
-  "glob": "Glob",
-  "todo_write": "TodoWrite",
-  "ask_user_question": "AskUserQuestion",
-  "list_directory": "LS",
-  "save_memory": "Memory",
-  "skill": "Skill",
-  "exit_plan_mode": "ExitPlanMode",
-  // OpenCode
-  "bash": "Bash",
-  "view": "Read",
-  "grep": "Grep",
-  "fetch": "WebFetch",
-  "agent": "Agent",
-  // Codex CLI
   "shell": "Bash",
   "shell_command": "Bash",
   "exec_command": "Bash",
   "container.exec": "Bash",
   "local_shell": "Bash",
-  "grep_files": "Grep",
-  // OpenClaw native tools
-  "exec": "Bash",
-  "read": "Read",
-  "grep": "Grep",
-  "search": "Grep",
-  // Cursor
-  "mcp_web_fetch": "WebFetch",
-  "mcp_fetch_tool": "WebFetch",
   "Shell": "Bash",
-  // VS Code Copilot
-  "run_in_terminal": "Bash",
-  // Kiro CLI (https://kiro.dev/docs/cli/hooks/)
-  "fs_read": "Read",
-  "fs_write": "Write",
-  "execute_bash": "Bash",
+  "grep_files": "Grep",
 };
 
 function toolLeafName(toolName) {
@@ -1012,41 +1004,21 @@ function matchesContextModeTool(toolName, ctxName, legacyName) {
 
 // External MCP detection (#529 + 15-adapter coverage follow-up).
 //
-// MCP-namespaced tool names follow per-platform conventions (see
-// core/tool-naming.mjs):
-//   - `mcp__<server>__<tool>`     Claude Code / Gemini CLI / Antigravity / Qwen Code / Codex
-//   - `MCP:<tool>`                Cursor
-//   - `@<server>/<tool>`          Kiro
+// Both supported hosts wire MCP tools the same way: `mcp__<server>__<tool>`
+// (see core/tool-naming.mjs).
 //
 // Tools belonging to context-mode itself are excluded — they have dedicated
 // routing branches above (ctx_execute, ctx_execute_file, ctx_batch_execute)
 // and re-routing them here would double-process the call.
 const MCP_PREFIX = "mcp__";
-const CURSOR_MCP_PREFIX = "MCP:";
-const KIRO_MCP_PREFIX = "@";
-const CTX_TOOL_PREFIX = "ctx_";
 const CONTEXT_MODE_SUBSTRING = "context-mode";
 
 function isExternalMcpTool(toolName) {
   const raw = String(toolName ?? "");
 
-  // Claude / Codex / Gemini / Qwen / Antigravity wire shape.
+  // Both remaining hosts use the same wire shape: `mcp__<server>__<tool>`.
   if (raw.startsWith(MCP_PREFIX)) {
     const server = raw.slice(MCP_PREFIX.length).split("__")[0];
-    if (!server) return false;
-    return !server.includes(CONTEXT_MODE_SUBSTRING);
-  }
-
-  // Cursor wire shape: `MCP:<tool>` — own tools are `MCP:ctx_*`. There is no
-  // server segment, so the discriminator is the tool-leaf prefix.
-  if (raw.startsWith(CURSOR_MCP_PREFIX)) {
-    const tool = raw.slice(CURSOR_MCP_PREFIX.length);
-    return tool.length > 0 && !tool.startsWith(CTX_TOOL_PREFIX);
-  }
-
-  // Kiro wire shape: `@<server>/<tool>` — own tools are `@context-mode/ctx_*`.
-  if (raw.startsWith(KIRO_MCP_PREFIX) && raw.includes("/")) {
-    const server = raw.slice(KIRO_MCP_PREFIX.length).split("/")[0];
     if (!server) return false;
     return !server.includes(CONTEXT_MODE_SUBSTRING);
   }
@@ -1054,11 +1026,18 @@ function isExternalMcpTool(toolName) {
   return false;
 }
 
+/**
+ * The command, whatever the host called the field.
+ *
+ * `cmd` is Codex's spelling on some executor shapes; `command` is everyone
+ * else's. A field name this layer does not know about is not a parse error —
+ * it is an empty command that quietly matches no rule, so the list stays a
+ * superset of what the two hosts actually send.
+ */
 function getShellCommand(toolInput) {
   if (!toolInput || typeof toolInput !== "object") return "";
   if (typeof toolInput.command === "string") return toolInput.command;
   if (typeof toolInput.cmd === "string") return toolInput.cmd;
-  if (typeof toolInput.CommandLine === "string") return toolInput.CommandLine;
   return "";
 }
 
@@ -1066,16 +1045,12 @@ function getReadFilePath(toolInput) {
   if (!toolInput || typeof toolInput !== "object") return "";
   if (typeof toolInput.file_path === "string") return toolInput.file_path;
   if (typeof toolInput.path === "string") return toolInput.path;
-  if (typeof toolInput.AbsolutePath === "string") return toolInput.AbsolutePath;
-  if (typeof toolInput.FilePath === "string") return toolInput.FilePath;
   return "";
 }
 
 function getWebFetchUrl(toolInput) {
   if (!toolInput || typeof toolInput !== "object") return "";
   if (typeof toolInput.url === "string") return toolInput.url;
-  if (typeof toolInput.URL === "string") return toolInput.URL;
-  if (typeof toolInput.Url === "string") return toolInput.Url;
   return "";
 }
 
@@ -1411,8 +1386,9 @@ export function routePreToolUse(toolName, toolInput, projectDir, platform, sessi
   // ─── Read: nudge toward execute_file + large-file byte accounting ───
   // D2 PRD Phase 4 (slices 4.4–4.6): when the file is large enough to flood
   // context, attach `redirectMeta` so PostToolUse can emit a `read-redirected`
-  // event with the actual file size as bytes_avoided. Threshold = 50 000 bytes;
-  // smaller reads stay on the existing one-shot guidance nudge.
+  // event with the actual file size as bytes_avoided. The threshold follows
+  // the refusal threshold (readAccountingBytes); smaller reads stay on the
+  // guidance nudge.
   if (canonical === "Read") {
     const filePath = getReadFilePath(toolInput);
     if (filePath) {
@@ -1423,16 +1399,31 @@ export function routePreToolUse(toolName, toolInput, projectDir, platform, sessi
         // The refusal promised this exact read would go through. Honour it
         // literally: not a confirmation prompt, not a stronger nudge — a
         // promise the model has to re-read the fine print of is not an escape
-        // hatch. Byte accounting still runs, because the bytes are still real.
+        // hatch.
+        //
+        // And it has to be honoured by the accounting too, which is where this
+        // went wrong. The retry is an ordinary allowed Read, so PostToolUse
+        // sees a heavy native call with no redirect marker and records a fresh
+        // violation: the tally grows, the cost line fires, the adherence
+        // denominator gains one, and the ladder climbs another step. The
+        // plugin punishes the caller for taking the way out it just offered,
+        // and each use of that way out makes the next refusal harsher — a loop
+        // that feeds itself, aimed squarely at read-before-edit.
+        //
+        // The marker below is what stops it: it says "this call is already
+        // accounted for" without claiming a saving, because nothing was saved
+        // — the bytes did enter the conversation. (The old branch claimed
+        // st.size avoided on the retry, which was the same error in the other
+        // direction.) Below the collection floor no marker is needed: nothing
+        // under it was ever counted as a violation.
         if (st.isFile() && readRetryArmed(sessionId, filePath)) {
-          if (st.size > 50_000) {
+          if (st.size >= missedRedirectFloorBytes()) {
             return {
-              action: "context",
-              additionalContext: readGuidance,
+              action: "allow",
               redirectMeta: {
                 tool: "Read",
-                type: "read-redirected",
-                bytesAvoided: st.size,
+                type: READ_EDIT_EXEMPT_TYPE,
+                bytesAvoided: 0,
                 commandSummary: String(filePath).slice(0, 200),
               },
             };
@@ -1500,7 +1491,7 @@ export function routePreToolUse(toolName, toolInput, projectDir, platform, sessi
           }
         }
 
-        if (st.isFile() && st.size > 50_000) {
+        if (st.isFile() && st.size > readAccountingBytes()) {
           // The historical large-read branch: advisory plus byte accounting.
           // Kept as the floor of the ladder so the accounting never depends on
           // which step the session is on.
@@ -1521,7 +1512,7 @@ export function routePreToolUse(toolName, toolInput, projectDir, platform, sessi
             return {
               action: "ask",
               reason:
-                `context-mode: ${tallyLine(tally)} ${t("ctx_execute_file")}(path: ${JSON.stringify(filePath)}, language: "javascript", code: "…") answers a question about this file without spending the file on it.\n` +
+                `context-mode: ${tallyLine(tally)} ${t("ctx_read")}(path: ${JSON.stringify(filePath)}) answers a question about this file without spending the file on it — one argument, no program to compose.\n` +
                 `Confirm the read when you need the bytes themselves — reading in order to Edit is exactly that case. ${escalationNote(tally)}`,
             };
           }
@@ -1578,9 +1569,20 @@ export function routePreToolUse(toolName, toolInput, projectDir, platform, sessi
     return null;
   }
 
-  // Glob reaches this branch only on hosts whose PreToolUse fires for it;
-  // Claude Code's matcher list does not include Glob today, so nothing here
-  // runs there. Same rule as Grep, and the same reason for it being `ask`.
+  // Same rule as Grep, and the same reason for it being `ask`.
+  //
+  // This branch was unreachable until v1.0.172: `Glob` was missing from
+  // PRE_TOOL_USE_MATCHERS, so Claude Code never delivered a Glob here, and
+  // Codex has no Glob tool at all. Four test files exercised it by calling
+  // this router directly, which is why nothing went red — coverage without
+  // behaviour. It is wired now; the guard that keeps the next branch from
+  // going the same way is tests/hooks/matcher-coverage.test.ts.
+  //
+  // Narrower than Grep on purpose: the unbounded shape asks, and a bounded
+  // Glob returns null rather than riding the escalation ladder. Glob is still
+  // counted in FLOODY_TOOLS, so its bytes push the session tally that
+  // escalates Read and Bash. Whether Glob should also carry its own ladder
+  // step is a D1 question, not a wiring one.
   if (canonical === "Glob") {
     if (grepAskEnabled() && isUnboundedGlob(toolInput)) {
       return {
@@ -1760,6 +1762,75 @@ export function routePreToolUse(toolName, toolInput, projectDir, platform, sessi
 // PreToolUse already owns the before-the-fact half (the guidance nudges) and
 // cannot know what a command will return.
 // ─────────────────────────────────────────────────────────────────────────
+
+// ─────────────────────────────────────────────────────────────────────────
+// The redirect marker: PreToolUse decides, PostToolUse accounts.
+//
+// PreToolUse cannot open SessionDB — loading the native SQLite module breaks
+// the hook's stdout — so a decision that needs to be recorded is written to a
+// file and picked up by the PostToolUse that follows. Two hosts, two pairs of
+// hook scripts, one format; keeping the read and the write here is what stops
+// the pair from drifting apart on one host while working on the other.
+//
+// That drift is not hypothetical: until this was shared, the Codex hooks wrote
+// no marker and read none, so on Codex every refusal was invisible to the byte
+// accounting AND the read-before-edit escape hatch counted as a fresh
+// violation — the self-reinforcing loop, still running on the second host
+// after it had been fixed on the first.
+//
+// Format: `tool:type:bytesAvoided:commandSummary`. Only the first three colons
+// are structural; the summary may contain more (URLs do).
+// ─────────────────────────────────────────────────────────────────────────
+
+function redirectMarkerPath(sessionId) {
+  return resolve(tmpdir(), `context-mode-redirect-${sessionId}.txt`);
+}
+
+/**
+ * Record a decision for the next PostToolUse to account for.
+ * @param {string} sessionId
+ * @param {{tool: string, type: string, bytesAvoided: number, commandSummary?: string}} meta
+ */
+export function writeRedirectMarker(sessionId, meta) {
+  if (!meta) return;
+  try {
+    writeFileSync(
+      redirectMarkerPath(sessionId),
+      `${meta.tool}:${meta.type}:${meta.bytesAvoided}:${String(meta.commandSummary ?? "").slice(0, 200)}`,
+      "utf-8",
+    );
+  } catch { /* best-effort — never block the hook */ }
+}
+
+/**
+ * Read and delete the pending marker.
+ *
+ * Consume-once by design: without the delete, one refusal would be accounted
+ * for again on every later tool call in the session.
+ *
+ * @returns {{tool: string, type: string, bytesAvoided: number, summary: string} | null}
+ */
+export function consumeRedirectMarker(sessionId) {
+  let raw;
+  try {
+    raw = readFileSync(redirectMarkerPath(sessionId), "utf-8").trim();
+    unlinkSync(redirectMarkerPath(sessionId));
+  } catch {
+    return null; // no marker — the phantom-event guard
+  }
+  if (!raw) return null;
+  const i1 = raw.indexOf(":");
+  const i2 = i1 >= 0 ? raw.indexOf(":", i1 + 1) : -1;
+  const i3 = i2 >= 0 ? raw.indexOf(":", i2 + 1) : -1;
+  if (!(i1 > 0 && i2 > i1 && i3 > i2)) return null;
+  const bytesAvoided = Number.parseInt(raw.slice(i2 + 1, i3), 10);
+  return {
+    tool: raw.slice(0, i1),
+    type: raw.slice(i1 + 1, i2),
+    bytesAvoided: Number.isFinite(bytesAvoided) ? bytesAvoided : 0,
+    summary: raw.slice(i3 + 1),
+  };
+}
 
 /**
  * Byte floor under which a native call is not worth mentioning.

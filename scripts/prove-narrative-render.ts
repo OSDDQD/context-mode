@@ -119,6 +119,7 @@ const realBytesLifetime: RealBytesStats = {
   bytesAvoided:    285_000_000,
   bytesReturned:     2_000_000,
   snapshotBytes:     8_261_000,
+  contentBytes:              0,
   totalSavedTokens: 93_315_333, // back-solved to produce the target $1399.73
 };
 const realBytesConversation: RealBytesStats = {
@@ -126,6 +127,7 @@ const realBytesConversation: RealBytesStats = {
   bytesAvoided:   1_400_000,
   bytesReturned:    100_000,
   snapshotBytes:  1_552 * 1024,
+  contentBytes:              0,
   totalSavedTokens: 776_300,
 };
 

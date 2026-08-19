@@ -13,6 +13,8 @@ import {
   readMissedRedirectTally,
   buildMissedRedirectNotice,
   writeUnroutedTally,
+  consumeRedirectMarker,
+  READ_EDIT_EXEMPT_TYPE,
 } from "../core/routing.mjs";
 import { dirname } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -64,14 +66,46 @@ try {
 
   attributeAndInsertEvents(db, sessionId, events, input, projectDir, "PostToolUse", resolveProjectAttributions);
 
+  // ─── Redirect marker: byte accounting, and the escape hatch ───
+  // The other half of the handshake PreToolUse starts. Reading it here is what
+  // makes the read-before-edit retry a non-violation on Codex: without it, the
+  // repeat the refusal promised would be recorded as a fresh unrouted read and
+  // would push the escalation ladder up a step, which is the loop this wave
+  // exists to close.
+  let redirectEmitted = false;
+  try {
+    const marker = consumeRedirectMarker(sessionId);
+    if (marker) {
+      if (marker.type === READ_EDIT_EXEMPT_TYPE) {
+        // Routed, and saved nothing: the bytes really did arrive.
+        redirectEmitted = true;
+      } else if (marker.bytesAvoided > 0) {
+        attributeAndInsertEvents(
+          db,
+          sessionId,
+          [{
+            type: marker.type,
+            category: "redirect",
+            data: `${marker.tool}: ${marker.summary}`,
+            priority: 2,
+            bytes_avoided: marker.bytesAvoided,
+          }],
+          input,
+          projectDir,
+          "PreToolUse",
+          resolveProjectAttributions,
+        );
+        redirectEmitted = true;
+      }
+    }
+  } catch { /* best-effort — never block the hook */ }
+
   // ─── Missed-redirect telemetry + cost notice ───
   // Same classification, same floor and same tally as the Claude Code hook —
   // the whole point of keeping it in hooks/core/routing.mjs is that a second
-  // host costs a call, not a copy. Codex has no PreToolUse redirect marker to
-  // consult, so `routed` stays false: a redirect on Codex is a deny, and a
-  // denied call has no payload to weigh.
+  // host costs a call, not a copy.
   try {
-    const missed = describeMissedRedirect(normalizedInput);
+    const missed = describeMissedRedirect(normalizedInput, { routed: redirectEmitted });
     if (missed) {
       attributeAndInsertEvents(
         db,

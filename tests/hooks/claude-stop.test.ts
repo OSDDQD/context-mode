@@ -1,5 +1,5 @@
 import "../setup-home";
-import { fakeHome } from "../setup-home";
+import { fakeHome } from "../setup-home.js";
 
 import { describe, test, expect, beforeAll, afterAll } from "vitest";
 import { spawnSync } from "node:child_process";

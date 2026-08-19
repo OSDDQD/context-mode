@@ -11,7 +11,10 @@ import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
-const serverPath = join(__dirname, "..", "build", "server.js");
+// The committed bundle, not build/server.js: build/ is a gitignored tsc
+// intermediate that no host loads and nothing keeps in step with src/, so a
+// check pointed at it can pass against code that was deleted from the sources.
+const serverPath = join(__dirname, "..", "server.bundle.mjs");
 const fixtureDir = join(__dirname, "fixtures");
 
 interface JsonRpcRequest {

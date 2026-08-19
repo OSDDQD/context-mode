@@ -1,6 +1,6 @@
 {
   "name": "context-mode",
-  "version": "1.0.171",
+  "version": "1.0.172",
   "fork": {
     "name": "OSDDQD/context-mode",
     "repo": "https://github.com/OSDDQD/context-mode.git",
@@ -8,58 +8,31 @@
     "version": "4"
   },
   "type": "module",
-  "description": "MCP plugin that saves 98% of your context window. Works with Claude Code, Gemini CLI, VS Code Copilot, OpenCode, and Codex CLI. Out-of-context code execution, FTS5 knowledge base, and intent-driven search.",
-  "author": "Mert Koseoğlu",
+  "description": "MCP plugin that saves 98% of your context window. Works with Claude Code and Codex CLI. Out-of-context code execution, FTS5 knowledge base, and intent-driven search.",
+  "author": "OSDDQD",
+  "contributors": [
+    "Mert Koseoğlu (https://github.com/mksglu)"
+  ],
   "license": "Elastic-2.0",
   "keywords": [
     "mcp",
     "model-context-protocol",
     "claude",
     "claude-code",
-    "gemini-cli",
-    "vscode-copilot",
-    "opencode",
-    "openclaw",
     "codex-cli",
     "context-window",
     "sandbox",
     "code-execution",
     "fts5",
-    "bm25",
-    "pi-package"
+    "bm25"
   ],
   "repository": {
     "type": "git",
-    "url": "https://github.com/mksglu/context-mode"
+    "url": "https://github.com/OSDDQD/context-mode"
   },
-  "homepage": "https://github.com/mksglu/context-mode#readme",
-  "pi": {
-    "extensions": [
-      "./build/adapters/pi/extension.js"
-    ],
-    "skills": [
-      "./skills",
-      "./platform-skills"
-    ]
-  },
-  "openclaw": {
-    "extensions": [
-      "./build/adapters/openclaw/plugin.js"
-    ]
-  },
-  "omp": {
-    "name": "context-mode",
-    "description": "Save 98% of your context window in OMP — sandboxed code execution, FTS5 search, hard-block curl/wget, session continuity across compaction.",
-    "extensions": [
-      "./build/adapters/omp/plugin.js"
-    ]
-  },
-  "bugs": "https://github.com/mksglu/context-mode/issues",
-  "main": "./build/adapters/opencode/plugin.js",
+  "homepage": "https://github.com/OSDDQD/context-mode#readme",
+  "bugs": "https://github.com/OSDDQD/context-mode/issues",
   "exports": {
-    ".": "./build/adapters/opencode/plugin.js",
-    "./plugin": "./build/adapters/opencode/plugin.js",
-    "./openclaw": "./build/adapters/openclaw/plugin.js",
     "./cli": "./cli.bundle.mjs"
   },
   "bin": {
@@ -73,13 +46,10 @@
     "cli.bundle.mjs",
     "bin",
     "skills",
-    "platform-skills",
     "agents",
     "commands",
     ".claude-plugin",
     ".codex-plugin",
-    ".openclaw-plugin",
-    "openclaw.plugin.json",
     "start.mjs",
     "scripts/postinstall.mjs",
     "scripts/heal-better-sqlite3.mjs",
@@ -95,12 +65,13 @@
     "bundle": "esbuild src/server.ts --bundle --platform=node --target=node18 --format=esm --outfile=server.bundle.mjs --external:better-sqlite3 --external:@ff-labs/fff-node --external:turndown --external:turndown-plugin-gfm --external:@mixmark-io/domino --minify && esbuild src/cli.ts --bundle --platform=node --target=node18 --format=esm --outfile=cli.bundle.mjs --external:better-sqlite3 --external:@ff-labs/fff-node --minify && esbuild src/session/extract.ts --bundle --platform=node --target=node18 --format=esm --outfile=hooks/session-extract.bundle.mjs --minify && esbuild src/session/snapshot.ts --bundle --platform=node --target=node18 --format=esm --outfile=hooks/session-snapshot.bundle.mjs --minify && esbuild src/session/db.ts --bundle --platform=node --target=node18 --format=esm --outfile=hooks/session-db.bundle.mjs --external:better-sqlite3 --minify && esbuild src/session/project-attribution.ts --bundle --platform=node --target=node18 --format=esm --outfile=hooks/session-attribution.bundle.mjs --minify && esbuild src/security.ts --bundle --platform=node --target=node18 --format=esm --outfile=hooks/security.bundle.mjs --minify",
     "sync-upstream": "node scripts/sync-upstream.mjs",
     "version-sync": "node scripts/version-sync.mjs",
-    "version": "node scripts/version-sync.mjs && git add package.json .claude-plugin/plugin.json .claude-plugin/marketplace.json .cursor-plugin/plugin.json .codex-plugin/plugin.json .openclaw-plugin/openclaw.plugin.json .openclaw-plugin/package.json openclaw.plugin.json .pi/extensions/context-mode/package.json configs/antigravity-cli/plugin.json configs/copilot-cli/.github/plugin/plugin.json",
+    "version": "node scripts/version-sync.mjs && git add package.json .claude-plugin/plugin.json .claude-plugin/marketplace.json .codex-plugin/plugin.json",
     "prepublishOnly": "npm run build",
     "dev": "npx tsx src/server.ts",
     "setup": "npx tsx src/cli.ts setup",
     "doctor": "npx tsx src/cli.ts doctor",
     "typecheck": "tsc --noEmit",
+    "typecheck:tests": "tsc -p tsconfig.test.json --noEmit",
     "pretest": "npm run build",
     "test": "vitest run",
     "test:watch": "vitest",
@@ -108,7 +79,6 @@
     "test:use-cases": "npx tsx tests/use-cases.ts",
     "test:compare": "npx tsx tests/context-comparison.ts",
     "test:ecosystem": "npx tsx tests/ecosystem-benchmark.ts",
-    "install:openclaw": "node -e \"if(process.platform==='win32'){console.error('OpenClaw install requires bash (Git Bash or WSL)');process.exit(1)}else{require('child_process').execSync('bash scripts/install-openclaw-plugin.sh',{stdio:'inherit'})}\"",
     "postinstall": "node scripts/postinstall.mjs"
   },
   "dependencies": {

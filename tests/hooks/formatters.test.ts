@@ -5,14 +5,6 @@ import { join } from "node:path";
 
 // Dynamic import for .mjs modules
 let claudeCodeFormat: (decision: unknown) => unknown;
-let geminiCliFormat: (decision: unknown) => unknown;
-let vscodeCopilotFormat: (decision: unknown) => unknown;
-let cursorFormat: (decision: unknown) => unknown;
-// Kimi has no standalone formatter — same convention as codex; the only
-// source of truth is the central registry in hooks/core/formatters.mjs.
-let kimiFormat: (decision: unknown) => unknown;
-// agy has no standalone formatter either — same central-registry convention.
-let agyFormat: (decision: unknown) => unknown;
 // codex has no standalone formatter — central registry only. It takes an
 // optional capability hint ({ codexSupportsRewrite }) threaded by the hook (#845).
 // eslint-disable-next-line @typescript-eslint/no-explicit-any -- loose test seams over .mjs
@@ -27,20 +19,7 @@ beforeAll(async () => {
   const ccMod = await import("../../hooks/formatters/claude-code.mjs");
   claudeCodeFormat = ccMod.formatDecision;
 
-  const gemMod = await import("../../hooks/formatters/gemini-cli.mjs");
-  geminiCliFormat = gemMod.formatDecision;
-
-  const vscMod = await import("../../hooks/formatters/vscode-copilot.mjs");
-  vscodeCopilotFormat = vscMod.formatDecision;
-
-  const cursorMod = await import("../../hooks/formatters/cursor.mjs");
-  cursorFormat = cursorMod.formatDecision;
-
   const coreMod = await import("../../hooks/core/formatters.mjs");
-  kimiFormat = (decision: unknown) =>
-    coreMod.formatDecision("kimi", decision as { action: string } | null);
-  agyFormat = (decision: unknown) =>
-    coreMod.formatDecision("antigravity-cli", decision as { action: string } | null);
   codexFormat = (decision: unknown, opts?: Record<string, unknown>) =>
     coreMod.formatDecision("codex", decision as { action: string } | null, opts);
 
@@ -200,188 +179,6 @@ describe("formatDecision", () => {
     });
   });
 
-  // ─── Gemini CLI formatter ──────────────────────────────
-
-  describe("gemini-cli formatter", () => {
-    it("formats deny with decision:'deny' (NOT permissionDecision)", () => {
-      const result = geminiCliFormat(denyDecision) as Record<string, unknown>;
-      expect(result).not.toBeNull();
-
-      const output = result.hookSpecificOutput as Record<string, unknown>;
-      expect(output.decision).toBe("deny");
-      expect(output.reason).toBe(denyDecision.reason);
-      // Should NOT have permissionDecision
-      expect(output).not.toHaveProperty("permissionDecision");
-    });
-
-    it("returns null for ask (no ask concept)", () => {
-      const result = geminiCliFormat(askDecision);
-      expect(result).toBeNull();
-    });
-
-    it("formats modify with hookSpecificOutput.tool_input", () => {
-      const result = geminiCliFormat(modifyDecision) as Record<string, unknown>;
-      expect(result).not.toBeNull();
-
-      const output = result.hookSpecificOutput as Record<string, unknown>;
-      expect(output.tool_input).toEqual(modifyDecision.updatedInput);
-      // Should NOT have updatedInput
-      expect(output).not.toHaveProperty("updatedInput");
-    });
-
-    it("formats context with hookSpecificOutput.additionalContext", () => {
-      const result = geminiCliFormat(contextDecision) as Record<string, unknown>;
-      expect(result).not.toBeNull();
-
-      const output = result.hookSpecificOutput as Record<string, unknown>;
-      expect(output.additionalContext).toBe(contextDecision.additionalContext);
-    });
-  });
-
-  // ─── VS Code Copilot formatter ─────────────────────────
-
-  describe("vscode-copilot formatter", () => {
-    it("formats deny with permissionDecision (flat, not wrapped)", () => {
-      const result = vscodeCopilotFormat(denyDecision) as Record<string, unknown>;
-      expect(result).not.toBeNull();
-
-      // Flat — NOT nested inside hookSpecificOutput
-      expect(result.permissionDecision).toBe("deny");
-      expect(result.reason).toBe(denyDecision.reason);
-      expect(result).not.toHaveProperty("hookSpecificOutput");
-    });
-
-    it("formats ask with permissionDecision:'ask'", () => {
-      const result = vscodeCopilotFormat(askDecision) as Record<string, unknown>;
-      expect(result).not.toBeNull();
-
-      expect(result.permissionDecision).toBe("ask");
-      expect(result).not.toHaveProperty("hookSpecificOutput");
-    });
-
-    it("formats modify with hookSpecificOutput + hookEventName", () => {
-      const result = vscodeCopilotFormat(modifyDecision) as Record<string, unknown>;
-      expect(result).not.toBeNull();
-
-      expect(result.hookEventName).toBe("PreToolUse");
-      expect(result.hookSpecificOutput).toEqual(modifyDecision.updatedInput);
-      // Should NOT have permissionDecision
-      expect(result).not.toHaveProperty("permissionDecision");
-    });
-
-    it("formats context with hookSpecificOutput + hookEventName", () => {
-      const result = vscodeCopilotFormat(contextDecision) as Record<string, unknown>;
-      expect(result).not.toBeNull();
-
-      expect(result.hookEventName).toBe("PreToolUse");
-      const output = result.hookSpecificOutput as Record<string, unknown>;
-      expect(output.additionalContext).toBe(contextDecision.additionalContext);
-    });
-  });
-
-  describe("cursor formatter", () => {
-    it("formats deny with permission and user_message", () => {
-      const result = cursorFormat(denyDecision) as Record<string, unknown>;
-      expect(result.permission).toBe("deny");
-      expect(result.user_message).toBe(denyDecision.reason);
-    });
-
-    it("formats ask with permission:'ask'", () => {
-      const result = cursorFormat(askDecision) as Record<string, unknown>;
-      expect(result.permission).toBe("ask");
-    });
-
-    it("formats modify with updated_input", () => {
-      const result = cursorFormat(modifyDecision) as Record<string, unknown>;
-      expect(result.updated_input).toEqual(modifyDecision.updatedInput);
-    });
-
-    it("formats context with agent_message", () => {
-      const result = cursorFormat(contextDecision) as Record<string, unknown>;
-      expect(result.agent_message).toBe(contextDecision.additionalContext);
-    });
-  });
-
-  // ─── Kimi formatter (deny-only — mirrors codex precedent #225 / 607dc70) ──
-
-  describe("kimi formatter", () => {
-    it("formats deny with hookSpecificOutput.permissionDecision", () => {
-      const result = kimiFormat(denyDecision) as Record<string, unknown>;
-      expect(result).not.toBeNull();
-
-      const output = result.hookSpecificOutput as Record<string, unknown>;
-      expect(output.hookEventName).toBe("PreToolUse");
-      expect(output.permissionDecision).toBe("deny");
-      expect(output.permissionDecisionReason).toBe(denyDecision.reason);
-    });
-
-    // Kimi's hook runner parses ONLY permissionDecision === "deny".
-    // Emitting ask / allow+updatedInput / additionalContext would create
-    // capability overclaims the host silently drops — return null instead.
-    // Evidence: refs/platforms/kimi-code/packages/agent-core/src/session/
-    //   hooks/runner.ts:36-39,162-178 and types.ts:28-37
-    //   refs/platforms/kimi-cli/src/kimi_cli/hooks/runner.py:62-89
-    it("returns null for ask (Kimi runner ignores permissionDecision !== 'deny')", () => {
-      const result = kimiFormat(askDecision);
-      expect(result).toBeNull();
-    });
-
-    it("returns null for modify (Kimi runner has no updatedInput channel)", () => {
-      const result = kimiFormat(modifyDecision);
-      expect(result).toBeNull();
-    });
-
-    it("returns null for context (Kimi HookResult has no additionalContext field)", () => {
-      const result = kimiFormat(contextDecision);
-      expect(result).toBeNull();
-    });
-
-    it("returns null for null decision", () => {
-      const result = kimiFormat(null);
-      expect(result).toBeNull();
-    });
-  });
-
-  // ─── Antigravity CLI (agy) formatter ───────────────────
-  // agy honors a NATIVE top-level decision contract {decision:"deny"|"ask",reason}
-  // (not Claude's hookSpecificOutput) and ignores PreToolUse additionalContext —
-  // so context/modify collapse to an enforceable deny.
-  describe("antigravity-cli formatter", () => {
-    it("formats deny as a top-level {decision:'deny',reason}", () => {
-      expect(agyFormat(denyDecision)).toEqual({ decision: "deny", reason: denyDecision.reason });
-    });
-
-    it("formats ask with a fallback reason when the decision carries none", () => {
-      expect(agyFormat(askDecision)).toEqual({ decision: "ask", reason: "Action requires user confirmation" });
-    });
-
-    it("formats ask with its own reason when present", () => {
-      expect(agyFormat({ action: "ask", reason: "confirm first" })).toEqual({ decision: "ask", reason: "confirm first" });
-    });
-
-    it("collapses modify to a deny that surfaces the routing guidance from the echo payload", () => {
-      const result = agyFormat(modifyDecision) as Record<string, unknown>;
-      expect(result.decision).toBe("deny");
-      // Per-tool guidance surfaced verbatim, not a generic line.
-      expect(String(result.reason)).toContain("context-mode: curl/wget blocked");
-    });
-
-    it("falls back to a generic redirect when the modify command is not an echo payload", () => {
-      const result = agyFormat({ action: "modify", updatedInput: { command: "weird shape" } }) as Record<string, unknown>;
-      expect(result.decision).toBe("deny");
-      expect(String(result.reason)).toContain("context-mode: redirected");
-    });
-
-    it("collapses context to a deny (agy ignores PreToolUse additionalContext)", () => {
-      const result = agyFormat(contextDecision) as Record<string, unknown>;
-      expect(result.decision).toBe("deny");
-      expect(String(result.reason)).toContain("execute_file");
-    });
-
-    it("returns null for a null decision", () => {
-      expect(agyFormat(null)).toBeNull();
-    });
-  });
 });
 
 // ─── Codex formatter (#845) ──────────────────────────────
@@ -448,9 +245,28 @@ describe("codex formatter (#845)", () => {
       expect(out.hookSpecificOutput.permissionDecisionReason).toBe(denyDecision.reason);
     });
 
-    it("ask is dropped — Codex rejects permissionDecision:ask", () => {
-      expect(codexFormat(askDecision)).toBeNull();
+    // Codex rejects permissionDecision:"ask" outright, so the prompt itself
+    // cannot be asked for. Dropping the whole decision, though, put a hole in
+    // the escalation ladder — a session that had earned a confirmation got
+    // less back than one that had only earned an advisory. Where the build
+    // accepts additionalContext, the same words are said as guidance instead.
+    it("ask carries its reason as guidance where the build accepts it", () => {
+      expect(
+        codexFormat({ action: "ask", reason: "why this is being asked" }, { codexSupportsRewrite: true }),
+      ).toEqual({
+        hookSpecificOutput: {
+          hookEventName: "PreToolUse",
+          additionalContext: "why this is being asked",
+        },
+      });
+    });
+
+    it("ask still drops on a build that cannot take it, and when there is nothing to say", () => {
+      // The second case is the security-policy ask, which carries no reason:
+      // there is no sentence to re-say, so the decision drops as it always did.
+      expect(codexFormat({ action: "ask", reason: "why" })).toBeNull();
       expect(codexFormat(askDecision, { codexSupportsRewrite: true })).toBeNull();
+      expect(codexFormat(askDecision)).toBeNull();
     });
   });
 });

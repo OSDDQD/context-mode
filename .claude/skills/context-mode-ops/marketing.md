@@ -45,16 +45,20 @@ Before writing, read these files and use ONLY verified numbers:
 
 | Data point | Source |
 |-----------|--------|
-| Total users | `stats.json` field `message` |
-| npm installs | `stats.json` field `npm` |
-| Marketplace installs | `stats.json` field `marketplace` |
 | Current version | `package.json` field `version` |
-| Platform count | `src/adapters/detect.ts` (count platforms in validPlatforms array) |
-| Adapter count | `tests/adapters/` (count test files) |
-| GitHub stars | `gh api repos/mksglu/context-mode --jq '.stargazers_count'` |
-| GitHub forks | `gh api repos/mksglu/context-mode --jq '.forks_count'` |
+| Platform count | `src/adapters/detect.ts` (the `validPlatforms` array) |
+| Adapter count | `src/adapters/` (count adapter directories) |
+| GitHub stars | `gh api repos/OSDDQD/context-mode --jq '.stargazers_count'` |
+| GitHub forks | `gh api repos/OSDDQD/context-mode --jq '.forks_count'` |
 | Open issues | `gh issue list --state open --json number --jq 'length'` |
 | Recent release | `gh release list --limit 1` |
+
+Install and user counts have no source in this fork. `stats.json` — which fed
+the three rows that used to sit at the top of this table — was a scheduled
+job's dump of upstream's npm and marketplace numbers, committed into the tree
+every six hours; it is gone. Do not substitute upstream's figures: the rule
+above says every number must come from a real source, and someone else's
+install count is not a source for this package's.
 
 If you cannot verify a number, do not use it.
 

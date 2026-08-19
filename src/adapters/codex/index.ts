@@ -27,13 +27,12 @@ import {
 import { resolve, dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { BaseAdapter, resolveContextModeDataRoot } from "../base.js";
+import { resolveContextModeDataRoot } from "../data-root.js";
 import { hashProjectDirCanonical } from "../../session/db.js";
 import { resolveCodexConfigDir } from "./paths.js";
 
 import {
   type HookAdapter,
-  type HookParadigm,
   type PlatformCapabilities,
   type DiagnosticResult,
   type PreToolUseEvent,
@@ -295,16 +294,14 @@ function parseTomlQuotedString(raw: string): string | null {
 // Adapter implementation
 // ─────────────────────────────────────────────────────────
 
-export class CodexAdapter extends BaseAdapter implements HookAdapter {
+export class CodexAdapter implements HookAdapter {
   private readonly codexPluginListRunner: CodexVersionRunner;
 
   constructor(options: CodexAdapterOptions = {}) {
-    super([".codex"]);
     this.codexPluginListRunner = options.codexPluginListRunner ?? execFileSync;
   }
 
   readonly name = "Codex CLI";
-  readonly paradigm: HookParadigm = "json-stdio";
 
   readonly capabilities: PlatformCapabilities = {
     preToolUse: true,

@@ -64,13 +64,12 @@ npm version patch
 This single command does ALL of the following automatically:
 1. Bumps `package.json` version (e.g., 1.0.56 → 1.0.57)
 2. Triggers `version` lifecycle hook → runs `scripts/version-sync.mjs`
-3. `version-sync.mjs` syncs version to ALL 6 manifest files:
+3. `version-sync.mjs` syncs the version to the three manifests in its
+   `TARGETS` list — that list is the single source of truth, and the
+   `--check` mode plus `tests/scripts/version-sync.test.ts` derive from it:
    - `.claude-plugin/plugin.json`
    - `.claude-plugin/marketplace.json`
-   - `.openclaw-plugin/openclaw.plugin.json`
-   - `.openclaw-plugin/package.json`
-   - `openclaw.plugin.json`
-   - `.pi/extensions/context-mode/package.json`
+   - `.codex-plugin/plugin.json`
 4. Stages the manifest files via `git add`
 5. Creates a git commit and `v{VERSION}` tag
 

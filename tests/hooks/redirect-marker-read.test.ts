@@ -100,10 +100,17 @@ describe("D2 Phase 4 — read-redirected marker pattern", () => {
     try { rmSync(fakeProject, { recursive: true, force: true }); } catch {}
   });
 
-  beforeEach(() => {
+  beforeEach(async () => {
     writeFileSync(mcpSentinel, String(process.pid));
     const m = resolve(tmpdir(), `context-mode-redirect-${sessionId}.txt`);
-    try { unlinkSync(m); } catch {}
+    try { unlinkSync(m); } catch { /* no marker from a previous case */ }
+    // Each case must start from a session that has not yet been refused
+    // anything: a refusal arms the read-before-edit retry window for that
+    // path, and the next read of it is then a promised repeat rather than a
+    // fresh large read. Without this, 4.4 arms the window and 4.5 measures the
+    // wrong branch.
+    const { resetGuidanceThrottle } = await import("../../hooks/core/routing.mjs");
+    resetGuidanceThrottle(sessionId);
   });
 
   afterEach(() => {

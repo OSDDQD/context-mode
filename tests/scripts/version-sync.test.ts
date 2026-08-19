@@ -39,14 +39,6 @@ describe("scripts/version-sync.mjs targets", () => {
     expect(SCRIPT_SRC).toContain('".codex-plugin/plugin.json"');
   });
 
-  it("includes configs/antigravity-cli/plugin.json (agy native bundle)", () => {
-    expect(SCRIPT_SRC).toContain('"configs/antigravity-cli/plugin.json"');
-  });
-
-  it("includes configs/copilot-cli/.github/plugin/plugin.json (Copilot CLI bundle)", () => {
-    expect(SCRIPT_SRC).toContain('"configs/copilot-cli/.github/plugin/plugin.json"');
-  });
-
   it("does NOT include .codex-plugin/marketplace.json (Codex never reads that path)", () => {
     // Codex CLI's MARKETPLACE_MANIFEST_RELATIVE_PATHS constant
     // (refs/platforms/codex/codex-rs/core-plugins/src/marketplace.rs:21)
@@ -66,14 +58,6 @@ describe("package.json `version` script `git add` list", () => {
     expect(PKG_JSON.scripts.version).toContain(".codex-plugin/plugin.json");
   });
 
-  it("includes configs/antigravity-cli/plugin.json (agy native bundle)", () => {
-    expect(PKG_JSON.scripts.version).toContain("configs/antigravity-cli/plugin.json");
-  });
-
-  it("includes configs/copilot-cli/.github/plugin/plugin.json (Copilot CLI bundle)", () => {
-    expect(PKG_JSON.scripts.version).toContain("configs/copilot-cli/.github/plugin/plugin.json");
-  });
-
   it("does NOT include .codex-plugin/marketplace.json (file is removed — Codex never reads it)", () => {
     expect(PKG_JSON.scripts.version).not.toContain(".codex-plugin/marketplace.json");
   });
@@ -89,7 +73,10 @@ describe("version-sync TARGETS is the single source of truth (#768)", () => {
   // second list to forget.
   it("exports a non-empty TARGETS array", () => {
     expect(Array.isArray(TARGETS)).toBe(true);
-    expect(TARGETS.length).toBeGreaterThan(0);
+    // Every other assertion in this file iterates TARGETS, so an empty list
+    // would turn the whole suite green by having nothing to check. Three is
+    // the post-15a02cf floor: the two Claude manifests plus the Codex one.
+    expect(TARGETS.length).toBeGreaterThanOrEqual(3);
   });
 
   it("stages EVERY target in the npm `version` lifecycle `git add` list", () => {

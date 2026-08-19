@@ -85,88 +85,6 @@ export const formatters = {
     }),
   },
 
-  "gemini-cli": {
-    deny: (reason) => ({ decision: "deny", reason }),
-    ask: () => null, // Gemini CLI has no "ask" concept
-    modify: (updatedInput) => ({
-      hookSpecificOutput: { tool_input: updatedInput },
-    }),
-    context: (additionalContext) => ({
-      hookSpecificOutput: { additionalContext },
-    }),
-  },
-
-  "vscode-copilot": {
-    deny: (reason) => ({
-      permissionDecision: "deny",
-      permissionDecisionReason: reason,
-    }),
-    ask: () => ({
-      permissionDecision: "ask",
-    }),
-    modify: (updatedInput) => ({
-      hookSpecificOutput: {
-        hookEventName: "PreToolUse",
-        permissionDecision: "allow",
-        permissionDecisionReason: "Routed to context-mode sandbox",
-        updatedInput,
-      },
-    }),
-    context: (additionalContext) => ({
-      hookSpecificOutput: {
-        hookEventName: "PreToolUse",
-        additionalContext,
-      },
-    }),
-  },
-
-  // GitHub Copilot CLI uses top-level decision fields (NOT the VS Code
-  // hookSpecificOutput wrapper) — matches CopilotCliAdapter.format*Response.
-  "copilot-cli": {
-    deny: (reason) => ({
-      permissionDecision: "deny",
-      permissionDecisionReason: reason,
-    }),
-    // Carry the reason on `ask` too, so the user sees WHY confirmation is
-    // requested (Copilot CLI honors permissionDecisionReason; matches the
-    // adapter's formatPreToolUseResponse ask branch). Fall back when the
-    // routing decision carries no reason, so the prompt is never bare.
-    ask: (reason) => ({
-      permissionDecision: "ask",
-      permissionDecisionReason: reason ?? "Action requires user confirmation",
-    }),
-    modify: (updatedInput) => ({
-      modifiedArgs: updatedInput,
-    }),
-    context: (additionalContext) => ({
-      additionalContext,
-    }),
-  },
-
-  "jetbrains-copilot": {
-    deny: (reason) => ({
-      permissionDecision: "deny",
-      permissionDecisionReason: reason,
-    }),
-    ask: () => ({
-      permissionDecision: "ask",
-    }),
-    modify: (updatedInput) => ({
-      hookSpecificOutput: {
-        hookEventName: "PreToolUse",
-        permissionDecision: "allow",
-        permissionDecisionReason: "Routed to context-mode sandbox",
-        updatedInput,
-      },
-    }),
-    context: (additionalContext) => ({
-      hookSpecificOutput: {
-        hookEventName: "PreToolUse",
-        additionalContext,
-      },
-    }),
-  },
-
   "codex": {
     deny: (reason) => ({
       hookSpecificOutput: {
@@ -176,8 +94,18 @@ export const formatters = {
       },
     }),
     // Codex still rejects permissionDecision:"ask" in PreToolUse (verified
-    // against codex-cli 0.141.0 output_parser.rs). Keep dropping it.
-    ask: () => null,
+    // against codex-cli 0.141.0 output_parser.rs), so the confirmation itself
+    // cannot be asked for here. Dropping the whole decision, though, put a
+    // hole in the escalation ladder: a session that had earned a confirmation
+    // got less back than one that had only earned an advisory, so severity
+    // fell as behaviour worsened. Where this build accepts additionalContext,
+    // say the same thing as guidance instead — weaker than a prompt, but never
+    // weaker than the step below it. A reasonless ask (the security-policy
+    // path) still drops, as it always has: there is nothing to say.
+    ask: (reason, { codexSupportsRewrite } = {}) =>
+      reason && codexSupportsRewrite
+        ? { hookSpecificOutput: { hookEventName: "PreToolUse", additionalContext: reason } }
+        : null,
     // #845: modern Codex (>= 0.141.0) honors permissionDecision:"allow" +
     // updatedInput (command rewrite). Emit it when the running Codex supports
     // it; otherwise FAIL CLOSED — turn the redirect into an enforceable deny
@@ -225,93 +153,7 @@ export const formatters = {
       },
     }),
   },
-
-  "kimi": {
-    // Kimi Code / Kimi CLI hook runners parse ONLY `permissionDecision === "deny"`
-    // for structured PreToolUse output. Anything else (ask / allow+updatedInput /
-    // additionalContext) is silently dropped, and the host's HookResult type has
-    // no `additionalContext` field at all.
-    //   Evidence: refs/platforms/kimi-code/packages/agent-core/src/session/hooks/
-    //     runner.ts:36-39,162-178  (HookSpecificOutputSchema + structuredOutput())
-    //   Evidence: refs/platforms/kimi-code/packages/agent-core/src/session/hooks/
-    //     types.ts:28-37            (HookResult has no additionalContext)
-    //   Evidence: refs/platforms/kimi-cli/src/kimi_cli/hooks/runner.py:62-89
-    //     (Python runtime behaves identically)
-    // This mirrors the codex precedent established at commit 607dc70 (#225),
-    // where the same upstream "deny-only" parser forced ask/modify/context to
-    // return null in the formatter rather than emit fields the host ignores.
-    deny: (reason) => ({
-      hookSpecificOutput: {
-        hookEventName: "PreToolUse",
-        permissionDecision: "deny",
-        permissionDecisionReason: reason,
-      },
-    }),
-    ask: () => null,     // Kimi runner ignores permissionDecision !== "deny"
-    modify: () => null,  // Kimi runner has no updatedInput channel
-    context: () => null, // Kimi HookResult has no additionalContext field
-  },
-
-  "antigravity-cli": {
-    // agy PreToolUse accepts the Claude-compatible top-level decision shape.
-    // agy 1.0.6 does NOT honor PreToolUse additionalContext (verified by
-    // transcript probe), so context guidance must become an enforceable deny
-    // or it disappears and the native tool runs unchanged.
-    deny: (reason) => ({ decision: "deny", reason }),
-    // Carry a fallback reason on `ask` so a security-policy ask (routing emits
-    // {action:"ask"} with no reason) never shows a bare, unexplained prompt.
-    ask: (reason) => ({ decision: "ask", reason: reason ?? "Action requires user confirmation" }),
-    // agy cannot modify tool args, so a routing `modify` becomes a deny. Surface
-    // the per-tool redirect guidance routing carried in `updatedInput.command`
-    // (an `echo "<guidance>"` payload that already uses agy's context-mode/<tool>
-    // surface) instead of a generic line; fall back to the generic redirect.
-    modify: (updatedInput) => {
-      const cmd = updatedInput?.command ?? updatedInput?.CommandLine ?? "";
-      const m = String(cmd).match(/^echo\s+"([\s\S]*)"\s*$/);
-      const guidance = m ? m[1].replace(/\\(["\\])/g, "$1") : "";
-      return {
-        decision: "deny",
-        reason:
-          guidance ||
-          "context-mode: redirected. Use the context-mode MCP tools (ctx_execute / ctx_fetch_and_index / ctx_search) so raw bytes stay out of the conversation.",
-      };
-    },
-    context: (additionalContext) => ({
-      decision: "deny",
-      reason: agyContextReason(additionalContext),
-    }),
-  },
-
-  "cursor": {
-    deny: (reason) => ({
-      permission: "deny",
-      user_message: reason,
-    }),
-    ask: () => ({
-      permission: "ask",
-    }),
-    modify: (updatedInput) => ({
-      updated_input: updatedInput,
-    }),
-    context: (additionalContext) => ({
-      agent_message: additionalContext,
-    }),
-  },
 };
-
-// Keep in sync with the identical agyContextReason in
-// src/adapters/antigravity-cli/index.ts: this bundled .mjs formatter (runtime
-// hook path) and the TS adapter are separate layers; the text must not drift.
-function agyContextReason(additionalContext) {
-  const text = String(additionalContext ?? "")
-    .replace(/<\/?context_guidance>/g, " ")
-    .replace(/<\/?tip>/g, " ")
-    .replace(/\s+/g, " ")
-    .trim();
-  return text
-    ? `context-mode: use the context-mode MCP tools instead of this native tool. ${text}`
-    : "context-mode: use the context-mode MCP tools instead of this native tool so raw bytes stay out of the conversation.";
-}
 
 // #845: routing wraps redirect guidance as `echo "<guidance>"`. Unwrap a command
 // that is exactly `echo "<inner>"` (with optional surrounding whitespace) and
@@ -349,7 +191,7 @@ function unescapeDquote(s) {
 }
 
 // When Codex cannot rewrite the command we surface that guidance as the deny
-// reason instead (mirrors the claude-code / antigravity-cli echo extraction).
+// reason instead (mirrors the claude-code echo extraction).
 function codexRedirectReason(command) {
   const inner = unwrapEcho(command);
   if (inner !== null) return unescapeDquote(inner);
@@ -389,9 +231,17 @@ export function formatDecision(platform, decision, opts = {}) {
 
   switch (decision.action) {
     case "deny": return fmt.deny(decision.reason);
-    // Pass the reason to ask() too — platforms whose ask formatter ignores it
-    // (legacy `ask: () => …`) are unaffected; copilot-cli surfaces it.
-    case "ask": return fmt.ask(decision.reason);
+    // Pass the reason and the capability hints to ask() too: Claude Code
+    // surfaces the reason in the prompt, and Codex — which cannot show a
+    // prompt at all — needs the hints to decide whether it can say it as
+    // guidance instead of dropping it.
+    case "ask": return fmt.ask(decision.reason, opts);
+    // "allow": routing decided the call goes through untouched, but attached a
+    // redirectMeta so PostToolUse knows it was already accounted for (the
+    // read-before-edit retry). There is nothing to tell the host — the marker
+    // is written by the hook before this call — so the response is a
+    // passthrough, exactly as if routing had returned null.
+    case "allow": return null;
     case "modify": return fmt.modify(decision.updatedInput, opts);
     case "context": return fmt.context(decision.additionalContext, opts);
     default: return null;

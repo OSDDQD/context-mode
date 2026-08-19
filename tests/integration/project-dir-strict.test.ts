@@ -1,10 +1,11 @@
 /**
  * Issue #545 — server.ts getProjectDir() passes strictPlatform to resolveProjectDir.
  *
- * Without strict mode, a foreign workspace var (e.g. CLAUDE_PROJECT_DIR
- * leaked into Pi's MCP child env) wins the cascade and Pi's sessions write
- * into Claude Code's project. Slice 5 wires `strictPlatform: detectPlatform().platform`
- * for ALL adapters as defense in depth.
+ * Without strict mode, a foreign workspace var wins the cascade and the
+ * session writes into another host's project. The original report was
+ * CLAUDE_PROJECT_DIR leaking into Pi's MCP child; the shape survives the
+ * fifteen-host removal because a leaked variable does not need its host to
+ * still exist — a shell that ran Cursor last week still exports CURSOR_CWD.
  *
  * This integration test exercises the wiring by importing the real resolver
  * and asserting that each platform's strict-mode call rejects foreign env
@@ -20,8 +21,10 @@ import { workspaceEnvVarsFor } from "../../src/adapters/detect.js";
 import { getProjectDir } from "../../src/server.js";
 import type { PlatformId } from "../../src/adapters/types.js";
 
-// Build a foreign-leak env: every workspace var from every adapter set to
-// a leak path. Used as the adversarial baseline for each platform.
+// Build a foreign-leak env: a workspace var set to a leak path. The list is
+// deliberately WIDER than the supported platforms — the variables of removed
+// hosts are exactly what is still lying around in real shells, and strict mode
+// has to ignore them now that no registry row claims them.
 function makeForeignLeakEnv(): Record<string, string> {
   return {
     CLAUDE_PROJECT_DIR: "/leak/claude",
@@ -47,30 +50,13 @@ describe("server getProjectDir wiring — strictPlatform for all adapters (issue
     }
   });
 
-  // Adapters with at least one workspace var.
-  const platformsWithOwnVar: ReadonlyArray<PlatformId> = [
-    "claude-code",
-    "gemini-cli",
-    "cursor",
-    "vscode-copilot",
-    "jetbrains-copilot",
-    "opencode",
-    "qwen-code",
-    "pi",
-    "omp",
-  ];
+  // Adapters with at least one workspace var. One left: claude-code.
+  const platformsWithOwnVar: ReadonlyArray<PlatformId> = ["claude-code"];
 
   // Adapters with no workspace var (rely on universal escape hatch / pwd / cwd).
-  const platformsNoOwnVar: ReadonlyArray<PlatformId> = [
-    "codex",
-    "kilo",
-    "kiro",
-    "zed",
-    "antigravity",
-    "antigravity-cli",
-    "copilot-cli",
-    "openclaw",
-  ];
+  // Codex is the case that makes this branch load-bearing rather than
+  // theoretical: it passes cwd in hook stdin and declares no env var at all.
+  const platformsNoOwnVar: ReadonlyArray<PlatformId> = ["codex"];
 
   for (const platform of platformsWithOwnVar) {
     it(`platform=${platform}: strict mode prefers own workspace var over foreign leaks`, () => {

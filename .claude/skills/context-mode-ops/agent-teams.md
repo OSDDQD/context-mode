@@ -70,17 +70,7 @@ Spawn the **pair** (Architect + Staff Engineer) for each affected platform:
 | Platform | Architect Prompt | Staff Engineer Prompt |
 |----------|-----------------|----------------------|
 | **Claude Code** | "You are the Claude Code Architect. Review changes to `src/adapters/claude-code/`, hooks, plugin.json, marketplace.json. Validate CLAUDE_PROJECT_DIR and CLAUDE_SESSION_ID env handling." | "You are the Claude Code Staff Engineer. Implement fixes in the claude-code adapter. Run `npx vitest run tests/adapters/claude-code.test.ts`." |
-| **Gemini CLI** | "You are the Gemini CLI Architect. Review `src/adapters/gemini-cli/`, BeforeTool/AfterTool hook format, settings.json schema. Validate GEMINI_PROJECT_DIR and GEMINI_CLI env handling." | "You are the Gemini CLI Staff Engineer. Implement fixes in the gemini-cli adapter. Run `npx vitest run tests/adapters/gemini-cli.test.ts`." |
-| **OpenCode** | "You are the OpenCode Architect. Review `src/adapters/opencode/`, AGENTS.md injection, config paths. Validate OPENCODE and OPENCODE_PID env handling." | "You are the OpenCode Staff Engineer. Implement fixes in the opencode adapter. Run `npx vitest run tests/adapters/opencode.test.ts`." |
-| **OpenClaw** | "You are the OpenClaw Architect. Review `src/adapters/openclaw/`, openclaw.plugin.json, thinking block handling. Validate OPENCLAW_HOME and OPENCLAW_CLI env handling." | "You are the OpenClaw Staff Engineer. Implement fixes in the openclaw adapter. Run `npx vitest run tests/adapters/openclaw.test.ts` and `tests/plugins/openclaw.test.ts`." |
-| **Kilo** | "You are the Kilo Architect. Review `src/adapters/kilo/`, config at `~/.config/kilo/`. Validate KILO and KILO_PID env handling." | "You are the Kilo Staff Engineer. Implement fixes in the kilo adapter. Run `npx vitest run tests/adapters/kilo.test.ts`." |
 | **Codex** | "You are the Codex Architect. Review `src/adapters/codex/`. Validate CODEX_CI and CODEX_THREAD_ID env handling." | "You are the Codex Staff Engineer. Implement fixes in the codex adapter. Run `npx vitest run tests/adapters/codex.test.ts`." |
-| **VS Code Copilot** | "You are the VS Code Copilot Architect. Review `src/adapters/vscode-copilot/`, `.vscode/mcp.json` format, `.github/hooks/` structure. Validate VSCODE_PID and VSCODE_CWD env handling." | "You are the VS Code Copilot Staff Engineer. Implement fixes. Run `npx vitest run tests/adapters/vscode-copilot.test.ts`." |
-| **Cursor** | "You are the Cursor Architect. Review `src/adapters/cursor/`, `.cursor/mcp.json` format. Validate CURSOR_TRACE_ID and CURSOR_CLI env handling." | "You are the Cursor Staff Engineer. Implement fixes. Run `npx vitest run tests/adapters/cursor.test.ts`." |
-| **Antigravity** | "You are the Antigravity Architect. Review `src/adapters/antigravity/`." | "You are the Antigravity Staff Engineer. Implement fixes. Run `npx vitest run tests/adapters/antigravity.test.ts`." |
-| **Kiro** | "You are the Kiro Architect. Review `src/adapters/kiro/`, `~/.kiro/` config." | "You are the Kiro Staff Engineer. Implement fixes. Run `npx vitest run tests/adapters/kiro.test.ts`." |
-| **Pi** | "You are the Pi Architect. Review `src/adapters/pi/`, `.pi/extensions/` structure." | "You are the Pi Staff Engineer. Implement fixes. Run `npx vitest run tests/adapters/pi.test.ts`." |
-| **Zed** | "You are the Zed Architect. Review `src/adapters/zed/`, `~/.config/zed/` settings." | "You are the Zed Staff Engineer. Implement fixes. Run `npx vitest run tests/adapters/zed.test.ts`." |
 
 ### Domain Agents (Spawned When Domain Is Affected)
 
@@ -193,17 +183,7 @@ To determine which agents to spawn, scan the issue/PR for:
 // Adapter detection
 const adapterKeywords = {
   "claude-code": ["claude", "claude code", "CLAUDE_", "plugin marketplace", ".claude/"],
-  "gemini-cli": ["gemini", "GEMINI_", ".gemini/", "BeforeTool", "AfterTool"],
-  "opencode": ["opencode", "OPENCODE", "AGENTS.md", ".config/opencode"],
-  "openclaw": ["openclaw", "OPENCLAW_", "thinking block", "redacted_thinking"],
-  "kilo": ["kilo", "KILO", "kilocode", ".config/kilo"],
   "codex": ["codex", "CODEX_", "codex-cli", ".codex/"],
-  "vscode-copilot": ["vscode", "copilot", "VSCODE_", ".vscode/mcp.json"],
-  "cursor": ["cursor", "CURSOR_", ".cursor/"],
-  "antigravity": ["antigravity"],
-  "kiro": ["kiro", ".kiro/"],
-  "pi": ["pi adapter", ".pi/extensions"],
-  "zed": ["zed", ".config/zed"],
 };
 
 // Domain detection

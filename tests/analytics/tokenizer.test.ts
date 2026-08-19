@@ -92,8 +92,14 @@ const TRUTH: Record<SampleName, Record<TokenizerEncoding, number>> = {
   mixed:        { o200k_base:  25, cl100k_base:  30 },
 };
 
-/** Fixed host so the suite does not depend on which agent runs it. */
-const HOST = { platform: "claude-code" } as const;
+/**
+ * Fixed context so the suite does not depend on which agent runs it. It used
+ * to pin `platform: "claude-code"`, back when the estimate could be routed by
+ * host id. The tokenizer no longer reads a host at all — both live ones price
+ * against tiktoken vocabularies — so the independence this bought is now
+ * structural, and the object is empty on purpose rather than by omission.
+ */
+const HOST = {} as const;
 
 function relErr(estimate: number, truth: number): number {
   return Math.abs(estimate / truth - 1);
@@ -338,29 +344,56 @@ describe("resolveEncoding", () => {
     }
   });
 
-  it("resolves clientInfo.name through the adapter client map", () => {
-    // Same map detect.ts uses — a Gemini client name must land on the Gemini
-    // correction without the caller having to know the platform id.
-    expect(familyCorrection({ client: "gemini-cli-mcp-client" })).toBeCloseTo(1.1, 5);
-    expect(familyCorrection({ client: "claude-code" })).toBe(1);
+  it("does not depend on which host is running", () => {
+    // What stood here: a `clientInfo.name` route through the adapter client
+    // map, and below it a platform-id route into a Gemini set. Both survived
+    // the host removal as lookups nothing could hit — an empty
+    // LEGACY_ENCODING_PLATFORMS, a GEMINI_PLATFORMS holding three ids
+    // detectPlatform() can no longer return, and a qwen client-name branch
+    // producing a PlatformId nothing consumed — and the only thing exercising
+    // them was this file, passing ids that cannot occur. Host identity is no
+    // longer an input; the estimate answers to the model id and an explicit
+    // override, and this is the assertion that says so.
+    for (const platform of ["claude-code", "codex", "gemini-cli", "not-a-host"]) {
+      process.env.CONTEXT_MODE_PLATFORM = platform;
+      __resetTokenizerForTests();
+      expect(resolveEncoding(), platform).toBe("o200k_base");
+      expect(familyCorrection(), platform).toBe(1);
+    }
+    delete process.env.CONTEXT_MODE_PLATFORM;
   });
 });
 
 describe("familyCorrection", () => {
   it("applies 1.1× for the Gemini family, which is not a tiktoken BPE", () => {
-    expect(familyCorrection({ platform: "gemini-cli" })).toBeCloseTo(1.1, 5);
-    expect(familyCorrection({ platform: "antigravity" })).toBeCloseTo(1.1, 5);
+    // The model route is the live one and outlives the hosts: a Gemini model
+    // reached through an API from Claude Code still needs the correction,
+    // because the correction is about the tokenizer, not about the host.
     expect(familyCorrection({ model: "gemini-2.5-flash" })).toBeCloseTo(1.1, 5);
     expect(familyCorrection({ model: "gemma-3-27b" })).toBeCloseTo(1.1, 5);
+    expect(familyCorrection({ model: "text-bison-001" })).toBeCloseTo(1.1, 5);
   });
 
-  it("leaves every other host at 1×", () => {
+  it("leaves the tiktoken families at 1×", () => {
     expect(familyCorrection(HOST)).toBe(1);
-    expect(familyCorrection({ platform: "codex" })).toBe(1);
+    expect(familyCorrection({ model: "claude-opus-5" })).toBe(1);
+    expect(familyCorrection({ model: "gpt-4o" })).toBe(1);
   });
 
-  it("raises the token count and lowers bytes-per-token for Gemini hosts", () => {
-    const gemini = { platform: "gemini-cli" } as const;
+  it("reads PI_CONTEXT_MODE_MODEL_ID when the caller names no model", () => {
+    // Kept deliberately when Pi went: the same operator-set variable still
+    // names the model in the ctx_stats price line, so honouring it in one
+    // reading and ignoring it in the other would be the inconsistency.
+    process.env.PI_CONTEXT_MODE_MODEL_ID = "gemini-2.5-pro";
+    __resetTokenizerForTests();
+    expect(familyCorrection()).toBeCloseTo(1.1, 5);
+    // An explicit model still wins over the environment.
+    expect(familyCorrection({ model: "claude-opus-5" })).toBe(1);
+    delete process.env.PI_CONTEXT_MODE_MODEL_ID;
+  });
+
+  it("raises the token count and lowers bytes-per-token for Gemini models", () => {
+    const gemini = { model: "gemini-2.5-flash" } as const;
     expect(countTokens(SAMPLES.englishProse, gemini))
       .toBeGreaterThan(countTokens(SAMPLES.englishProse, HOST));
     expect(bytesPerToken(gemini)).toBeLessThan(bytesPerToken(HOST));
@@ -466,10 +499,12 @@ describe("cache", () => {
     expect(legacy).not.toBe(heuristic);
   });
 
-  it("does not serve a Claude answer to a Gemini host", () => {
+  it("does not serve a tiktoken answer for a Gemini model", () => {
+    // The cache key has to carry the family correction, or the first caller's
+    // answer is handed to the next one with a different tokenizer.
     __resetTokenizerForTests();
     const claude = countTokens(SAMPLES.englishProse, HOST);
-    const gemini = countTokens(SAMPLES.englishProse, { platform: "gemini-cli" });
+    const gemini = countTokens(SAMPLES.englishProse, { model: "gemini-2.5-flash" });
     expect(gemini).toBeGreaterThan(claude);
   });
 

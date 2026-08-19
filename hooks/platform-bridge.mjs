@@ -293,7 +293,7 @@ export async function maybeForward(event, platform, opts = {}) {
       },
       // Canonical envelope (PRD §5.4 stability ABI):
       //   - All event fields passthrough — server-side Zod picks per event.type
-      //   - `platform` envelope metadata (claude-code, cursor, ...)
+      //   - `platform` envelope metadata (claude-code, codex)
       //   - `ts` defaulted from event or wall clock
       // Hand-mapping individual fields here is the anti-pattern: every new
       // event field forced a bridge release. With this envelope, new fields

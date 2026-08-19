@@ -305,11 +305,15 @@ describe("statusline.mjs — multi-adapter aggregation", () => {
   beforeEach(() => {
     home = mkdtempSync(join(tmpdir(), "ctx-statusline-multi-"));
     // Mirror real adapter layout: ~/.claude/context-mode/sessions for
-    // claude-code, ~/.gemini/context-mode/sessions for gemini-cli, etc.
+    // claude-code, ~/.codex/context-mode/sessions for codex. These are the two
+    // rows `enumerateAdapterDirs` walks; the second dir used to be ~/.gemini,
+    // which stopped being an adapter the walk knows about — with only one
+    // known dir seeded there is no second adapter to aggregate across, and the
+    // "across N tools" case silently stopped being exercised.
     claudeRoot = join(home, ".claude", "context-mode");
     claudeSessionsDir = join(claudeRoot, "sessions");
     mkdirSync(claudeSessionsDir, { recursive: true });
-    mkdirSync(join(home, ".gemini", "context-mode", "sessions"), {
+    mkdirSync(join(home, ".codex", "context-mode", "sessions"), {
       recursive: true,
     });
   });
@@ -380,7 +384,7 @@ describe("statusline.mjs — multi-adapter aggregation", () => {
   // tripped on Windows runner load (CI #401 observed 186s with retry x2).
   test("renders 'across N tools' when 2+ real adapters detected", { timeout: STATUSLINE_SQLITE_TIMEOUT_MS }, () => {
     seedRealAdapter(join(home, ".claude", "context-mode", "sessions"), "claude");
-    seedRealAdapter(join(home, ".gemini", "context-mode", "sessions"), "gemini");
+    seedRealAdapter(join(home, ".codex", "context-mode", "sessions"), "codex");
 
     const { stdout } = runStatusline({
       // statusline must use HOME for multi-adapter walk

@@ -32,14 +32,44 @@ describe("guidance throttle", () => {
   });
 
   it("Bash: first call returns guidance, second returns null", () => {
-    // npm install / find are unbounded — the structurally-bounded allowlist
-    // (#463) does NOT short-circuit them, so the throttle semantics still
-    // apply: guidance once, then null.
+    // npm install / cat of a log are unbounded — the structurally-bounded
+    // allowlist (#463) does NOT short-circuit them, so the throttle semantics
+    // still apply: guidance once, then null.
     const r1 = routePreToolUse("Bash", { command: "npm install" }, PROJECT_DIR);
     const r2 = routePreToolUse("Bash", { command: "cat /var/log/syslog" }, PROJECT_DIR);
 
     expect(r1?.action).toBe("context");
     expect(r2).toBeNull();
+  });
+
+  it("a command on the heavy list still takes the advisory branch once the list is off", () => {
+    // Recovered coverage. `npm test` and `find /` used to be this suite's
+    // canonical unbounded commands; they now match the heavy-output deny list
+    // and were swapped out of every fixture, which quietly removed the only
+    // proof that the advisory branch still handles them. It has to: the deny
+    // list is the operator's, and emptying it must return those commands to
+    // the behaviour they had before the list existed, not to silence.
+    const saved = process.env.CONTEXT_MODE_BASH_DENY_COMMANDS;
+    process.env.CONTEXT_MODE_BASH_DENY_COMMANDS = "";
+    try {
+      for (const command of ["npm test", "find / -name '*.log'", "docker logs api", "git log -p"]) {
+        resetGuidanceThrottle();
+        const decision = routePreToolUse("Bash", { command }, PROJECT_DIR);
+        expect(decision?.action, `${command} with the list off`).toBe("context");
+        expect(decision?.additionalContext).toContain("ctx_batch_execute");
+      }
+    } finally {
+      if (saved === undefined) delete process.env.CONTEXT_MODE_BASH_DENY_COMMANDS;
+      else process.env.CONTEXT_MODE_BASH_DENY_COMMANDS = saved;
+    }
+  });
+
+  it("and is refused again the moment the list is back", () => {
+    // The other half: the swap of the fixtures was correct precisely because
+    // these commands are now refused by default. Asserted here so the pair
+    // reads as one decision rather than two unexplained edits.
+    resetGuidanceThrottle();
+    expect(routePreToolUse("Bash", { command: "npm test" }, PROJECT_DIR)?.action).toBe("deny");
   });
 
   it("Grep: first call returns guidance, second returns null", () => {

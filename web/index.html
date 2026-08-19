@@ -4,8 +4,8 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Context Mode — The other half of the context problem</title>
-<meta name="description" content="An open-source MCP plugin (300,000+ developers) and a commercial Platform that builds Solutions on top. context-mode keeps raw data out of the LLM context window. Insight surfaces what your team is doing with the saved tokens.">
-<meta name="keywords" content="context mode, ai coding context, mcp plugin, claude code, cursor, copilot, ai engineering insight, ai engineering platform">
+<meta name="description" content="An open-source MCP plugin and a commercial Platform that builds Solutions on top. context-mode keeps raw data out of the LLM context window. Insight surfaces what your team is doing with the saved tokens.">
+<meta name="keywords" content="context mode, ai coding context, mcp plugin, claude code, codex cli, ai engineering insight, ai engineering platform">
 <link rel="canonical" href="https://context-mode.com/">
 <link rel="icon" type="image/svg+xml" href="/favicon.svg">
 <link rel="icon" type="image/png" sizes="32x32" href="/favicon-32.png">
@@ -13,7 +13,7 @@
 
 <meta property="og:type" content="website">
 <meta property="og:title" content="Context Mode — The other half of the context problem">
-<meta property="og:description" content="An MCP plugin 300,000+ developers run locally. A Platform with Solutions for engineering orgs. One name, two surfaces.">
+<meta property="og:description" content="An MCP plugin that runs locally. A Platform with Solutions for engineering orgs. One name, two surfaces.">
 <meta property="og:url" content="https://context-mode.com/">
 <meta property="og:site_name" content="Context Mode">
 <meta property="og:image" content="https://context-mode.com/og/master.png">
@@ -254,13 +254,6 @@ code{font-family:var(--mono);font-size:.9em;background:var(--bg-code);color:var(
 @media(max-width:900px){.dual{grid-template-columns:1fr}}
 
 /* ── Trust strip ── */
-.trust{padding:36px 0;background:var(--bg-alt);border-top:1px solid var(--border-light);border-bottom:1px solid var(--border-light)}
-.trust-grid{display:flex;flex-direction:column;gap:18px}
-.trust-headline{font-family:var(--sans);font-size:1.15rem;font-weight:600;color:var(--ink);line-height:1.4;letter-spacing:-.01em;max-width:880px}
-.trust-headline strong{font-style:normal;font-family:var(--mono);font-size:.95rem;color:var(--accent-dark);font-weight:600;background:var(--accent-light);padding:2px 8px;border-radius:4px;margin-right:6px}
-.trust-brands{display:flex;flex-wrap:wrap;gap:8px 22px;align-items:center}
-.trust-brands span{font-size:14px;font-weight:600;color:var(--text-3);transition:color .2s;cursor:default}
-.trust-brands span:hover{color:var(--ink)}
 
 /* ── Story layout ── */
 .story{display:grid;grid-template-columns:280px 1fr;gap:48px;align-items:start;margin-top:36px}
@@ -458,7 +451,7 @@ footer{padding:64px 0 40px;text-align:center;background:var(--bg-alt);border-top
         </div>
       </div>
       <a href="/context-saving" class="topnav-item">Context Saving</a>
-      <a href="https://github.com/mksglu/context-mode" class="topnav-item">GitHub</a>
+      <a href="https://github.com/OSDDQD/context-mode" class="topnav-item">GitHub</a>
       <a href="https://discord.gg/DCN9jUgN5v" class="topnav-item">Discord</a>
     </div>
     <div class="topnav-cta">
@@ -471,16 +464,15 @@ footer{padding:64px 0 40px;text-align:center;background:var(--bg-alt);border-top
 <section class="hero">
   <div class="hero-inner wrap rev">
     <h1 class="cm-master">Context Mode<span class="cursor"></span></h1>
-    <p class="hero-tag"><span class="dot"></span>open-source plugin · commercial platform · <span id="stat-tag-users">331,200+</span> developers</p>
+    <p class="hero-tag"><span class="dot"></span>open-source plugin · commercial platform · runs entirely on your machine</p>
     <p class="hero-sub">
       <strong>The other half of the context problem</strong> — for developers and for engineering orgs.
       An MCP plugin that keeps raw data out of the LLM context window. A Platform that surfaces <em>what your team is doing</em>
       with the saved tokens. Same engine, two surfaces, your choice.
     </p>
     <div class="hero-stats">
-      <div class="hero-stat"><div class="val" id="stat-users">331.2k+</div><div class="lbl">developers</div></div>
-      <div class="hero-stat"><div class="val">17</div><div class="lbl">AI adapters</div></div>
-      <div class="hero-stat"><div class="val">#1</div><div class="lbl">on Hacker News</div></div>
+      <div class="hero-stat"><div class="val">2</div><div class="lbl">AI adapters</div></div>
+      <div class="hero-stat"><div class="val">98%</div><div class="lbl">context reduction</div></div>
       <div class="hero-stat"><div class="val" id="stat-stars">—</div><div class="lbl">GitHub stars</div></div>
       <div class="hero-stat"><div class="val">OSS</div><div class="lbl">ELv2 license</div></div>
     </div>
@@ -533,20 +525,6 @@ footer{padding:64px 0 40px;text-align:center;background:var(--bg-alt);border-top
   </div>
 </section>
 
-<!-- ═══════════════════════════════════════ TRUST STRIP ═══════════════════════════════════════ -->
-<section class="trust">
-  <div class="wrap">
-    <div class="trust-grid rev">
-      <div class="trust-headline">
-        <strong>Used across teams at</strong> companies that ship AI-assisted code every day.
-      </div>
-      <div class="trust-brands">
-        <span>Microsoft</span><span>Google</span><span>Meta</span><span>ByteDance</span><span>Red Hat</span><span>GitHub</span><span>Stripe</span><span>Datadog</span><span>IBM</span><span>NVIDIA</span><span>Supabase</span><span>Amazon</span><span>Canva</span><span>Notion</span><span>Salesforce</span><span>Hasura</span><span>Cursor</span><span>Vercel</span><span>Anthropic</span>
-      </div>
-    </div>
-  </div>
-</section>
-
 <!-- ═══════════════════════════════════════ PLUGIN STORY ═══════════════════════════════════════ -->
 <section class="chapter">
   <div class="wrap">
@@ -570,12 +548,12 @@ footer{padding:64px 0 40px;text-align:center;background:var(--bg-alt);border-top
           <strong>30× fewer tokens.</strong>
         </p>
         <p class="body">
-          Works on <em>17 adapters</em> — Claude Code, Cursor, Copilot, Codex, Gemini CLI, JetBrains Copilot, GitHub Copilot CLI, Antigravity CLI, Kiro,
-          and 8 more. <strong><span class="js-user-count">331,200+</span> developers</strong> run it locally today.
+          Works on <em>two hosts</em> — Claude Code and Codex CLI. Runs locally, on your machine, with no account
+          and no network.
         </p>
         <div style="display:flex;gap:.625rem;margin-top:1.5rem;flex-wrap:wrap">
           <a href="/context-saving" class="btn btn-primary" style="background:var(--accent-dev);color:#fff">Full story · Context Saving →</a>
-          <a href="https://github.com/mksglu/context-mode" class="btn btn-ghost">View on GitHub</a>
+          <a href="https://github.com/OSDDQD/context-mode" class="btn btn-ghost">View on GitHub</a>
         </div>
       </div>
     </div>
@@ -755,7 +733,7 @@ footer{padding:64px 0 40px;text-align:center;background:var(--bg-alt);border-top
         <span class="badge badge-dev"><span class="dot"></span>Dev surface · Free</span>
         <div class="surface-mark"><span class="prompt">$</span>context<span class="dash">-</span>mode<span class="cursor"></span></div>
         <p class="surface-desc">
-          <strong>The plugin.</strong> Runs locally. No account, no cloud, no network. The free workflow <span class="js-user-count">331,200+</span> developers ship code with every day.
+          <strong>The plugin.</strong> Runs locally. No account, no cloud, no network. The free workflow you ship code with every day.
         </p>
       </div>
       <div class="surface">
@@ -805,11 +783,11 @@ footer{padding:64px 0 40px;text-align:center;background:var(--bg-alt);border-top
     <span style="color:var(--text-4);margin:0 8px">·</span>
     <a href="/insight">Platform</a>
     <span style="color:var(--text-4);margin:0 8px">·</span>
-    <a href="https://github.com/mksglu/context-mode">GitHub</a>
+    <a href="https://github.com/OSDDQD/context-mode">GitHub</a>
     <span style="color:var(--text-4);margin:0 8px">·</span>
     <a href="https://discord.gg/DCN9jUgN5v">Discord</a>
   </p>
-  <p class="footer-meta">Built by <a href="https://mksg.lu" style="color:var(--text-3)">B. Mert Köseoğlu</a></p>
+  <p class="footer-meta">Originally built by <a href="https://mksg.lu" style="color:var(--text-3)">B. Mert Köseoğlu</a> · this fork maintained by <a href="https://github.com/OSDDQD" style="color:var(--text-3)">OSDDQD</a></p>
   <p class="footer-addr">MKSF LTD · Suite 8805 5 Brayford Square · London E1 0SG · United Kingdom</p>
 </footer>
 
@@ -818,36 +796,9 @@ footer{padding:64px 0 40px;text-align:center;background:var(--bg-alt);border-top
 const o=new IntersectionObserver(e=>{e.forEach(x=>{if(x.isIntersecting){x.target.classList.add('v');o.unobserve(x.target);}});},{threshold:.06,rootMargin:'0px 0px -20px 0px'});
 document.querySelectorAll('.rev').forEach(e=>o.observe(e));
 
-// Dynamic stats from context-mode/main/stats.json — single source of truth
-function toLongForm(short){
-  if(!short) return null;
-  const m = String(short).match(/^([\d.]+)\s*([kKmM])?\+?$/);
-  if(!m) return short;
-  let num = parseFloat(m[1]);
-  if(m[2] && /k/i.test(m[2])) num *= 1000;
-  else if(m[2] && /m/i.test(m[2])) num *= 1000000;
-  return Math.round(num).toLocaleString('en-US') + '+';
-}
-
-fetch('https://raw.githubusercontent.com/mksglu/context-mode/main/stats.json')
-  .then(r=>r.json())
-  .then(d=>{
-    if(!d) return;
-    if(d.message){
-      const heroStat=document.getElementById('stat-users');
-      if(heroStat) heroStat.textContent=d.message;
-    }
-    const longForm=d.message_long||d.users_long||toLongForm(d.message);
-    if(longForm){
-      document.querySelectorAll('.js-user-count').forEach(el=>{el.textContent=longForm});
-      const tag=document.getElementById('stat-tag-users');
-      if(tag) tag.textContent=longForm;
-    }
-  })
-  .catch(()=>{});
 
 // GitHub stars
-fetch('https://api.github.com/repos/mksglu/context-mode')
+fetch('https://api.github.com/repos/OSDDQD/context-mode')
   .then(r=>r.json())
   .then(d=>{
     if(d && d.stargazers_count){

@@ -6,7 +6,7 @@ import { join } from "node:path";
 
 import { searchAutoMemory } from "../../src/search/auto-memory.js";
 import { CodexAdapter } from "../../src/adapters/codex/index.js";
-import { GeminiCLIAdapter } from "../../src/adapters/gemini-cli/index.js";
+import { ClaudeCodeAdapter } from "../../src/adapters/claude-code/index.js";
 
 /**
  * Slice 4 — searchAutoMemory accepts an adapter and uses its
@@ -113,23 +113,40 @@ describe("searchAutoMemory adapter dispatch", () => {
     expect(results[0].source).toContain("AGENTS.override.md");
   });
 
-  it("uses Gemini convention (GEMINI.md) when GeminiCLIAdapter is supplied", () => {
+  // This case used to supply GeminiCLIAdapter and assert GEMINI.md, proving
+  // the lookup was table-driven rather than an AGENTS.md special case. Gemini
+  // CLI went with the other fourteen hosts in 15a02cf, and with it the only
+  // convention that was neither CLAUDE.md nor AGENTS.md. What still exists is
+  // the other half of the same property: a second adapter, a second file
+  // name, chosen by the adapter and not by searchAutoMemory. Dropping the
+  // case entirely would have left the Claude convention asserted nowhere but
+  // in the no-adapter fallback, where CLAUDE.md is also the hardcoded default
+  // — a test that cannot tell dispatch from coincidence.
+  it("uses the Claude convention (CLAUDE.md) when ClaudeCodeAdapter is supplied", () => {
     writeFileSync(
-      join(projectDir, "GEMINI.md"),
-      "Gemini rules: invoke EPSILON-GEMINI-FLAG on every read.\n",
+      join(projectDir, "CLAUDE.md"),
+      "Claude rules: invoke EPSILON-CLAUDE-FLAG on every read.\n",
+      "utf-8",
+    );
+    // AGENTS.md sits next to it: if the adapter were ignored and the codex
+    // list applied anyway, this file would win and the assertion would fail.
+    writeFileSync(
+      join(projectDir, "AGENTS.md"),
+      "Codex rules: invoke EPSILON-CLAUDE-FLAG on every read.\n",
       "utf-8",
     );
 
     const results = searchAutoMemory(
-      ["EPSILON-GEMINI-FLAG"],
+      ["EPSILON-CLAUDE-FLAG"],
       5,
       projectDir,
       undefined,
-      new GeminiCLIAdapter(),
+      new ClaudeCodeAdapter(),
     );
 
     expect(results.length).toBeGreaterThan(0);
-    expect(results[0].source).toContain("GEMINI.md");
+    expect(results.some((r) => r.source.includes("CLAUDE.md"))).toBe(true);
+    expect(results.every((r) => !r.source.includes("AGENTS.md"))).toBe(true);
   });
 });
 

@@ -34,7 +34,7 @@ Thanks for reporting this — it helped improve context-mode for everyone!
 Hey @{author}, thanks for opening this!
 
 To investigate further, could you share:
-- Your platform (Claude Code / Gemini CLI / OpenCode / etc.)
+- Your platform (Claude Code or Codex CLI)
 - context-mode version (`ctx doctor` or `npm list -g context-mode`)
 - The exact command or action that triggers this
 - Any error messages or unexpected output

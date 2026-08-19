@@ -1,8 +1,13 @@
 /**
  * adapters/claude-code — Claude Code platform adapter.
  *
- * Extends ClaudeCodeBaseAdapter (shared wire-protocol parse/format methods)
- * with Claude Code-specific configuration, diagnostics, and upgrade logic.
+ * Implements HookAdapter directly: the Claude Code wire protocol (JSON on
+ * stdin/stdout, `permissionDecision` to block, `updatedInput` to rewrite args,
+ * `updatedMCPToolOutput` to rewrite output, `additionalContext` at the response
+ * root) is spelled out here rather than in a shared base. The base existed
+ * because Qwen Code spoke the identical protocol and differed only in its
+ * project-dir env var; with Qwen gone there was one subclass, and an abstract
+ * `projectDirEnvVar` standing in for the constant "CLAUDE_PROJECT_DIR".
  *
  * Claude Code hook specifics:
  *   - Session ID: transcript_path UUID > session_id > CLAUDE_SESSION_ID > ppid
@@ -19,21 +24,29 @@ import {
   readdirSync,
   chmodSync,
   accessSync,
+  copyFileSync,
   mkdirSync,
   constants,
 } from "node:fs";
 import { resolve, join } from "node:path";
 import { homedir } from "node:os";
 
-import { ClaudeCodeBaseAdapter, type ClaudeCodeWireInput } from "../claude-code-base.js";
-import { resolveContextModeDataRoot } from "../base.js";
+import { resolveContextModeDataRoot } from "../data-root.js";
 import { resolveClaudeConfigDir } from "../../util/claude-config.js";
+import { hashProjectDirCanonical } from "../../session/db.js";
 import { checkPluginCacheIntegritySync } from "../../util/plugin-cache-integrity.js";
 
 import {
   buildHookRuntimeCommand,
   type HookAdapter,
-  type HookParadigm,
+  type PreToolUseEvent,
+  type PostToolUseEvent,
+  type PreCompactEvent,
+  type SessionStartEvent,
+  type PreToolUseResponse,
+  type PostToolUseResponse,
+  type PreCompactResponse,
+  type SessionStartResponse,
   type PlatformCapabilities,
   type DiagnosticResult,
   type HookRegistration,
@@ -57,14 +70,19 @@ import {
 // Adapter implementation
 // ─────────────────────────────────────────────────────────
 
-export class ClaudeCodeAdapter extends ClaudeCodeBaseAdapter implements HookAdapter {
-  constructor() {
-    super([".claude"]);
-  }
+/** Raw shape of every Claude Code hook payload on stdin. */
+export interface ClaudeCodeWireInput {
+  tool_name?: string;
+  tool_input?: Record<string, unknown>;
+  tool_output?: string;
+  is_error?: boolean;
+  session_id?: string;
+  transcript_path?: string;
+  source?: string;
+}
 
+export class ClaudeCodeAdapter implements HookAdapter {
   readonly name = "Claude Code";
-  readonly paradigm: HookParadigm = "json-stdio";
-  protected readonly projectDirEnvVar = "CLAUDE_PROJECT_DIR";
 
   readonly capabilities: PlatformCapabilities = {
     preToolUse: true,
@@ -75,6 +93,113 @@ export class ClaudeCodeAdapter extends ClaudeCodeBaseAdapter implements HookAdap
     canModifyOutput: true,
     canInjectSessionContext: true,
   };
+
+  // ── Input parsing (Claude Code wire format) ────────────
+  //
+  // `projectDir` falls back to `process.cwd()` because a hook can be invoked
+  // by a host build that does not export CLAUDE_PROJECT_DIR; cwd is then the
+  // project the host launched in.
+
+  parsePreToolUseInput(raw: unknown): PreToolUseEvent {
+    const input = raw as ClaudeCodeWireInput;
+    return {
+      toolName: input.tool_name ?? "",
+      toolInput: input.tool_input ?? {},
+      sessionId: this.extractSessionId(input),
+      projectDir: process.env.CLAUDE_PROJECT_DIR ?? process.cwd(),
+      raw,
+    };
+  }
+
+  parsePostToolUseInput(raw: unknown): PostToolUseEvent {
+    const input = raw as ClaudeCodeWireInput;
+    return {
+      toolName: input.tool_name ?? "",
+      toolInput: input.tool_input ?? {},
+      toolOutput: input.tool_output,
+      isError: input.is_error,
+      sessionId: this.extractSessionId(input),
+      projectDir: process.env.CLAUDE_PROJECT_DIR ?? process.cwd(),
+      raw,
+    };
+  }
+
+  parsePreCompactInput(raw: unknown): PreCompactEvent {
+    const input = raw as ClaudeCodeWireInput;
+    return {
+      sessionId: this.extractSessionId(input),
+      projectDir: process.env.CLAUDE_PROJECT_DIR ?? process.cwd(),
+      raw,
+    };
+  }
+
+  parseSessionStartInput(raw: unknown): SessionStartEvent {
+    const input = raw as ClaudeCodeWireInput;
+    const rawSource = input.source ?? "startup";
+
+    let source: SessionStartEvent["source"];
+    switch (rawSource) {
+      case "compact":
+        source = "compact";
+        break;
+      case "resume":
+        source = "resume";
+        break;
+      case "clear":
+        source = "clear";
+        break;
+      default:
+        source = "startup";
+    }
+
+    return {
+      sessionId: this.extractSessionId(input),
+      source,
+      projectDir: process.env.CLAUDE_PROJECT_DIR ?? process.cwd(),
+      raw,
+    };
+  }
+
+  // ── Response formatting (Claude Code wire format) ──────
+
+  formatPreToolUseResponse(response: PreToolUseResponse): unknown {
+    if (response.decision === "deny") {
+      return {
+        permissionDecision: "deny",
+        reason: response.reason ?? "Blocked by context-mode hook",
+      };
+    }
+    if (response.decision === "modify" && response.updatedInput) {
+      return { updatedInput: response.updatedInput };
+    }
+    if (response.decision === "context" && response.additionalContext) {
+      return { additionalContext: response.additionalContext };
+    }
+    if (response.decision === "ask") {
+      return { permissionDecision: "ask" };
+    }
+    // "allow" — return undefined for passthrough
+    return undefined;
+  }
+
+  formatPostToolUseResponse(response: PostToolUseResponse): unknown {
+    const result: Record<string, unknown> = {};
+    if (response.additionalContext) {
+      result.additionalContext = response.additionalContext;
+    }
+    if (response.updatedOutput) {
+      result.updatedMCPToolOutput = response.updatedOutput;
+    }
+    return Object.keys(result).length > 0 ? result : undefined;
+  }
+
+  formatPreCompactResponse(response: PreCompactResponse): unknown {
+    return response.context ?? "";
+  }
+
+  formatSessionStartResponse(response: SessionStartResponse): unknown {
+    return response.context ?? "";
+  }
 
   // ── Configuration ──────────────────────────────────────
 
@@ -90,7 +215,7 @@ export class ClaudeCodeAdapter extends ClaudeCodeBaseAdapter implements HookAdap
    * `resolveConfigDir`). Non-tilde values are run through `resolve()` to
    * normalize relative paths to absolute against cwd; the hook helper
    * intentionally leaves them raw, but the adapter contract guarantees an
-   * absolute path (BaseAdapter.getConfigDir docstring).
+   * absolute path (the HookAdapter.getConfigDir contract).
    *
    * Issue #460 round-3: routed through the canonical
    * `resolveClaudeConfigDir` util so server, CLI, security, and adapter
@@ -115,6 +240,45 @@ export class ClaudeCodeAdapter extends ClaudeCodeBaseAdapter implements HookAdap
 
   getSettingsPath(): string {
     return join(this.getConfigDir(), "settings.json");
+  }
+
+  /** Claude Code reads CLAUDE.md as the project instruction file. */
+  getInstructionFiles(): string[] {
+    return ["CLAUDE.md"];
+  }
+
+  /**
+   * `<configDir>/memory/<projectHash>`. Always absolute — getConfigDir is.
+   *
+   * Issue #649: when `CONTEXT_MODE_DATA_DIR` is set, memory follows storage to
+   * `<DATA_DIR>/context-mode/memory/` since persistent memory is
+   * context-mode-owned state, not platform-native config.
+   *
+   * Issue #663: when `projectDir` is supplied the path is scoped via
+   * `hashProjectDirCanonical(projectDir)` so two projects running in parallel
+   * never share auto-memory contents. When omitted (legacy callers), the
+   * unscoped path is returned for backwards compatibility.
+   */
+  getMemoryDir(projectDir?: string): string {
+    const override = resolveContextModeDataRoot();
+    const base = override
+      ? join(override, "context-mode", "memory")
+      : join(this.getConfigDir(), "memory");
+    if (!projectDir) return base;
+    return join(base, hashProjectDirCanonical(projectDir));
+  }
+
+  /** Copy settings.json to settings.json.bak; null when there is nothing to copy. */
+  backupSettings(): string | null {
+    const settingsPath = this.getSettingsPath();
+    try {
+      accessSync(settingsPath, constants.R_OK);
+      const backupPath = settingsPath + ".bak";
+      copyFileSync(settingsPath, backupPath);
+      return backupPath;
+    } catch {
+      return null;
+    }
   }
 
   generateHookConfig(pluginRoot: string): HookRegistration {
@@ -674,7 +838,7 @@ export class ClaudeCodeAdapter extends ClaudeCodeBaseAdapter implements HookAdap
   // ── Session ID extraction ───────────────────────────────
   // Claude Code priority: transcript_path UUID > session_id > CLAUDE_SESSION_ID > ppid
 
-  protected extractSessionId(input: ClaudeCodeWireInput): string {
+  private extractSessionId(input: ClaudeCodeWireInput): string {
     if (input.transcript_path) {
       const match = input.transcript_path.match(
         /([a-f0-9-]{36})\.jsonl$/,

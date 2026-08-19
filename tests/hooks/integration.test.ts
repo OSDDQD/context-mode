@@ -684,46 +684,37 @@ describe("Plugin Tool Name Format in ROUTING_BLOCK", () => {
   });
 });
 
-describe("Skill Commands", () => {
+describe("Utility commands", () => {
   // Fork: the ctx-* utility skills moved out of the auto-discovered skills/
-  // dir (Claude Code loads every skill description into each session's
-  // system prompt) into platform-skills/, which only non-Claude-Code
-  // packagers reference. Claude Code gets commands/ instead.
-  const SKILLS_DIR = join(__dirname, "..", "..", "platform-skills");
+  // dir (Claude Code loads every skill description into each session's system
+  // prompt) into commands/, which cost nothing standing. They also had a copy
+  // under platform-skills/ for "the packagers that read skill files" — a
+  // consumer that went with Pi and was never replaced, so that copy is gone
+  // and these assertions moved onto the file the host actually loads.
   const COMMANDS_DIR = join(__dirname, "..", "..", "commands");
 
-  test("ctx-doctor skill directory exists with valid SKILL.md", () => {
-    const skillMd = join(SKILLS_DIR, "ctx-doctor", "SKILL.md");
-    assert.ok(existsSync(skillMd), "platform-skills/ctx-doctor/SKILL.md must exist");
-    const content = readFileSync(skillMd, "utf-8");
-    assert.ok(content.includes("name: ctx-doctor"), "SKILL.md name must be ctx-doctor");
-    assert.ok(content.includes("/context-mode:ctx-doctor"), "Trigger must reference ctx-doctor");
-  });
-
-  test("ctx-upgrade skill directory exists with valid SKILL.md", () => {
-    const skillMd = join(SKILLS_DIR, "ctx-upgrade", "SKILL.md");
-    assert.ok(existsSync(skillMd), "platform-skills/ctx-upgrade/SKILL.md must exist");
-    const content = readFileSync(skillMd, "utf-8");
-    assert.ok(content.includes("name: ctx-upgrade"), "SKILL.md name must be ctx-upgrade");
-    assert.ok(content.includes("/context-mode:ctx-upgrade"), "Trigger must reference ctx-upgrade");
-  });
-
-  test("ctx-stats skill directory exists with valid SKILL.md", () => {
-    const skillMd = join(SKILLS_DIR, "ctx-stats", "SKILL.md");
-    assert.ok(existsSync(skillMd), "platform-skills/ctx-stats/SKILL.md must exist");
-    const content = readFileSync(skillMd, "utf-8");
-    assert.ok(content.includes("name: ctx-stats"), "SKILL.md name must be ctx-stats");
-    assert.ok(content.includes("/context-mode:ctx-stats"), "Trigger must reference ctx-stats");
-  });
-
-  test("old skill directories (doctor, upgrade, stats) no longer exist", () => {
-    for (const old of ["doctor", "upgrade", "stats"]) {
-      assert.ok(
-        !existsSync(join(SKILLS_DIR, old)),
-        `Old skill directory platform-skills/${old} must not exist`,
+  for (const name of ["ctx-doctor", "ctx-upgrade", "ctx-stats"]) {
+    test(`${name} ships as a command with model invocation disabled`, () => {
+      const file = join(COMMANDS_DIR, `${name}.md`);
+      assert.ok(existsSync(file), `commands/${name}.md must exist`);
+      const content = readFileSync(file, "utf-8");
+      assert.ok(content.startsWith("---\n"), `${name}: no frontmatter block`);
+      const frontmatter = content.slice(4, content.indexOf("\n---", 4));
+      assert.match(frontmatter, /^description:/m, `${name}: no description`);
+      // Without this the description rides in every session's system prompt —
+      // the whole reason these left skills/.
+      assert.match(
+        frontmatter,
+        /^disable-model-invocation:\s*true$/m,
+        `${name}: model invocation not disabled`,
       );
-    }
-  });
+      // The command drives the MCP tool, not a shell reimplementation of it.
+      assert.ok(
+        content.includes(name.replace("-", "_")),
+        `${name}: never names its MCP tool`,
+      );
+    });
+  }
 
   test("utility skills are gone from the auto-discovered skills/ dir", () => {
     const claudeSkillsDir = join(__dirname, "..", "..", "skills");
@@ -769,14 +760,15 @@ describe("resolveConfigDir (#289)", () => {
     // Use a subprocess to isolate env var changes
     const code = `
       ${Object.entries(env).map(([k, v]) => `process.env[${JSON.stringify(k)}] = ${JSON.stringify(v)};`).join("\n")}
-      const { resolveConfigDir, GEMINI_OPTS, CODEX_OPTS, VSCODE_OPTS, CURSOR_OPTS, KIRO_OPTS } = await import(${JSON.stringify(pathToFileURL(HELPERS_PATH).href)});
+      const { resolveConfigDir, CODEX_OPTS } = await import(${JSON.stringify(pathToFileURL(HELPERS_PATH).href)});
+      // A host with no configDirEnv is still a code path worth covering, and
+      // with both remaining hosts having one it has to be constructed rather
+      // than borrowed from a platform constant.
+      const NO_ENV_OPTS = { configDir: ".no-env-host", configDirEnv: undefined };
       const result = {
         claude_default: resolveConfigDir(),
-        gemini_default: resolveConfigDir(GEMINI_OPTS),
         codex_default: resolveConfigDir(CODEX_OPTS),
-        vscode_default: resolveConfigDir(VSCODE_OPTS),
-        cursor_default: resolveConfigDir(CURSOR_OPTS),
-        kiro_default: resolveConfigDir(KIRO_OPTS),
+        no_env_default: resolveConfigDir(NO_ENV_OPTS),
       };
       process.stdout.write(JSON.stringify(result));
     `;
@@ -792,31 +784,30 @@ describe("resolveConfigDir (#289)", () => {
     const home = process.env.HOME || process.env.USERPROFILE || "";
     const result = await loadHelpers({
       CLAUDE_CONFIG_DIR: "",
-      GEMINI_CLI_HOME: "",
       CODEX_HOME: "",
     });
     expect(result.claude_default).toBe(join(home, ".claude"));
-    expect(result.gemini_default).toBe(join(home, ".gemini"));
     expect(result.codex_default).toBe(join(home, ".codex"));
-    expect(result.vscode_default).toBe(join(home, ".vscode"));
-    expect(result.cursor_default).toBe(join(home, ".cursor"));
-    expect(result.kiro_default).toBe(join(home, ".kiro"));
+    expect(result.no_env_default).toBe(join(home, ".no-env-host"));
   });
 
   test("CLAUDE_CONFIG_DIR overrides Claude Code config path", async () => {
     const result = await loadHelpers({ CLAUDE_CONFIG_DIR: "/custom/claude-work" });
     expect(result.claude_default).toBe("/custom/claude-work");
-    // Other platforms unaffected
+    // The other host is unaffected — one override MUST NOT move everyone's
+    // data root, which is how two hosts end up writing into the same store.
     const home = process.env.HOME || process.env.USERPROFILE || "";
-    expect(result.gemini_default).toBe(join(home, ".gemini"));
+    expect(result.codex_default).toBe(join(home, ".codex"));
   });
 
-  test("GEMINI_CLI_HOME overrides Gemini CLI config path", async () => {
-    const result = await loadHelpers({ GEMINI_CLI_HOME: "/custom/gemini" });
-    expect(result.gemini_default).toBe("/custom/gemini");
+  test("CODEX_HOME overrides Codex CLI config path, and only it", async () => {
+    const home = process.env.HOME || process.env.USERPROFILE || "";
+    const result = await loadHelpers({ CODEX_HOME: "/custom/codex" });
+    expect(result.codex_default).toBe("/custom/codex");
+    expect(result.claude_default).toBe(join(home, ".claude"));
   });
 
-  test("CODEX_HOME overrides Codex CLI config path", async () => {
+  test("CODEX_HOME override applies on its own", async () => {
     const result = await loadHelpers({ CODEX_HOME: "/custom/codex" });
     expect(result.codex_default).toBe("/custom/codex");
   });
@@ -827,13 +818,10 @@ describe("resolveConfigDir (#289)", () => {
     expect(result.claude_default).toBe(join(home, ".claude-work"));
   });
 
-  test("platforms without configDirEnv ignore env vars", async () => {
+  test("a host with no configDirEnv ignores env vars entirely", async () => {
     const home = process.env.HOME || process.env.USERPROFILE || "";
-    // VS Code Copilot, Cursor, Kiro have no configDirEnv
-    const result = await loadHelpers({});
-    expect(result.vscode_default).toBe(join(home, ".vscode"));
-    expect(result.cursor_default).toBe(join(home, ".cursor"));
-    expect(result.kiro_default).toBe(join(home, ".kiro"));
+    const result = await loadHelpers({ CLAUDE_CONFIG_DIR: "/custom/claude", CODEX_HOME: "/custom/codex" });
+    expect(result.no_env_default).toBe(join(home, ".no-env-host"));
   });
 
   test("session DB path uses resolved config dir", async () => {
@@ -1114,6 +1102,7 @@ describe("Category 27 — Latency cross-hook bridge", () => {
 
 describe("empty stdin resilience (#322)", () => {
   const PROJECT_ROOT = join(__dirname, "..", "..");
+  const HOOKS_DIR = join(PROJECT_ROOT, "hooks");
 
   function runHookWithEmptyStdin(hookPath: string): { exitCode: number } {
     const fakeHome = mkdtempSync(join(tmpdir(), "ctx-empty-stdin-"));
@@ -1127,9 +1116,6 @@ describe("empty stdin resilience (#322)", () => {
           ...process.env,
           HOME: fakeHome,
           CLAUDE_PROJECT_DIR: fakeProject,
-          GEMINI_PROJECT_DIR: fakeProject,
-          VSCODE_CWD: fakeProject,
-          CURSOR_CWD: fakeProject,
           CONTEXT_MODE_SESSION_SUFFIX: "",
         },
       });
@@ -1140,15 +1126,32 @@ describe("empty stdin resilience (#322)", () => {
     }
   }
 
-  // All 6 adapters × their hook files
+  // Every hook entry point that ships, discovered rather than listed: a hook
+  // added later is covered without anyone remembering to extend this array,
+  // and one that is deleted cannot leave a stale row behind. Empty stdin is
+  // the case that matters because a host can send it at any time and a hook
+  // that exits non-zero on it shows the user a failure on every tool call.
   const hooks = [
-    "sessionstart.mjs", "precompact.mjs", "posttooluse.mjs", "userpromptsubmit.mjs",
-    "gemini-cli/sessionstart.mjs", "gemini-cli/beforetool.mjs", "gemini-cli/aftertool.mjs", "gemini-cli/precompress.mjs",
-    "vscode-copilot/sessionstart.mjs", "vscode-copilot/pretooluse.mjs", "vscode-copilot/posttooluse.mjs", "vscode-copilot/precompact.mjs",
-    "cursor/sessionstart.mjs", "cursor/pretooluse.mjs", "cursor/posttooluse.mjs", "cursor/stop.mjs",
-    "codex/sessionstart.mjs", "codex/pretooluse.mjs", "codex/posttooluse.mjs",
-    "kiro/pretooluse.mjs", "kiro/posttooluse.mjs",
+    ...readdirSync(HOOKS_DIR)
+      .filter((f) => f.endsWith(".mjs") && !f.endsWith(".bundle.mjs"))
+      // Not entry points: helpers imported by the hooks above.
+      .filter((f) => !["run-hook.mjs", "suppress-stderr.mjs", "ensure-deps.mjs", "session-helpers.mjs",
+        "session-loaders.mjs", "session-directive.mjs", "routing-block.mjs", "auto-injection.mjs",
+        "platform-bridge.mjs", "normalize-hooks.mjs", "heal-partial-install.mjs",
+        "cache-heal-utils.mjs"].includes(f)),
+    ...readdirSync(join(HOOKS_DIR, "codex"))
+      .filter((f) => f.endsWith(".mjs") && f !== "platform.mjs")
+      .map((f) => `codex/${f}`),
   ];
+
+  test("the discovered hook list is not empty and covers both hosts", () => {
+    // A discovery walk that returns nothing turns every case below into zero
+    // cases, which is the quietest way for this matrix to stop testing.
+    expect(hooks.length).toBeGreaterThan(6);
+    expect(hooks.some((h) => h.startsWith("codex/"))).toBe(true);
+    expect(hooks).toContain("pretooluse.mjs");
+    expect(hooks).toContain("posttooluse.mjs");
+  });
 
   for (const hook of hooks) {
     test(`${hook} exits 0 on empty stdin`, () => {

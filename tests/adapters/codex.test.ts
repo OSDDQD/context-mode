@@ -82,9 +82,6 @@ describe("CodexAdapter", () => {
       expect(adapter.capabilities.canInjectSessionContext).toBe(true);
     });
 
-    it("paradigm is json-stdio", () => {
-      expect(adapter.paradigm).toBe("json-stdio");
-    });
   });
 
   // ── parsePreToolUseInput ──────────────────────────────

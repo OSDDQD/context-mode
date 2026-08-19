@@ -111,13 +111,7 @@ Step 5: VERDICT
 | Platform | Verified ENV Vars | Source |
 |----------|------------------|--------|
 | Claude Code | `CLAUDE_PROJECT_DIR`, `CLAUDE_SESSION_ID` | src/adapters/detect.ts |
-| Gemini CLI | `GEMINI_PROJECT_DIR`, `GEMINI_CLI` | src/adapters/detect.ts |
-| OpenCode | `OPENCODE`, `OPENCODE_PID` | src/adapters/detect.ts |
-| OpenClaw | `OPENCLAW_HOME`, `OPENCLAW_CLI` | src/adapters/detect.ts |
-| Kilo | `KILO`, `KILO_PID` | src/adapters/detect.ts |
 | Codex | `CODEX_CI`, `CODEX_THREAD_ID` | src/adapters/detect.ts |
-| VS Code Copilot | `VSCODE_PID`, `VSCODE_CWD` | src/adapters/detect.ts |
-| Cursor | `CURSOR_TRACE_ID`, `CURSOR_CLI` | src/adapters/detect.ts |
 | Override | `CONTEXT_MODE_PLATFORM` | src/adapters/detect.ts |
 
 Any ENV var NOT in this table must go through the full verification protocol.
@@ -132,16 +126,7 @@ npx vitest run tests/adapters/
 
 # Individual adapter (for targeted testing)
 npx vitest run tests/adapters/claude-code.test.ts
-npx vitest run tests/adapters/gemini-cli.test.ts
-npx vitest run tests/adapters/opencode.test.ts
-npx vitest run tests/adapters/openclaw.test.ts
-npx vitest run tests/adapters/kilo.test.ts
 npx vitest run tests/adapters/codex.test.ts
-npx vitest run tests/adapters/vscode-copilot.test.ts
-npx vitest run tests/adapters/cursor.test.ts
-npx vitest run tests/adapters/antigravity.test.ts
-npx vitest run tests/adapters/kiro.test.ts
-npx vitest run tests/adapters/zed.test.ts
 
 # Detection logic
 npx vitest run tests/adapters/detect.test.ts
@@ -153,12 +138,7 @@ npx vitest run tests/adapters/client-map.test.ts
 ```
 ADAPTER TEST MATRIX
 ═══════════════════
-claude-code     ✓ 5/5    gemini-cli      ✓ 4/4
-opencode        ✓ 6/6    openclaw        ✓ 3/3
-kilo            ✓ 4/4    codex           ✓ 3/3
-vscode-copilot  ✓ 4/4    cursor          ✓ 3/3
-antigravity     ✓ 2/2    kiro            ✓ 3/3
-pi              ✓ 2/2    zed             ✓ 2/2
+claude-code     ✓ 5/5    codex           ✓ 3/3
 detect          ✓ 8/8    client-map      ✓ 6/6
 ───────────────────────────────────────────
 TOTAL: {N}/{N} passed | 0 failed
@@ -192,10 +172,10 @@ npm test
 
 ```javascript
 // WRONG — breaks on Windows
-const configPath = homedir + "/.config/opencode/config.json";
+const configPath = homedir + "/.codex/config.toml";
 
 // CORRECT — works everywhere
-const configPath = path.join(homedir(), ".config", "opencode", "config.json");
+const configPath = path.join(homedir(), ".codex", "config.toml");
 ```
 
 Grep for potential issues:
@@ -251,11 +231,6 @@ Each platform has different hook formats. Verify changes match:
 | Platform | Hook Format | Key Differences |
 |----------|------------|-----------------|
 | Claude Code | `hooks.json` in plugin dir | `PreToolUse`, `PostToolUse`, `PreCompact`, `SessionStart` |
-| Gemini CLI | `~/.gemini/settings.json` | `BeforeTool`, `AfterTool`, `PreCompress`, `SessionStart` + `matcher` |
-| VS Code Copilot | `.github/hooks/*.json` | Same as Claude Code but separate file |
-| Cursor | `.cursor/hooks.json` | No `SessionStart` (injects via file instead) |
-| OpenCode | `opencode.json` | Uses `agents` section, not traditional hooks |
-| OpenClaw | `openclaw.plugin.json` | Extension model, not hook-based |
 
 ## Security Checks
 

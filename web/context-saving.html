@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Context Saving — context-mode plugin saves 98% of your AI agent's context window</title>
-<meta name="description" content="Context Saving is the open-source context-mode plugin that keeps raw data out of the LLM context window. Sandbox tool output, index it into FTS5, search on demand. 331,200+ developers across 17 adapters.">
+<meta name="description" content="Context Saving is the open-source context-mode plugin that keeps raw data out of the LLM context window. Sandbox tool output, index it into FTS5, search on demand. Two adapters: Claude Code and Codex CLI.">
 <link rel="canonical" href="https://context-mode.com/context-saving">
 <link rel="icon" type="image/svg+xml" href="/favicon-context-saving.svg">
 <link rel="icon" type="image/png" sizes="32x32" href="/favicon-context-saving-32.png">
@@ -12,7 +12,7 @@
 
 <meta property="og:type" content="website">
 <meta property="og:title" content="Context Saving — the other half of the context problem">
-<meta property="og:description" content="Your AI coding agent burns through context in 20 minutes. The context-mode plugin keeps 98% of tool output out of the conversation. 331,200+ developers across 17 adapters.">
+<meta property="og:description" content="Your AI coding agent burns through context in 20 minutes. The context-mode plugin keeps 98% of tool output out of the conversation. Two adapters: Claude Code and Codex CLI.">
 <meta property="og:url" content="https://context-mode.com/context-saving">
 <meta property="og:site_name" content="context-mode">
 <meta property="og:image" content="https://context-mode.com/og/context-saving.png">
@@ -302,12 +302,12 @@ footer{padding:64px 0 40px;text-align:center;background:var(--bg-2);border-top:1
           </a>
         </div>
       </div>
-      <a href="https://github.com/mksglu/context-mode" class="topnav-item">GitHub</a>
+      <a href="https://github.com/OSDDQD/context-mode" class="topnav-item">GitHub</a>
       <a href="https://discord.gg/DCN9jUgN5v" class="topnav-item">Discord</a>
     </div>
     <div class="topnav-cta">
       <a href="/insight" class="btn btn-ghost">Insight →</a>
-      <a href="https://github.com/mksglu/context-mode" class="btn btn-primary">Install</a>
+      <a href="https://github.com/OSDDQD/context-mode" class="btn btn-primary">Install</a>
     </div>
   </div>
 </nav>
@@ -319,13 +319,12 @@ footer{padding:64px 0 40px;text-align:center;background:var(--bg-2);border-top:1
     <h1 class="h1"><span class="prompt">$</span>context<span class="dash">-</span>mode<span class="cursor"></span></h1>
     <p class="hero-tag"><span class="dot"></span>open-source plugin · ELv2 · part of <a href="/">Context Mode</a></p>
     <p class="hero-sub">
-      <strong>The other half of the context problem.</strong> An MCP plugin that sandboxes tool output and indexes it into a local FTS5 store. Your AI coding agent searches that store instead of re-sending raw bytes every turn. <em>17 adapters. <span class="js-user-count">331,200+</span> developers. Runs entirely on your machine.</em>
+      <strong>The other half of the context problem.</strong> An MCP plugin that sandboxes tool output and indexes it into a local FTS5 store. Your AI coding agent searches that store instead of re-sending raw bytes every turn. <em>Two hosts. Runs entirely on your machine.</em>
     </p>
 
     <div class="hero-stats">
-      <div class="hero-stat"><div class="val" id="stat-users">331.2k+</div><div class="lbl">developers</div></div>
-      <div class="hero-stat"><div class="val">17</div><div class="lbl">adapters</div></div>
-      <div class="hero-stat"><div class="val">#1</div><div class="lbl">on Hacker News</div></div>
+      <div class="hero-stat"><div class="val">2</div><div class="lbl">adapters</div></div>
+      <div class="hero-stat"><div class="val">98%</div><div class="lbl">context reduction</div></div>
       <div class="hero-stat"><div class="val" id="stat-stars">—</div><div class="lbl">GitHub stars</div></div>
       <div class="hero-stat"><div class="val">ELv2</div><div class="lbl">open source</div></div>
     </div>
@@ -339,7 +338,7 @@ footer{padding:64px 0 40px;text-align:center;background:var(--bg-2);border-top:1
       <p class="section-num">§ 01 · the problem</p>
       <h2 class="h2">The context window problem.</h2>
       <div class="rule"></div>
-      <p class="lead">Here's the thing about Claude Code, Cursor, Copilot, Codex, Gemini CLI. The LLM has no memory. Every turn, the full conversation gets re-sent — every file read, every command output, every grep result. It piles up.</p>
+      <p class="lead">Here's the thing about Claude Code and Codex CLI. The LLM has no memory. Every turn, the full conversation gets re-sent — every file read, every command output, every grep result. It piles up.</p>
     </div>
 
     <div class="rev" style="max-width:840px;margin-top:28px">
@@ -537,13 +536,13 @@ footer{padding:64px 0 40px;text-align:center;background:var(--bg-2);border-top:1
   <div class="wrap">
     <div class="rev" style="max-width:840px">
       <p class="section-num">§ 07 · adapters</p>
-      <h2 class="h2">17 adapters, one plugin.</h2>
+      <h2 class="h2">Two adapters, one plugin.</h2>
       <div class="rule"></div>
-      <p class="lead">Works on Claude Code, Cursor, Copilot, Codex, Gemini CLI, and twelve more. Platforms with hook support get automatic routing. The rest use instruction-based rules. <em>Same plugin everywhere.</em></p>
+      <p class="lead">Works on Claude Code and Codex CLI. Both speak JSON over stdin and stdout, so both get automatic hook routing — no instruction-only fallback left. <em>Same plugin on either.</em></p>
     </div>
 
     <div class="platform-tags rev">
-      <span class="tag">Claude Code</span><span class="tag">Cursor</span><span class="tag">Codex CLI</span><span class="tag">VS Code Copilot</span><span class="tag">JetBrains Copilot</span><span class="tag">Gemini CLI</span><span class="tag">Qwen Code</span><span class="tag">Kiro</span><span class="tag">OpenCode</span><span class="tag">KiloCode</span><span class="tag">Zed</span><span class="tag">OpenClaw</span><span class="tag">Pi</span><span class="tag">Oh My Pi</span><span class="tag">Antigravity</span><span class="tag">GitHub Copilot CLI</span><span class="tag">Antigravity CLI</span>
+      <span class="tag">Claude Code</span><span class="tag">Codex CLI</span>
     </div>
   </div>
 </section>
@@ -612,10 +611,10 @@ footer{padding:64px 0 40px;text-align:center;background:var(--bg-2);border-top:1
     <div class="install-list rev">
       <div class="install pri">
         <div class="il">Claude Code <span class="pill">recommended</span></div>
-        <code>/plugin marketplace add mksglu/context-mode</code>
+        <code>/plugin marketplace add OSDDQD/context-mode</code>
       </div>
       <div class="install">
-        <div class="il">All platforms</div>
+        <div class="il">Codex CLI and npm</div>
         <code>npm install -g context-mode</code>
       </div>
     </div>
@@ -635,11 +634,11 @@ footer{padding:64px 0 40px;text-align:center;background:var(--bg-2);border-top:1
     <span style="color:var(--text-4);margin:0 8px">·</span>
     <a href="/insight" style="color:var(--text-3)">Platform</a>
     <span style="color:var(--text-4);margin:0 8px">·</span>
-    <a href="https://github.com/mksglu/context-mode" style="color:var(--text-3)">GitHub</a>
+    <a href="https://github.com/OSDDQD/context-mode" style="color:var(--text-3)">GitHub</a>
     <span style="color:var(--text-4);margin:0 8px">·</span>
     <a href="https://discord.gg/DCN9jUgN5v" style="color:var(--text-3)">Discord</a>
   </p>
-  <p class="footer-meta">Built by <a href="https://mksg.lu" style="color:var(--text-3)">B. Mert Köseoğlu</a></p>
+  <p class="footer-meta">Originally built by <a href="https://mksg.lu" style="color:var(--text-3)">B. Mert Köseoğlu</a> · this fork maintained by <a href="https://github.com/OSDDQD" style="color:var(--text-3)">OSDDQD</a></p>
   <p class="footer-addr">MKSF LTD · Suite 8805 5 Brayford Square · London E1 0SG · United Kingdom</p>
 </footer>
 
@@ -647,7 +646,7 @@ footer{padding:64px 0 40px;text-align:center;background:var(--bg-2);border-top:1
 <div class="sticky-cta" id="sticky-cta" aria-hidden="true">
   <div class="sticky-inner">
     <p class="sticky-text"><strong>Free, open-source, runs locally.</strong> Two commands, two minutes.</p>
-    <a class="sticky-button" href="https://github.com/mksglu/context-mode#install">Get Started →</a>
+    <a class="sticky-button" href="https://github.com/OSDDQD/context-mode#install">Get Started →</a>
   </div>
 </div>
 
@@ -655,28 +654,9 @@ footer{padding:64px 0 40px;text-align:center;background:var(--bg-2);border-top:1
 const o=new IntersectionObserver(e=>{e.forEach(x=>{if(x.isIntersecting){x.target.classList.add('v');o.unobserve(x.target);}});},{threshold:.06,rootMargin:'0px 0px -20px 0px'});
 document.querySelectorAll('.rev').forEach(e=>o.observe(e));
 
-// Dynamic stats from context-mode/main/stats.json
-function toLongForm(short){
-  if(!short) return null;
-  const m = String(short).match(/^([\d.]+)\s*([kKmM])?\+?$/);
-  if(!m) return short;
-  let num = parseFloat(m[1]);
-  if(m[2] && /k/i.test(m[2])) num *= 1000;
-  else if(m[2] && /m/i.test(m[2])) num *= 1000000;
-  return Math.round(num).toLocaleString('en-US') + '+';
-}
-fetch('https://raw.githubusercontent.com/mksglu/context-mode/main/stats.json')
-  .then(r=>r.json())
-  .then(d=>{
-    if(!d) return;
-    if(d.message){const el=document.getElementById('stat-users');if(el) el.textContent=d.message}
-    const longForm=d.message_long||d.users_long||toLongForm(d.message);
-    if(longForm){document.querySelectorAll('.js-user-count').forEach(el=>{el.textContent=longForm})}
-  })
-  .catch(()=>{});
 
 // GitHub stars
-fetch('https://api.github.com/repos/mksglu/context-mode')
+fetch('https://api.github.com/repos/OSDDQD/context-mode')
   .then(r=>r.json())
   .then(d=>{
     if(d && d.stargazers_count){

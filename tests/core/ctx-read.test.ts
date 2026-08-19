@@ -266,7 +266,7 @@ describe("ctx_read", () => {
       writeFileSync(p, Buffer.from([0x00, 0x01, 0x02, 0xff, 0xfe, 0x00, 0x7f, 0x80]));
       const out = textOf(await h.call({ path: "blob.bin" }));
       expect(out).toContain("not text");
-      expect(out).not.toContain(" ");
+      expect(out).not.toContain("\0");
       expect(out.length).toBeLessThan(500);
     } finally {
       h.cleanup();

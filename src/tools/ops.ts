@@ -7,19 +7,17 @@
  * on every `sync-upstream` the moment it changes files. Against
  * `merge-base(HEAD, upstream/next)` the fork has five separate hunks inside
  * `ctx_stats` (the real-bytes fold, the cross-session project_dir lookup, the
- * Pi byte accounting, the semantic report line), so it moved. `ctx_doctor`,
+ * semantic report line), so it moved. `ctx_doctor`,
  * `ctx_upgrade` and `ctx_insight` have none at all and stayed; `ctx_purge` has
  * a single four-line hunk, which does not pay for the move.
  *
- * `patchPiLifetimeFromStatsFiles` and `createMinimalDb` came along because
- * nothing else calls them.
+ * `createMinimalDb` came along because nothing else calls it.
  */
 
-import { existsSync, readdirSync, readFileSync } from "node:fs";
+import { existsSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { z } from "zod";
 
-import { tokensFromBytes } from "../session/tokenizer.js";
 import {
   AnalyticsEngine,
   formatReport,
@@ -33,44 +31,23 @@ import { hashProjectDirCanonical, resolveSessionDbPath } from "../session/db.js"
 import { loadDatabase } from "../db-base.js";
 import { contentStoreUsage } from "../store.js";
 import type { OpsToolDeps } from "./shared/deps.js";
-import { claimStatsRollup, sessionStats } from "./shared/state.js";
+import { sessionStats } from "./shared/state.js";
 
 /** Register `ctx_stats` on the server carried by `deps`. */
 export function registerOpsTools(deps: OpsToolDeps): void {
   const {
     getStore, getProjectDir, getSessionDir, getStorePath, trackResponse,
-    detectedAdapter, VERSION, latestVersion, semanticIndexReport,
-    rollUpStaleStatsFiles,
+    VERSION, latestVersion, semanticIndexReport,
   } = deps;
 
-  /**
-   * Pi byte accounting: patch lifetime.totalEvents from bytes_sandboxed
-   * in stats-*.json files instead of the default events × 256 heuristic.
-   * Only active for Pi adapter — other platforms use getLifetimeStats() as-is.
-   */
-  function patchPiLifetimeFromStatsFiles(lifetime: ReturnType<typeof getLifetimeStats>, sessionsDir: string): void {
-    if (!existsSync(sessionsDir)) return;
-    if (claimStatsRollup()) {
-      try { rollUpStaleStatsFiles(sessionsDir); } catch { /* best-effort */ }
-    }
-    let sandboxedBytes = 0;
-    try {
-      for (const f of readdirSync(sessionsDir)) {
-        if (!f.startsWith("stats-") || !f.endsWith(".json")) continue;
-        try {
-          const raw = JSON.parse(readFileSync(join(sessionsDir, f), "utf-8"));
-          sandboxedBytes += (raw?.bytes_sandboxed ?? 0) + (raw?.bytes_indexed ?? 0);
-        } catch { /* corrupt file — skip */ }
-      }
-    } catch { /* never block ctx_stats on stats file I/O */ }
-    if (sandboxedBytes > 0) {
-      // Same basis as analytics.ts: bytes → tokens through the calibrated
-      // counter, never the bytes/4 constant, or this estimate drifts against
-      // every other token number in the report.
-      const rescueTokens = tokensFromBytes(lifetime.rescueBytes ?? 0);
-      lifetime.totalEvents = Math.round((tokensFromBytes(sandboxedBytes) + rescueTokens) / 256);
-    }
-  }
+  // `detectedAdapter` and `rollUpStaleStatsFiles` stay on OpsToolDeps but are
+  // no longer read here. Both existed for the Pi byte-accounting patch, which
+  // replaced the events × 256 lifetime heuristic with the real bytes recorded
+  // in stats-*.json — and rolled up stale stats files on the way past. That
+  // path was gated on the Pi adapter and left with it. Whether the rollup
+  // should now run for every host is a product question, not a compile one:
+  // it never ran for Claude Code or Codex, so not calling it preserves exactly
+  // the behaviour those two have today.
 
   // ─────────────────────────────────────────────────────────
   // Tool: stats
@@ -134,7 +111,7 @@ export function registerOpsTools(deps: OpsToolDeps): void {
             // (Bugs #3/#4); failures are absorbed inside getLifetimeStats so a
             // corrupt sidecar can never break ctx_stats.
             // B3b Slice 3.1: scope to active adapter via getSessionDir() so
-            // non-Claude platforms (Cursor, OpenCode, JetBrains, ...) read
+            // a non-Claude platform reads
             // from THEIR sessions dir — not the hardcoded ~/.claude/ default.
             // Mirrors the statusline contract in src/server.ts::persistStats.
             const lifetime = getLifetimeStats({ sessionsDir: getSessionDir() });
@@ -230,11 +207,6 @@ export function registerOpsTools(deps: OpsToolDeps): void {
                 realBytes = { conversation: convReal, lifetime: lifeReal };
               }
             } catch { /* never block ctx_stats */ }
-            // Pi byte accounting: patch lifetime from stats-*.json files
-            // (actual bytes_sandboxed, not events × 256 heuristic).
-            if (detectedAdapter()?.name === "Pi") {
-              patchPiLifetimeFromStatsFiles(lifetime, getSessionDir());
-            }
             // v1.0.117: pass projectDir as cwd so the narrative renderer's
             // "started in <path>" line matches the user's actual project.
             // Snapshot the persistent store so the renderer can show
@@ -258,9 +230,6 @@ export function registerOpsTools(deps: OpsToolDeps): void {
           const engine = new AnalyticsEngine(createMinimalDb());
           const report = engine.queryAll(sessionStats);
           const lifetime = getLifetimeStats({ sessionsDir: getSessionDir() });
-          if (detectedAdapter()?.name === "Pi") {
-            patchPiLifetimeFromStatsFiles(lifetime, getSessionDir());
-          }
           let multiAdapter;
           try { multiAdapter = getMultiAdapterLifetimeStats(); } catch { /* never block ctx_stats */ }
           let indexState;
@@ -273,9 +242,6 @@ export function registerOpsTools(deps: OpsToolDeps): void {
         const report = engine.queryAll(sessionStats);
         let lifetime;
         try { lifetime = getLifetimeStats({ sessionsDir: getSessionDir() }); } catch { /* never block ctx_stats */ }
-        if (detectedAdapter()?.name === "Pi" && lifetime) {
-          patchPiLifetimeFromStatsFiles(lifetime, getSessionDir());
-        }
         let multiAdapter;
         try { multiAdapter = getMultiAdapterLifetimeStats(); } catch { /* never block ctx_stats */ }
         text = formatReport(report, VERSION, latestVersion(), (lifetime || multiAdapter) ? { lifetime, multiAdapter } : undefined);

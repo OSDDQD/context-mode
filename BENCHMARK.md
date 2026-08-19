@@ -168,12 +168,12 @@ do not depend on which run is quoted.
 ### Reading the numbers honestly
 
 **The routed call is slower in every pair, in every regime.** Warm, the penalty is
-8× (`ctx_search`), 19× (`ctx_find`) and roughly 110× for both file-reading tools
-(`ctx_execute_file` and `ctx_read`, against a `Read` that costs 0.2 ms). There is
-no configuration in which routing is free.
+8× (`ctx_search`), 20× (`ctx_find`) and roughly 125–130× for both file-reading
+tools (`ctx_execute_file` and `ctx_read`, against a `Read` that costs 0.2 ms).
+There is no configuration in which routing is free.
 
 **Relative multiples overstate it; absolute deltas are what a session feels.** Warm,
-the detour costs 26 ms, 152 ms and 188 ms respectively. Against a model turn that
+the detour costs 188 ms, 152 ms and 25–26 ms respectively. Against a model turn that
 already runs into seconds, none of these is perceptible. The multiples look
 alarming because the native baselines are 0.2–26 ms, not because the routed path
 is slow.

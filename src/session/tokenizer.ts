@@ -43,8 +43,6 @@
  * `CONTEXT_MODE_TOKENIZER=bytes4` restores the old constant everywhere.
  */
 
-import { CLIENT_NAME_TO_PLATFORM } from "../adapters/client-map.js";
-import { detectPlatform } from "../adapters/detect.js";
 
 // ─────────────────────────────────────────────────────────
 // Public types
@@ -65,18 +63,23 @@ export type ContentProfile = "code" | "structured" | "prose";
 export type TokenizerMode = "bytes4" | "heuristic" | "exact";
 
 /**
- * What we know about the host at the call site. Every field is optional —
- * with nothing supplied the tokenizer falls back to the detected platform,
- * and failing that to `o200k_base` (every model shipped since 2024).
+ * What we know about the model at the call site. Every field is optional —
+ * with nothing supplied the estimate uses `o200k_base` (every model shipped
+ * since 2024).
+ *
+ * There is deliberately no host field any more. Routing by platform id was
+ * how this file decided between vocabularies, and it survived the removal of
+ * fifteen hosts as three dead lookups: an empty `LEGACY_ENCODING_PLATFORMS`
+ * set, a `GEMINI_PLATFORMS` set holding only ids no `detectPlatform()` can
+ * return, and a `qwen-cli-mcp-client` client-name branch producing a
+ * `PlatformId` nothing consumed. Both remaining hosts price against tiktoken
+ * vocabularies, so what is left that genuinely changes the estimate is the
+ * model id and an explicit override — and both are here.
  */
 export interface TokenizerContext {
-  /** MCP `clientInfo.name` from the initialize handshake. */
-  client?: string;
-  /** Resolved `PlatformId` (`claude-code`, `gemini-cli`, …). */
-  platform?: string;
   /** Model identifier, when the host advertises one. */
   model?: string;
-  /** Hard override — skips all detection. */
+  /** Hard override — skips model-id detection. */
   encoding?: TokenizerEncoding;
 }
 
@@ -406,13 +409,6 @@ export function profileOf(text: string): ContentProfile {
 // Encoding resolution
 // ─────────────────────────────────────────────────────────
 
-/**
- * Platforms whose default model predates o200k_base. Nothing currently
- * ships one — the map exists so a host that pins an old GPT-4/3.5 model
- * can be routed without touching the model-id patterns below.
- */
-const LEGACY_ENCODING_PLATFORMS = new Set<string>([]);
-
 /** Model families still on cl100k_base. */
 const CL100K_MODEL = /^(?:gpt-4(?:-|$)|gpt-4-32k|gpt-3\.5|text-(?:davinci|curie|babbage|ada)|code-davinci|text-embedding-ada-002|claude-(?:2|instant))/i;
 
@@ -423,44 +419,17 @@ const CL100K_MODEL = /^(?:gpt-4(?:-|$)|gpt-4-32k|gpt-3\.5|text-(?:davinci|curie|
  * vocabularies match.
  */
 const GEMINI_MODEL = /gemini|gemma|palm|bison/i;
-const GEMINI_PLATFORMS = new Set(["gemini-cli", "antigravity", "antigravity-cli"]);
 const GEMINI_CORRECTION = 1.1;
-
-let _detectedPlatform: string | null | undefined;
-
-/**
- * Memoized platform probe. `detectPlatform()` walks env vars and stats
- * config directories, so it runs at most once per process here — the
- * tokenizer is on the ctx_stats render path and the statusline persist
- * throttle, neither of which should pay for filesystem probing.
- */
-function detectedPlatform(): string | null {
-  if (_detectedPlatform !== undefined) return _detectedPlatform;
-  try {
-    _detectedPlatform = detectPlatform().platform ?? null;
-  } catch {
-    _detectedPlatform = null;
-  }
-  return _detectedPlatform;
-}
-
-/** Resolve `clientInfo.name` through the same map the adapters use. */
-function platformFor(ctx?: TokenizerContext): string | null {
-  if (ctx?.platform) return ctx.platform;
-  const client = ctx?.client?.trim();
-  if (client) {
-    const mapped = CLIENT_NAME_TO_PLATFORM[client];
-    if (mapped) return mapped;
-    // Qwen Code uses dynamic client names: qwen-cli-mcp-client-<serverName>.
-    if (client.startsWith("qwen-cli-mcp-client")) return "qwen-code";
-  }
-  return detectedPlatform();
-}
 
 /**
  * Which vocabulary to score against. Priority: explicit override → env →
- * model id → platform → o200k_base (correct for every model shipped since
- * mid-2024, which is every host in `client-map.ts`).
+ * model id → o200k_base (correct for every model shipped since mid-2024,
+ * which is every model either live host runs).
+ *
+ * No platform probe: this runs on the ctx_stats render path and the
+ * statusline persist throttle, and it used to call `detectPlatform()` —
+ * env walk plus config-dir stats — purely to look the answer up in an empty
+ * set.
  */
 export function resolveEncoding(ctx?: TokenizerContext): TokenizerEncoding {
   if (ctx?.encoding) return ctx.encoding;
@@ -471,21 +440,22 @@ export function resolveEncoding(ctx?: TokenizerContext): TokenizerEncoding {
   const model = ctx?.model?.trim() || process.env.PI_CONTEXT_MODE_MODEL_ID?.trim();
   if (model && CL100K_MODEL.test(model)) return "cl100k_base";
 
-  const platform = platformFor(ctx);
-  if (platform && LEGACY_ENCODING_PLATFORMS.has(platform)) return "cl100k_base";
-
   return "o200k_base";
 }
 
 /**
- * Multiplier applied on top of the BPE estimate for hosts whose real
+ * Multiplier applied on top of the BPE estimate for models whose real
  * tokenizer is not tiktoken. 1 for everything except the Gemini family.
+ *
+ * Keyed on the model id alone. `PI_CONTEXT_MODE_MODEL_ID` stays in the
+ * lookup even though Pi is gone: the same operator-set variable still names
+ * the model in the ctx_stats price line (analytics.ts), so honouring it in
+ * one place and ignoring it in the other would be the inconsistency, not the
+ * cleanup.
  */
 export function familyCorrection(ctx?: TokenizerContext): number {
   const model = ctx?.model?.trim() || process.env.PI_CONTEXT_MODE_MODEL_ID?.trim();
   if (model && GEMINI_MODEL.test(model)) return GEMINI_CORRECTION;
-  const platform = platformFor(ctx);
-  if (platform && GEMINI_PLATFORMS.has(platform)) return GEMINI_CORRECTION;
   return 1;
 }
 
@@ -616,7 +586,6 @@ export function __resetTokenizerForTests(): void {
   cache.clear();
   _hits = 0;
   _misses = 0;
-  _detectedPlatform = undefined;
   _exactAttempted = false;
   delete _exact.o200k_base;
   delete _exact.cl100k_base;

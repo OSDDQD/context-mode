@@ -1,16 +1,16 @@
 /**
  * Per-adapter hook command emission — issue #738.
  *
- * The four adapters that emit JS-runtime hook spawn commands (claude-code,
- * qwen-code, gemini-cli, kiro) must route through `buildHookRuntimeCommand`
- * so bun is preferred when available.
+ * An adapter that emits a JS-runtime hook spawn command must route through
+ * `buildHookRuntimeCommand` so bun is preferred when available. Since the
+ * fifteen-host removal that is claude-code alone; qwen-code, gemini-cli and
+ * kiro were the other three and left with their adapters.
  *
- * Adapters that emit CLI dispatcher commands (codex, cursor, vscode-copilot,
- * jetbrains-copilot) are NOT in scope here — they invoke `context-mode hook
- * <adapter> <event>` which inherits the CLI's runtime choice.
- *
- * Adapters with no JSON-hook layer (pi, omp, opencode, kilo, openclaw,
- * antigravity, zed) are NOT in scope here.
+ * An adapter that emits a CLI dispatcher command instead invokes
+ * `context-mode hook <adapter> <event>` and inherits the CLI's runtime choice.
+ * That is codex, and it is covered below as the non-regression half — the two
+ * emission shapes are the reason this file exists, and one example of each is
+ * what it takes to keep them apart.
  *
  * Test strategy: rather than fight Vitest's module cache (which caches
  * `runtime.js` after the first import and never picks up subsequent
@@ -63,60 +63,14 @@ describe("hook command emission flows through buildHookRuntimeCommand (#738)", (
     }
   });
 
-  test("qwen-code generateHookConfig emits the resolved hook runtime path", async () => {
-    const { resolveHookRuntime, resetHookRuntimeCache } = await import("../../src/runtime.js");
-    resetHookRuntimeCache();
-    const runtime = resolveHookRuntime();
-    const { QwenCodeAdapter } = await import("../../src/adapters/qwen-code/index.js");
-    const adapter = new QwenCodeAdapter();
-    const config = adapter.generateHookConfig("/plugin/root") as Record<string, Array<{ hooks: Array<{ command: string }> }>>;
-    const preCmd = config.PreToolUse[0].hooks[0].command;
-    const expectedRuntime = runtime.path.replace(/\\/g, "/");
-    expect(preCmd).toBe(`"${expectedRuntime}" "/plugin/root/hooks/pretooluse.mjs"`);
-  });
 
-  test("gemini-cli generateHookConfig emits the resolved hook runtime path when pluginRoot provided", async () => {
-    const { resolveHookRuntime, resetHookRuntimeCache } = await import("../../src/runtime.js");
-    resetHookRuntimeCache();
-    const runtime = resolveHookRuntime();
-    const { GeminiCLIAdapter } = await import("../../src/adapters/gemini-cli/index.js");
-    const adapter = new GeminiCLIAdapter();
-    const config = adapter.generateHookConfig("/plugin/root") as Record<string, Array<{ hooks: Array<{ command: string }> }>>;
-    const allCommands = Object.values(config).flatMap((entries) =>
-      entries.flatMap((e) => e.hooks.map((h) => h.command))
-    );
-    const expectedRuntime = runtime.path.replace(/\\/g, "/");
-    const someCmd = allCommands.find((c) => c.includes("/plugin/root/hooks/"));
-    expect(someCmd).toBeDefined();
-    expect(someCmd!.startsWith(`"${expectedRuntime}" "`)).toBe(true);
-  });
 
-  test("kiro generateHookConfig emits the resolved hook runtime path", async () => {
-    const { resolveHookRuntime, resetHookRuntimeCache } = await import("../../src/runtime.js");
-    resetHookRuntimeCache();
-    const runtime = resolveHookRuntime();
-    const { KiroAdapter } = await import("../../src/adapters/kiro/index.js");
-    const adapter = new KiroAdapter();
-    const config = adapter.generateHookConfig("/plugin/root") as Record<string, Array<{ hooks: Array<{ command: string }> }>>;
-    const allCommands = Object.values(config).flatMap((entries) =>
-      entries.flatMap((e) => e.hooks.map((h) => h.command))
-    );
-    const expectedRuntime = runtime.path.replace(/\\/g, "/");
-    expect(allCommands[0].startsWith(`"${expectedRuntime}" "`)).toBe(true);
-  });
 });
 
 describe("CLI-dispatcher adapters keep their dispatcher form (#738 non-regression)", () => {
-  test("cursor still emits 'context-mode hook cursor <event>' shape", async () => {
-    const { CursorAdapter } = await import("../../src/adapters/cursor/index.js");
-    const adapter = new CursorAdapter();
-    const config = adapter.generateHookConfig("/plugin/root") as Record<string, Array<{ command: string }>>;
-    // Cursor uses flat shape (one entry per hook).
-    const cmds = Object.values(config).flatMap((arr) => arr.map((e) => e.command));
-    for (const cmd of cmds) {
-      expect(cmd).toMatch(/^context-mode hook cursor /);
-    }
-  });
+  // Codex is the only dispatcher-form adapter left. The point of the pairing
+  // survives the removal: two adapters, two emission shapes, and #738 was the
+  // bug where one silently adopted the other's.
 
   test("codex still emits 'context-mode hook codex <event>' shape", async () => {
     const { CodexAdapter } = await import("../../src/adapters/codex/index.js");
@@ -130,27 +84,5 @@ describe("CLI-dispatcher adapters keep their dispatcher form (#738 non-regressio
     }
   });
 
-  test("vscode-copilot still emits 'context-mode hook vscode-copilot <event>' shape", async () => {
-    const { VSCodeCopilotAdapter } = await import("../../src/adapters/vscode-copilot/index.js");
-    const adapter = new VSCodeCopilotAdapter();
-    const config = adapter.generateHookConfig("/plugin/root") as Record<string, Array<{ hooks: Array<{ command: string }> }>>;
-    const cmds = Object.values(config).flatMap((arr) =>
-      arr.flatMap((e) => e.hooks.map((h) => h.command))
-    );
-    for (const cmd of cmds) {
-      expect(cmd).toMatch(/^context-mode hook vscode-copilot /);
-    }
-  });
 
-  test("jetbrains-copilot still emits 'context-mode hook jetbrains-copilot <event>' shape", async () => {
-    const { JetBrainsCopilotAdapter } = await import("../../src/adapters/jetbrains-copilot/index.js");
-    const adapter = new JetBrainsCopilotAdapter();
-    const config = adapter.generateHookConfig("/plugin/root") as Record<string, Array<{ hooks: Array<{ command: string }> }>>;
-    const cmds = Object.values(config).flatMap((arr) =>
-      arr.flatMap((e) => e.hooks.map((h) => h.command))
-    );
-    for (const cmd of cmds) {
-      expect(cmd).toMatch(/^context-mode hook jetbrains-copilot /);
-    }
-  });
 });

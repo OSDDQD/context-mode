@@ -2,23 +2,22 @@
  * adapters/types — Platform adapter interface for multi-platform hook support.
  *
  * Defines the contract that each platform adapter must implement.
- * Three paradigms exist across supported platforms:
- *   A) JSON stdin/stdout — Claude Code, Gemini/Qwen family CLIs, Copilot/Codex/Kimi,
- *      Cursor, Kiro, Antigravity CLI (`agy`)
- *   B) TS Plugin Functions — OpenCode, KiloCode, OpenClaw
- *   C) MCP-only (no hooks) — Antigravity IDE, Zed, Pi/OMP MCP-only paths
+ *
+ * Both supported hosts — Claude Code and Codex CLI — speak JSON on hook
+ * stdin/stdout; they disagree only about the response envelope and about
+ * which mutations they accept (see PlatformCapabilities). A `HookParadigm`
+ * field used to sit on every adapter naming one of three wire styles: this
+ * one, TS plugin functions (OpenCode, KiloCode, OpenClaw), and MCP-only hosts
+ * with no hook layer at all (Antigravity, Zed). The other two paradigms left
+ * with their hosts, and a field that can hold one value is not a field, so it
+ * is gone; when a host arrives that does not speak this protocol, its adapter
+ * is where that shows, not a label on the interface.
  *
  * The MCP server layer is 100% portable and needs no adapter.
  * Only the hook layer requires platform-specific adapters.
  */
 
-// ─────────────────────────────────────────────────────────
-// Hook paradigm
-// ─────────────────────────────────────────────────────────
-
 import { resolveHookRuntime } from "../runtime.js";
-
-export type HookParadigm = "json-stdio" | "ts-plugin" | "mcp-only";
 
 // ─────────────────────────────────────────────────────────
 // Platform capabilities
@@ -183,10 +182,15 @@ export interface HookAdapter {
   /** Human-readable platform name (e.g., "Claude Code", "Gemini CLI"). */
   readonly name: string;
 
-  /** Hook I/O paradigm used by this platform. */
-  readonly paradigm: HookParadigm;
-
-  /** What this platform supports. */
+  /**
+   * What this platform supports.
+   *
+   * Declarative, and currently read by no production code: each adapter's
+   * format methods already refuse what its host cannot accept (Codex drops
+   * `updatedInput` and `updatedMCPToolOutput` on the floor rather than
+   * emitting them). It is kept because the two hosts genuinely disagree here
+   * and a new adapter has to answer the question before it can compile.
+   */
   readonly capabilities: PlatformCapabilities;
 
   // ── Input parsing ──────────────────────────────────────
@@ -197,11 +201,11 @@ export interface HookAdapter {
   /** Parse raw PostToolUse input into normalized form. */
   parsePostToolUseInput(raw: unknown): PostToolUseEvent;
 
-  /** Parse raw PreCompact input (optional — not all platforms support it). */
-  parsePreCompactInput?(raw: unknown): PreCompactEvent;
+  /** Parse raw PreCompact input. */
+  parsePreCompactInput(raw: unknown): PreCompactEvent;
 
-  /** Parse raw SessionStart input (optional — not all platforms support it). */
-  parseSessionStartInput?(raw: unknown): SessionStartEvent;
+  /** Parse raw SessionStart input. */
+  parseSessionStartInput(raw: unknown): SessionStartEvent;
 
   // ── Response formatting ────────────────────────────────
 
@@ -211,11 +215,19 @@ export interface HookAdapter {
   /** Format a PostToolUse response into platform-specific output. */
   formatPostToolUseResponse(response: PostToolUseResponse): unknown;
 
-  /** Format a PreCompact response into platform-specific output. */
-  formatPreCompactResponse?(response: PreCompactResponse): unknown;
+  /**
+   * Format a PreCompact response into platform-specific output.
+   *
+   * Required, not optional. These four were optional for hosts with no hook
+   * layer, which registered an adapter only to answer path questions. Both
+   * remaining hosts implement all four, so an adapter that silently omits one
+   * would be a compaction that quietly stops preserving context — the exact
+   * failure the optional marker used to hide.
+   */
+  formatPreCompactResponse(response: PreCompactResponse): unknown;
 
   /** Format a SessionStart response into platform-specific output. */
-  formatSessionStartResponse?(response: SessionStartResponse): unknown;
+  formatSessionStartResponse(response: SessionStartResponse): unknown;
 
   // ── Configuration ──────────────────────────────────────
 
@@ -242,12 +254,16 @@ export interface HookAdapter {
    * where callers could not tell whether the return needed further resolution.
    *
    * Resolution rules:
-   *   - Home-rooted platforms (claude-code, codex, qwen, gemini, antigravity,
-   *     zed, opencode, …) return paths under `homedir()` / XDG / APPDATA.
-   *   - Project-scoped platforms (cursor → `.cursor`, vscode-copilot &
-   *     jetbrains-copilot → `.github`, kiro → `.kiro`, openclaw → project root)
-   *     resolve their segment against the supplied `projectDir`. When
-   *     `projectDir` is omitted, `process.cwd()` is used as the fallback.
+   *   - Home-rooted platforms return paths under `homedir()` / XDG / APPDATA.
+   *     Both remaining adapters are home-rooted: claude-code at
+   *     `$CLAUDE_CONFIG_DIR` or `~/.claude`, codex at `$CODEX_HOME` or
+   *     `~/.codex`.
+   *   - A project-scoped platform (the departed hosts put their config in
+   *     `.cursor`, `.github`, `.kiro`, or the project root) resolves its
+   *     segment against the supplied `projectDir`, falling back to
+   *     `process.cwd()` when it is omitted. Nothing does this today; the
+   *     parameter stays because it is what makes "absolute path" a property
+   *     of the adapter rather than of the caller.
    *
    * @param projectDir Optional project root used to resolve project-scoped
    *                   adapters. Ignored by home-rooted adapters.
@@ -293,16 +309,14 @@ export interface HookAdapter {
   /**
    * Adapter-defined per-platform health checks (Algo-D1).
    *
-   * OPTIONAL. Adapters that don't override return nothing — they don't
-   * have this class of check today. claude-code overrides with hook-script
+   * OPTIONAL, and genuinely so: claude-code implements it with hook-script
    * existence checks that join `pluginRoot + scriptName` directly via
-   * `existsSync`, so doctor never round-trips through a regex on a hook
-   * command (the #548 root cause).
+   * `existsSync` (so doctor never round-trips through a regex on a hook
+   * command — the #548 root cause), while codex ships its hook config inside
+   * the host's own `hooks.json` and has no per-script file to probe.
    *
-   * Adapter #16 with hook scripts inherits the contract by overriding;
-   * adapter #17 without hook scripts simply doesn't override. The doctor
-   * iterates `adapter.getHealthChecks?.(pluginRoot) ?? []` and renders
-   * each — no per-adapter wiring in the doctor body.
+   * The doctor iterates `adapter.getHealthChecks?.(pluginRoot) ?? []` and
+   * renders each — no per-adapter wiring in the doctor body.
    */
   getHealthChecks?(pluginRoot: string): readonly HealthCheck[];
 
@@ -385,17 +399,8 @@ export interface HealthCheck {
  *
  * Safe on macOS/Linux — quoting and forward slashes are no-ops there.
  */
-export function buildNodeCommand(
-  scriptPath: string,
-  opts?: { platform?: string; jsRuntime?: string },
-): string {
-  let nodePath = process.execPath.replace(/\\/g, "/");
-  if (isInProcessPluginPlatform(opts?.platform)) {
-    const base = nodePath.split("/").pop()!.replace(/\.exe$/i, "");
-    if (!JS_RUNTIMES.has(base)) {
-      nodePath = opts?.jsRuntime?.replace(/\\/g, "/") ?? "node";
-    }
-  }
+export function buildNodeCommand(scriptPath: string): string {
+  const nodePath = process.execPath.replace(/\\/g, "/");
   const safePath = scriptPath.replace(/\\/g, "/");
   return `"${nodePath}" "${safePath}"`;
 }
@@ -413,27 +418,15 @@ export function buildNodeCommand(
  * tool call.
  *
  * Why a SEPARATE helper instead of repurposing {@link buildNodeCommand}:
- *   `buildNodeCommand` is also called by openclaw plugin (doctor / upgrade
- *   command suggestions in `src/adapters/openclaw/plugin.ts`). Those CLI
- *   targets MUST stay on Node because they load better-sqlite3, which has
- *   no Bun-compatible prebuild yet (#543). Keeping the two helpers separate
- *   makes the audit trivial: anything emitting a hook spawn command uses
- *   `buildHookRuntimeCommand`; anything emitting a user-visible CLI command
+ *   a user-visible CLI command must stay on Node, because those entry points
+ *   load better-sqlite3 and it has no Bun-compatible prebuild yet (#543).
+ *   The caller that made this concrete — the OpenClaw plugin’s doctor and
+ *   upgrade suggestions — is gone, but the split is what keeps the audit
+ *   trivial: anything emitting a hook spawn command uses
+ *   `buildHookRuntimeCommand`, anything emitting a command a human will run
  *   stays on `buildNodeCommand`.
- *
- * `opts.platform` is forwarded to {@link isInProcessPluginPlatform} so the
- * existing opencode/kilo in-process JS-runtime substitution still works
- * (those platforms inject their own runtime via `opts.jsRuntime`).
  */
-export function buildHookRuntimeCommand(
-  scriptPath: string,
-  opts?: { platform?: string; jsRuntime?: string },
-): string {
-  // In-process plugin platforms (opencode/kilo) inject their own runtime —
-  // delegate to buildNodeCommand which already handles that special case.
-  if (isInProcessPluginPlatform(opts?.platform)) {
-    return buildNodeCommand(scriptPath, opts);
-  }
+export function buildHookRuntimeCommand(scriptPath: string): string {
   const runtime = resolveHookRuntime();
   const runtimePath = runtime.path.replace(/\\/g, "/");
   const safePath = scriptPath.replace(/\\/g, "/");
@@ -455,7 +448,7 @@ export function buildHookRuntimeCommand(
  * producing the #548 doubled-path FAIL when `pluginRoot` contained
  * spaces (e.g. `C:\Users\High Ground Services\…`). A canonical inverse
  * lets every emit (`buildNodeCommand`) round-trip through every parse
- * (`parseNodeCommand`) without inventing fallbacks. Adapter #16 inherits
+ * (`parseNodeCommand`) without inventing fallbacks. The next adapter inherits
  * the contract by importing one module.
  */
 export function parseNodeCommand(
@@ -473,33 +466,10 @@ export function parseNodeCommand(
 /** Known JS runtime binary names (base filename without extension). */
 export const JS_RUNTIMES: ReadonlySet<string> = new Set(["node", "bun", "deno"]);
 
-/** Platforms where context-mode runs as an in-process TS plugin (not MCP stdio). */
-export const IN_PROCESS_PLUGIN_PLATFORMS: ReadonlySet<string> = new Set(["opencode", "kilo"]);
-
-export function isInProcessPluginPlatform(p: string | undefined): boolean {
-  return !!p && IN_PROCESS_PLUGIN_PLATFORMS.has(p);
-}
-
 /** Supported platform identifiers. */
 export type PlatformId =
   | "claude-code"
-  | "gemini-cli"
-  | "opencode"
-  | "kilo"
-  | "openclaw"
   | "codex"
-  | "vscode-copilot"
-  | "jetbrains-copilot"
-  | "copilot-cli"
-  | "cursor"
-  | "antigravity"
-  | "antigravity-cli"
-  | "kiro"
-  | "pi"
-  | "omp"
-  | "kimi"
-  | "zed"
-  | "qwen-code"
   | "unknown";
 
 /** Detection signal used to identify which platform is running. */

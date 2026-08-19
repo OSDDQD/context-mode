@@ -1,7 +1,37 @@
+/**
+ * Tool naming across the supported hosts.
+ *
+ * A tool name is what the agent has to type. Guidance naming `ctx_find` on a
+ * host whose wire name is `mcp__plugin_context-mode_context-mode__ctx_find` is
+ * guidance nobody can act on, so every message these hooks build goes through
+ * a namer bound to the running host — and every one of those call sites is a
+ * place where the binding can be forgotten.
+ *
+ * This file used to enumerate seventeen hosts with one hand-written example
+ * each: `getToolName("zed", …)` equals this string, the Grep guidance for
+ * OpenCode contains that one. Seventeen examples is not seventeen checks —
+ * each factory was exercised on exactly one platform, so a factory that
+ * ignored its namer everywhere except the platform someone happened to pick
+ * would have passed.
+ *
+ * Two hosts made the enumeration cheap enough to replace with the property it
+ * was standing in for: for EVERY factory and EVERY host, every ctx_* name in
+ * the output is spelled the way that host spells it, and no name from the
+ * other host leaks in. That runs the full cross-product, which the seventeen-
+ * row version never did.
+ */
+
 import { describe, it, expect, beforeAll, beforeEach, afterEach } from "vitest";
 import { writeFileSync, unlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { resolve } from "node:path";
+
+interface Decision {
+  action: string;
+  reason?: string;
+  updatedInput?: Record<string, unknown>;
+  additionalContext?: string;
+}
 
 let getToolName: (platform: string, bareTool: string) => string;
 let createToolNamer: (platform: string) => (bareTool: string) => string;
@@ -11,13 +41,9 @@ let routePreToolUse: (
   toolInput: Record<string, unknown>,
   projectDir?: string,
   platform?: string,
-) => {
-  action: string;
-  reason?: string;
-  updatedInput?: Record<string, unknown>;
-  additionalContext?: string;
-} | null;
+) => Decision | null;
 let resetGuidanceThrottle: () => void;
+let formatters: Record<string, unknown>;
 let createRoutingBlock: (t: (tool: string) => string) => string;
 let createReadGuidance: (t: (tool: string) => string) => string;
 let createGrepGuidance: (t: (tool: string) => string) => string;
@@ -38,6 +64,8 @@ beforeAll(async () => {
   const routing = await import("../../hooks/core/routing.mjs");
   routePreToolUse = routing.routePreToolUse;
   resetGuidanceThrottle = routing.resetGuidanceThrottle;
+
+  formatters = (await import("../../hooks/core/formatters.mjs")).formatters;
 
   const block = await import("../../hooks/routing-block.mjs");
   createRoutingBlock = block.createRoutingBlock;
@@ -62,454 +90,233 @@ beforeEach(() => {
 });
 
 afterEach(() => {
-  try { unlinkSync(mcpSentinel); } catch {}
+  try { unlinkSync(mcpSentinel); } catch { /* already gone */ }
 });
 
-// ═══════════════════════════════════════════════════════════════════
-// Tool Naming — getToolName and createToolNamer
-// ═══════════════════════════════════════════════════════════════════
+/** The wire shape each host gives an MCP tool. */
+const EXPECTED_NAMES: Record<string, (tool: string) => string> = {
+  "claude-code": (tool) => `mcp__plugin_context-mode_context-mode__${tool}`,
+  "codex": (tool) => tool,
+};
+const PLATFORMS = Object.keys(EXPECTED_NAMES);
+
+/** Enough tools to catch a namer applied to some arguments and not others. */
+const TOOLS = [
+  "ctx_execute",
+  "ctx_execute_file",
+  "ctx_search",
+  "ctx_find",
+  "ctx_graph",
+  "ctx_batch_execute",
+  "ctx_fetch_and_index",
+];
+
+/**
+ * Every ctx_* mention in a piece of guidance, with its prefix intact.
+ *
+ * The lookbehind skips XML tags: the routing block wraps a section in
+ * `<ctx_commands>`, which is markup the host never calls and which no namer
+ * should ever have touched.
+ */
+function ctxMentions(text: string): string[] {
+  return [...text.matchAll(/(?<![<\/])(?:mcp__[A-Za-z0-9_-]*__)?ctx_[a-z_]+/g)].map((m) => m[0]);
+}
+
+/**
+ * The property every guidance factory has to satisfy on every host: each ctx_*
+ * name is spelled that host's way, and nothing spelled the other host's way
+ * appears at all.
+ */
+function expectNamedFor(platform: string, text: string, label: string): void {
+  const name = EXPECTED_NAMES[platform];
+  const mentions = ctxMentions(text);
+  expect(mentions.length, `${label} on ${platform} names no ctx_* tool at all`).toBeGreaterThan(0);
+  for (const mention of mentions) {
+    const bare = mention.replace(/^mcp__[A-Za-z0-9_-]*__/, "");
+    expect(mention, `${label} on ${platform}: "${mention}" is not how ${platform} spells it`).toBe(name(bare));
+  }
+  for (const other of PLATFORMS.filter((p) => p !== platform)) {
+    // Only meaningful when the other host's spelling is distinguishable —
+    // Codex's bare names are a substring of every prefixed name, so the leak
+    // check runs in the direction that can actually detect one.
+    const sample = EXPECTED_NAMES[other]("ctx_execute");
+    if (sample.startsWith("mcp__")) {
+      expect(text, `${label} on ${platform} leaks ${other} naming`).not.toContain("mcp__");
+    }
+  }
+}
 
 describe("getToolName", () => {
-  it("returns correct name for claude-code", () => {
-    expect(getToolName("claude-code", "ctx_fetch_and_index")).toBe(
-      "mcp__plugin_context-mode_context-mode__ctx_fetch_and_index",
+  for (const platform of PLATFORMS) {
+    it(`spells every tool the ${platform} way`, () => {
+      for (const tool of TOOLS) {
+        expect(getToolName(platform, tool)).toBe(EXPECTED_NAMES[platform](tool));
+      }
+    });
+  }
+
+  it("falls back to claude-code for an unknown platform", () => {
+    // A host we have never heard of gets the convention most likely to work
+    // rather than a bare name that resolves to nothing.
+    expect(getToolName("nonexistent-host", "ctx_execute")).toBe(
+      "mcp__plugin_context-mode_context-mode__ctx_execute",
     );
-  });
-
-  it("returns correct name for gemini-cli", () => {
-    expect(getToolName("gemini-cli", "ctx_fetch_and_index")).toBe(
-      "mcp__context-mode__ctx_fetch_and_index",
-    );
-  });
-
-  it("returns correct name for antigravity", () => {
-    expect(getToolName("antigravity", "ctx_execute")).toBe(
-      "mcp__context-mode__ctx_execute",
-    );
-  });
-
-  it("returns correct name for antigravity-cli", () => {
-    expect(getToolName("antigravity-cli", "ctx_execute_file")).toBe(
-      "context-mode/ctx_execute_file",
-    );
-  });
-
-  it("returns correct name for opencode", () => {
-    expect(getToolName("opencode", "ctx_search")).toBe(
-      "context-mode_ctx_search",
-    );
-  });
-
-  it("returns correct name for vscode-copilot", () => {
-    expect(getToolName("vscode-copilot", "ctx_batch_execute")).toBe(
-      "context-mode_ctx_batch_execute",
-    );
-  });
-
-  it("returns correct name for kiro", () => {
-    expect(getToolName("kiro", "ctx_execute_file")).toBe(
-      "@context-mode/ctx_execute_file",
-    );
-  });
-
-  it("returns correct name for zed", () => {
-    expect(getToolName("zed", "ctx_index")).toBe(
-      "mcp:context-mode:ctx_index",
-    );
-  });
-
-  it("returns bare name for cursor", () => {
-    expect(getToolName("cursor", "ctx_fetch_and_index")).toBe(
-      "ctx_fetch_and_index",
-    );
-  });
-
-  it("returns bare name for codex", () => {
-    expect(getToolName("codex", "ctx_execute")).toBe("ctx_execute");
-  });
-
-  it("returns bare name for openclaw", () => {
-    expect(getToolName("openclaw", "ctx_search")).toBe("ctx_search");
-  });
-
-  it("returns bare name for pi", () => {
-    expect(getToolName("pi", "ctx_batch_execute")).toBe("ctx_batch_execute");
-  });
-
-  it("falls back to claude-code for unknown platforms", () => {
-    expect(getToolName("unknown-platform", "ctx_search")).toBe(
-      "mcp__plugin_context-mode_context-mode__ctx_search",
+    expect(getToolName(undefined as unknown as string, "ctx_execute")).toBe(
+      "mcp__plugin_context-mode_context-mode__ctx_execute",
     );
   });
 });
 
 describe("createToolNamer", () => {
-  it("returns a function that produces correct names", () => {
-    const t = createToolNamer("gemini-cli");
-    expect(t("ctx_execute")).toBe("mcp__context-mode__ctx_execute");
-    expect(t("ctx_search")).toBe("mcp__context-mode__ctx_search");
+  it("agrees with getToolName for every host and every tool", () => {
+    // The namer is what the factories are handed; a divergence between the two
+    // entry points would show up as guidance that is wrong on one code path
+    // and right on the other.
+    for (const platform of [...PLATFORMS, "nonexistent-host"]) {
+      const namer = createToolNamer(platform);
+      for (const tool of TOOLS) {
+        expect(namer(tool)).toBe(getToolName(platform, tool));
+      }
+    }
   });
 });
 
 describe("KNOWN_PLATFORMS", () => {
-  it("contains all platforms", () => {
-    expect(KNOWN_PLATFORMS).toContain("claude-code");
-    expect(KNOWN_PLATFORMS).toContain("gemini-cli");
-    expect(KNOWN_PLATFORMS).toContain("antigravity");
-    expect(KNOWN_PLATFORMS).toContain("opencode");
-    expect(KNOWN_PLATFORMS).toContain("kilo");
-    expect(KNOWN_PLATFORMS).toContain("vscode-copilot");
-    expect(KNOWN_PLATFORMS).toContain("jetbrains-copilot");
-    expect(KNOWN_PLATFORMS).toContain("kiro");
-    expect(KNOWN_PLATFORMS).toContain("zed");
-    expect(KNOWN_PLATFORMS).toContain("cursor");
-    expect(KNOWN_PLATFORMS).toContain("codex");
-    expect(KNOWN_PLATFORMS).toContain("openclaw");
-    expect(KNOWN_PLATFORMS).toContain("pi");
-    expect(KNOWN_PLATFORMS).toContain("qwen-code");
-    expect(KNOWN_PLATFORMS.length).toBeGreaterThanOrEqual(14);
+  it("is exactly the supported set", () => {
+    expect([...KNOWN_PLATFORMS].sort()).toEqual([...PLATFORMS].sort());
+  });
+
+  it("has a response formatter for every host it can name", () => {
+    // The gap the old per-platform enumeration left open: a host could have a
+    // namer and no formatter, and every naming test would still pass while the
+    // hook emitted nothing the host understood.
+    for (const platform of KNOWN_PLATFORMS) {
+      expect(formatters[platform], `${platform} has a namer but no formatter`).toBeDefined();
+    }
+    for (const platform of Object.keys(formatters)) {
+      expect(
+        KNOWN_PLATFORMS,
+        `${platform} has a formatter but no namer — its guidance would fall back to claude-code names`,
+      ).toContain(platform);
+    }
   });
 });
 
-// ═══════════════════════════════════════════════════════════════════
-// Routing Block Factory Functions
-// ═══════════════════════════════════════════════════════════════════
+describe("guidance factories name tools the host's way", () => {
+  const factories: Array<[string, () => (t: (tool: string) => string) => string]> = [
+    ["createRoutingBlock", () => createRoutingBlock],
+    ["createReadGuidance", () => createReadGuidance],
+    ["createGrepGuidance", () => createGrepGuidance],
+    ["createBashGuidance", () => createBashGuidance],
+    ["createExternalMcpGuidance", () => createExternalMcpGuidance],
+  ];
 
-describe("createRoutingBlock", () => {
-  it("produces block with platform-specific tool names for gemini-cli", () => {
-    const t = createToolNamer("gemini-cli");
-    const block = createRoutingBlock(t);
-    expect(block).toContain("mcp__context-mode__ctx_batch_execute");
-    expect(block).toContain("mcp__context-mode__ctx_search");
-    expect(block).toContain("mcp__context-mode__ctx_execute");
-    expect(block).toContain("mcp__context-mode__ctx_fetch_and_index");
-    // Must NOT contain claude-code prefix
-    expect(block).not.toContain("mcp__plugin_context-mode_context-mode__");
-  });
+  // The full cross-product — the thing seventeen one-off examples never ran.
+  for (const [name, get] of factories) {
+    for (const platform of PLATFORMS) {
+      it(`${name} × ${platform}`, () => {
+        expectNamedFor(platform, get()(createToolNamer(platform)), name);
+      });
+    }
+  }
 
-  it("produces block with bare names for cursor", () => {
-    const t = createToolNamer("cursor");
-    const block = createRoutingBlock(t);
-    expect(block).toContain("ctx_batch_execute(commands, queries)");
-    expect(block).toContain("ctx_search(queries:");
-    expect(block).not.toContain("mcp__");
-  });
-});
-
-describe("createReadGuidance", () => {
-  it("uses kiro-style tool names for kiro platform", () => {
-    const t = createToolNamer("kiro");
-    const guidance = createReadGuidance(t);
-    expect(guidance).toContain("@context-mode/ctx_execute_file");
+  it("createExternalMcpGuidance still states what to do with a large payload", () => {
+    for (const platform of PLATFORMS) {
+      const text = createExternalMcpGuidance(createToolNamer(platform));
+      expect(text).toMatch(/filter|count|aggregate/i);
+      expect(text).toContain(getToolName(platform, "ctx_execute"));
+    }
   });
 });
-
-describe("createGrepGuidance", () => {
-  it("uses opencode-style tool names for opencode platform", () => {
-    const t = createToolNamer("opencode");
-    const guidance = createGrepGuidance(t);
-    expect(guidance).toContain("context-mode_ctx_execute");
-  });
-});
-
-describe("createBashGuidance", () => {
-  it("uses zed-style tool names for zed platform", () => {
-    const t = createToolNamer("zed");
-    const guidance = createBashGuidance(t);
-    expect(guidance).toContain("mcp:context-mode:ctx_batch_execute");
-    expect(guidance).toContain("mcp:context-mode:ctx_execute");
-  });
-});
-
-describe("createExternalMcpGuidance (#529)", () => {
-  it("uses kiro-style tool names for kiro platform", () => {
-    const t = createToolNamer("kiro");
-    const guidance = createExternalMcpGuidance(t);
-    expect(guidance).toContain("@context-mode/ctx_execute");
-    expect(guidance).toContain("@context-mode/ctx_fetch_and_index");
-    expect(guidance).toContain("@context-mode/ctx_search");
-  });
-
-  it("uses opencode-style tool names for opencode platform", () => {
-    const t = createToolNamer("opencode");
-    const guidance = createExternalMcpGuidance(t);
-    expect(guidance).toContain("context-mode_ctx_execute");
-    expect(guidance).toContain("context-mode_ctx_fetch_and_index");
-    expect(guidance).toContain("context-mode_ctx_search");
-  });
-
-  it("uses zed-style tool names for zed platform", () => {
-    const t = createToolNamer("zed");
-    const guidance = createExternalMcpGuidance(t);
-    expect(guidance).toContain("mcp:context-mode:ctx_execute");
-    expect(guidance).toContain("mcp:context-mode:ctx_fetch_and_index");
-    expect(guidance).toContain("mcp:context-mode:ctx_search");
-  });
-
-  it("mentions the routing intent so the model knows what to do", () => {
-    const t = createToolNamer("claude-code");
-    const guidance = createExternalMcpGuidance(t);
-    // Identifies the situation
-    expect(guidance).toContain("External MCP tools");
-    // Points to the right tools — losing any of these defeats the guidance
-    expect(guidance).toMatch(/ctx_execute/);
-    expect(guidance).toMatch(/ctx_fetch_and_index/);
-    expect(guidance).toMatch(/ctx_search/);
-  });
-});
-
-// ═══════════════════════════════════════════════════════════════════
-// Backward Compat — Static Exports
-// ═══════════════════════════════════════════════════════════════════
 
 describe("backward compat static exports", () => {
-  it("ROUTING_BLOCK uses claude-code naming", () => {
-    expect(ROUTING_BLOCK).toContain(
-      "mcp__plugin_context-mode_context-mode__ctx_batch_execute",
-    );
-    expect(ROUTING_BLOCK).toContain(
-      "mcp__plugin_context-mode_context-mode__ctx_search",
-    );
-  });
+  const statics: Array<[string, () => string]> = [
+    ["ROUTING_BLOCK", () => ROUTING_BLOCK],
+    ["READ_GUIDANCE", () => READ_GUIDANCE],
+    ["GREP_GUIDANCE", () => GREP_GUIDANCE],
+    ["BASH_GUIDANCE", () => BASH_GUIDANCE],
+    ["EXTERNAL_MCP_GUIDANCE", () => EXTERNAL_MCP_GUIDANCE],
+  ];
 
-  it("READ_GUIDANCE uses claude-code naming", () => {
-    expect(READ_GUIDANCE).toContain(
-      "mcp__plugin_context-mode_context-mode__ctx_execute_file",
-    );
-  });
+  for (const [name, get] of statics) {
+    it(`${name} defaults to claude-code naming`, () => {
+      expectNamedFor("claude-code", get(), name);
+    });
+  }
 
-  it("GREP_GUIDANCE uses claude-code naming", () => {
-    expect(GREP_GUIDANCE).toContain(
-      "mcp__plugin_context-mode_context-mode__ctx_execute",
-    );
-  });
-
-  it("BASH_GUIDANCE uses claude-code naming", () => {
-    expect(BASH_GUIDANCE).toContain(
-      "mcp__plugin_context-mode_context-mode__ctx_batch_execute",
-    );
-  });
-
-  it("EXTERNAL_MCP_GUIDANCE uses claude-code naming and matches the factory (#529)", () => {
-    expect(EXTERNAL_MCP_GUIDANCE).toContain(
-      "mcp__plugin_context-mode_context-mode__ctx_execute",
-    );
-    expect(EXTERNAL_MCP_GUIDANCE).toContain(
-      "mcp__plugin_context-mode_context-mode__ctx_fetch_and_index",
-    );
-    expect(EXTERNAL_MCP_GUIDANCE).toContain(
-      "mcp__plugin_context-mode_context-mode__ctx_search",
-    );
-    // Drift guard: the static export must equal the factory output with the
-    // default (claude-code) namer — they share a single template.
-    const claudeCodeT = createToolNamer("claude-code");
-    expect(EXTERNAL_MCP_GUIDANCE).toBe(createExternalMcpGuidance(claudeCodeT));
+  it("each static equals its factory bound to claude-code", () => {
+    const t = createToolNamer("claude-code");
+    expect(ROUTING_BLOCK).toBe(createRoutingBlock(t));
+    expect(READ_GUIDANCE).toBe(createReadGuidance(t));
+    expect(GREP_GUIDANCE).toBe(createGrepGuidance(t));
+    expect(BASH_GUIDANCE).toBe(createBashGuidance(t));
+    expect(EXTERNAL_MCP_GUIDANCE).toBe(createExternalMcpGuidance(t));
   });
 });
 
-// ═══════════════════════════════════════════════════════════════════
-// routePreToolUse with Platform Parameter
-// ═══════════════════════════════════════════════════════════════════
+describe("routePreToolUse names tools the host's way", () => {
+  /** Every routed path that puts a tool name in front of the agent. */
+  const paths: Array<[string, string, Record<string, unknown>, (d: Decision) => string]> = [
+    ["curl redirect", "Bash", { command: "curl https://example.com" },
+      (d) => String((d.updatedInput as Record<string, string>)?.command ?? d.reason ?? "")],
+    ["inline HTTP redirect", "Bash", { command: 'python -c "requests.get(\'http://example.com\')"' },
+      (d) => String((d.updatedInput as Record<string, string>)?.command ?? d.reason ?? "")],
+    ["build tool redirect", "Bash", { command: "./gradlew build" },
+      (d) => String((d.updatedInput as Record<string, string>)?.command ?? d.reason ?? "")],
+    ["WebFetch deny", "WebFetch", { url: "https://example.com" }, (d) => String(d.reason ?? "")],
+    ["Bash advisory", "Bash", { command: "ps aux" }, (d) => String(d.additionalContext ?? "")],
+    ["Read advisory", "Read", { file_path: "/tmp/does-not-exist.ts" }, (d) => String(d.additionalContext ?? "")],
+    ["Grep advisory", "Grep", { pattern: "TODO" }, (d) => String(d.additionalContext ?? "")],
+  ];
 
-describe("routePreToolUse with platform parameter", () => {
-  it("curl block message uses gemini-cli tool names when platform=gemini-cli", () => {
-    const result = routePreToolUse("Bash", { command: "curl https://example.com" }, "/tmp", "gemini-cli");
-    expect(result).not.toBeNull();
-    expect(result!.action).toBe("modify");
-    const cmd = (result!.updatedInput as Record<string, string>).command;
-    expect(cmd).toContain("mcp__context-mode__ctx_fetch_and_index");
-    expect(cmd).toContain("mcp__context-mode__ctx_execute");
-    expect(cmd).not.toContain("mcp__plugin_context-mode_context-mode__");
+  for (const [label, tool, input, extract] of paths) {
+    for (const platform of PLATFORMS) {
+      it(`${label} × ${platform}`, () => {
+        resetGuidanceThrottle();
+        const decision = routePreToolUse(tool, input, "/tmp", platform);
+        expect(decision, `${label} on ${platform} produced no decision`).not.toBeNull();
+        expectNamedFor(platform, extract(decision!), label);
+      });
+    }
+  }
+
+  it("defaults to claude-code naming when the platform is omitted", () => {
+    const decision = routePreToolUse("Bash", { command: "curl https://example.com" }, "/tmp");
+    const command = String((decision!.updatedInput as Record<string, string>).command);
+    expect(command).toContain("mcp__plugin_context-mode_context-mode__ctx_fetch_and_index");
   });
 
-  it("curl block message uses claude-code tool names when platform is omitted", () => {
-    const result = routePreToolUse("Bash", { command: "curl https://example.com" }, "/tmp");
-    expect(result).not.toBeNull();
-    const cmd = (result!.updatedInput as Record<string, string>).command;
-    expect(cmd).toContain("mcp__plugin_context-mode_context-mode__ctx_fetch_and_index");
+  it("Task is not routed (#241)", () => {
+    for (const platform of PLATFORMS) {
+      expect(routePreToolUse("Task", { prompt: "Analyze the code" }, "/tmp", platform)).toBeNull();
+    }
   });
+});
 
-  it("inline HTTP block uses cursor bare names when platform=cursor", () => {
-    const result = routePreToolUse("Bash", {
-      command: 'python -c "requests.get(\'http://example.com\')"',
-    }, "/tmp", "cursor");
-    expect(result).not.toBeNull();
-    const cmd = (result!.updatedInput as Record<string, string>).command;
-    expect(cmd).toContain("ctx_execute");
-    // PR #683 follow-up (ADR-0003 amendment): "Think in Code" voice-of-trainer
-    // marker was folded into the imperative call instruction. The deny reason
-    // now opens with the affirmative redirect frame; assert on the explicit
-    // ctx_execute call instruction that survived the rewrite.
-    expect(cmd).toContain("Call ctx_execute");
-    expect(cmd).not.toContain("mcp__");
-  });
+describe("native tool names route through the canonical aliases", () => {
+  // Codex names its executor several ways across releases, and all of them
+  // have to land on the Bash branch — an alias that stops resolving does not
+  // fail loudly, it just quietly stops enforcing anything on that host.
+  const bashAliases = ["shell", "shell_command", "exec_command", "container.exec", "local_shell", "Shell"];
 
-  it("WebFetch deny uses kiro tool names when platform=kiro", () => {
-    const result = routePreToolUse("WebFetch", { url: "https://example.com" }, "/tmp", "kiro");
-    expect(result).not.toBeNull();
-    expect(result!.action).toBe("deny");
-    expect(result!.reason).toContain("@context-mode/ctx_fetch_and_index");
-    expect(result!.reason).toContain("@context-mode/ctx_search");
-  });
+  for (const alias of bashAliases) {
+    it(`${alias} routes as Bash`, () => {
+      resetGuidanceThrottle();
+      const decision = routePreToolUse(alias, { command: "curl https://example.com" }, "/tmp", "codex");
+      expect(decision, `${alias} did not reach the Bash branch`).not.toBeNull();
+      // Codex cannot rewrite a command unconditionally, so the decision shape
+      // varies; what must hold is that the redirect names the replacement.
+      const text = String(
+        (decision!.updatedInput as Record<string, string>)?.command ?? decision!.reason ?? "",
+      );
+      expect(text).toContain("ctx_fetch_and_index");
+    });
+  }
 
-  it("Task is no longer routed — returns null (#241)", () => {
-    const result = routePreToolUse("Task", {
-      prompt: "Analyze the code",
-    }, "/tmp", "opencode");
-    expect(result).toBeNull();
-  });
-
-  it("Read guidance uses vscode-copilot tool names when platform=vscode-copilot", () => {
-    const result = routePreToolUse("Read", { file_path: "/tmp/a.ts" }, "/tmp", "vscode-copilot");
-    expect(result).not.toBeNull();
-    expect(result!.action).toBe("context");
-    expect(result!.additionalContext).toContain("context-mode_ctx_execute_file");
-    expect(result!.additionalContext).not.toContain("mcp__plugin_context-mode_context-mode__");
-  });
-
-  it("Grep guidance uses zed tool names when platform=zed", () => {
-    const result = routePreToolUse("Grep", { pattern: "TODO" }, "/tmp", "zed");
-    expect(result).not.toBeNull();
-    expect(result!.action).toBe("context");
-    expect(result!.additionalContext).toContain("mcp:context-mode:ctx_execute");
-  });
-
-  it("Bash guidance uses openclaw bare names when platform=openclaw", () => {
-    // Use an unbounded command so the #463 structurally-bounded allowlist
-    // does not short-circuit the guidance — this test is about platform
-    // tool-naming inside the guidance, not allowlist behavior.
-    const result = routePreToolUse("Bash", { command: "npm install" }, "/tmp", "openclaw");
-    expect(result).not.toBeNull();
-    expect(result!.action).toBe("context");
-    expect(result!.additionalContext).toContain("ctx_batch_execute");
-    expect(result!.additionalContext).toContain("ctx_execute");
-    expect(result!.additionalContext).not.toContain("mcp__");
-  });
-
-  it("OpenClaw lowercase native tools route through canonical aliases", () => {
-    const exec = routePreToolUse("exec", { command: "npm install" }, "/tmp", "openclaw");
-    expect(exec).not.toBeNull();
-    expect(exec!.action).toBe("context");
-    expect(exec!.additionalContext).toContain("ctx_batch_execute");
-
-    const read = routePreToolUse("read", { file_path: "/tmp/a.ts" }, "/tmp", "openclaw");
-    expect(read).not.toBeNull();
-    expect(read!.action).toBe("context");
-    expect(read!.additionalContext).toContain("ctx_execute_file");
-
-    const search = routePreToolUse("search", { pattern: "TODO" }, "/tmp", "openclaw");
-    expect(search).not.toBeNull();
-    expect(search!.action).toBe("context");
-    expect(search!.additionalContext).toContain("ctx_execute");
-  });
-
-  it("Read guidance uses agy context-mode/<tool> names when platform=antigravity-cli", () => {
+  it("grep_files routes as Grep", () => {
     resetGuidanceThrottle();
-    const result = routePreToolUse(
-      "view_file",
-      { AbsolutePath: "/tmp/a.ts" },
-      "/tmp",
-      "antigravity-cli",
-    );
-    expect(result).not.toBeNull();
-    expect(result!.action).toBe("context");
-    expect(result!.additionalContext).toContain("context-mode/ctx_execute_file");
-    expect(result!.additionalContext).not.toContain("mcp__context-mode__ctx_execute_file");
-  });
-
-  it("build tool redirect uses platform tool names when platform=gemini-cli", () => {
-    const result = routePreToolUse("Bash", { command: "./gradlew build" }, "/tmp", "gemini-cli");
-    expect(result).not.toBeNull();
-    expect(result!.action).toBe("modify");
-    const cmd = (result!.updatedInput as Record<string, string>).command;
-    expect(cmd).toContain("mcp__context-mode__ctx_execute");
-    expect(cmd).not.toContain("mcp__plugin_context-mode_context-mode__");
-  });
-
-  // ─── SLICE Qwen-3: routing.mjs Qwen native names ───
-  describe("Qwen Code native tool names route through canonical aliases", () => {
-    it("run_shell_command + curl routes as Bash → modify (curl block)", () => {
-      const result = routePreToolUse(
-        "run_shell_command",
-        { command: "curl https://example.com" },
-        "/tmp",
-        "qwen-code",
-      );
-      expect(result).not.toBeNull();
-      expect(result!.action).toBe("modify");
-      expect((result!.updatedInput as Record<string, string>).command).toContain(
-        "curl/wget redirected",
-      );
-    });
-
-    it("web_fetch routes as WebFetch → deny", () => {
-      const result = routePreToolUse(
-        "web_fetch",
-        { url: "https://example.com" },
-        "/tmp",
-        "qwen-code",
-      );
-      expect(result).not.toBeNull();
-      expect(result!.action).toBe("deny");
-      expect(result!.reason).toContain("WebFetch redirected");
-    });
-
-    it("read_file routes as Read → context guidance", () => {
-      const result = routePreToolUse(
-        "read_file",
-        { file_path: "/tmp/a.ts" },
-        "/tmp",
-        "qwen-code",
-      );
-      expect(result).not.toBeNull();
-      expect(result!.action).toBe("context");
-      expect(result!.additionalContext).toContain("ctx_execute_file");
-    });
-
-    it("grep_search routes as Grep → context guidance", () => {
-      const result = routePreToolUse(
-        "grep_search",
-        { pattern: "TODO" },
-        "/tmp",
-        "qwen-code",
-      );
-      expect(result).not.toBeNull();
-      expect(result!.action).toBe("context");
-    });
-  });
-});
-
-// ─── SLICE Qwen-1: sessionstart platform-aware tool namer ───
-describe("sessionstart detectPlatformFromEnv", () => {
-  let detectPlatformFromEnv: (env?: Record<string, string | undefined>) => string;
-
-  beforeAll(async () => {
-    const mod = await import("../../hooks/core/platform-detect.mjs");
-    detectPlatformFromEnv = mod.detectPlatformFromEnv;
-  });
-
-  it("returns qwen-code when QWEN_PROJECT_DIR is set", () => {
-    expect(detectPlatformFromEnv({ QWEN_PROJECT_DIR: "/tmp/qwen" })).toBe("qwen-code");
-  });
-
-  // QWEN_SESSION_ID retracted in v1.0.107 — 0 hits in qwen-code source
-  // (verified Phase 7 against refs/platforms/qwen-code/). Only QWEN_PROJECT_DIR
-  // is set by the Qwen hook runner — see src/adapters/detect.ts:69 comment
-  // and refs/platforms/qwen-code/packages/core/src/hooks/hookRunner.ts SET site.
-  it("does NOT promote bare QWEN_SESSION_ID (fabrication retraction)", () => {
-    expect(detectPlatformFromEnv({ QWEN_SESSION_ID: "qwen-1" })).toBe("claude-code");
-  });
-
-  it("returns gemini-cli when GEMINI_PROJECT_DIR is set", () => {
-    expect(detectPlatformFromEnv({ GEMINI_PROJECT_DIR: "/tmp/g" })).toBe("gemini-cli");
-  });
-
-  it("falls back to claude-code when no env var is set", () => {
-    expect(detectPlatformFromEnv({})).toBe("claude-code");
-  });
-
-  it("Qwen-prefix MCP names are produced when platform=qwen-code", () => {
-    const namer = createToolNamer("qwen-code");
-    expect(namer("ctx_execute")).toBe("mcp__context-mode__ctx_execute");
+    const decision = routePreToolUse("grep_files", { pattern: "TODO" }, "/tmp", "codex");
+    expect(decision).not.toBeNull();
+    expect(String(decision!.additionalContext ?? decision!.reason ?? "")).toContain("ctx_execute");
   });
 });

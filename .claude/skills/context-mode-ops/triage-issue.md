@@ -182,10 +182,7 @@ Report as a matrix:
 
 ```
 Adapter Tests:
-  ✓ claude-code    ✓ gemini-cli    ✓ opencode
-  ✓ openclaw       ✓ kilo          ✓ codex
-  ✓ vscode-copilot ✓ cursor        ✓ antigravity
-  ✓ kiro           ✓ pi            ✓ zed
+  ✓ claude-code    ✓ codex
 
 Core Tests:    ✓ routing  ✓ search  ✓ server  ✓ cli
 TypeScript:    ✓ no errors

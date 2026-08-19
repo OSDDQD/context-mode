@@ -805,31 +805,24 @@ export interface AdapterDirEntry {
  * so a single call surfaces "your work everywhere on this machine across
  * all AI tools" (the marketing line).
  *
- * Returns ALL 17 adapters even when the dir doesn't exist on disk — the
+ * Returns every known adapter even when its dir doesn't exist on disk — the
  * scanner functions filter to existing dirs. That keeps the enumeration
- * pure / testable without filesystem dependencies.
+ * pure / testable without filesystem dependencies. (It said "ALL 17" until
+ * the count became two and the sentence became a claim about a shape the
+ * function no longer had.)
  */
 export function enumerateAdapterDirs(opts?: { home?: string }): AdapterDirEntry[] {
   const home = opts?.home ?? homedir();
-  // Mirrors `getSessionDirSegments` in src/adapters/detect.ts:92-111.
+  // Mirrors `getSessionDirSegments` in src/adapters/detect.ts. Two entries
+  // each, and they have to agree: this module cannot import an adapter (the
+  // report renders in contexts where none has been instantiated), so the map
+  // is copied rather than derived. That duplication was worth flagging when it
+  // was seventeen rows; at two it is cheaper to keep than to break the
+  // no-adapter-import property that makes this file testable without a
+  // filesystem.
   const map: ReadonlyArray<readonly [string, readonly string[]]> = [
     ["claude-code",      [".claude"]],
-    ["gemini-cli",       [".gemini"]],
-    ["antigravity",      [".gemini"]],
-    ["antigravity-cli",  [".gemini"]],
-    ["openclaw",         [".openclaw"]],
     ["codex",            [".codex"]],
-    ["cursor",           [".cursor"]],
-    ["vscode-copilot",   [".vscode"]],
-    ["copilot-cli",      [".copilot"]],
-    ["kiro",             [".kiro"]],
-    ["pi",               [".pi"]],
-    ["omp",              [".omp"]],
-    ["qwen-code",        [".qwen"]],
-    ["kilo",             [".config", "kilo"]],
-    ["opencode",         [".config", "opencode"]],
-    ["zed",              [".config", "zed"]],
-    ["jetbrains-copilot", [".config", "JetBrains"]],
   ];
   return map.map(([name, segments]) => {
     const base = join(home, ...segments, "context-mode");
@@ -2181,22 +2174,7 @@ export const autoMemoryLabels: Record<string, string> = {
  */
 export const adapterLabels: Record<string, string> = {
   "claude-code":       "Claude Code",
-  "gemini-cli":        "Gemini CLI",
-  "antigravity":       "Antigravity",
-  "antigravity-cli":   "Antigravity CLI",
-  "openclaw":          "Openclaw",
   "codex":             "Codex CLI",
-  "cursor":            "Cursor",
-  "vscode-copilot":    "VS Code Copilot",
-  "copilot-cli":       "GitHub Copilot CLI",
-  "kiro":              "Kiro",
-  "pi":                "Pi",
-  "omp":               "OMP",
-  "qwen-code":         "Qwen Code",
-  "kilo":              "Kilo",
-  "opencode":          "OpenCode",
-  "zed":               "Zed",
-  "jetbrains-copilot": "JetBrains",
 };
 
 /** Look up an adapter's marketing label. Falls back to the raw id. */
@@ -3050,23 +3028,26 @@ function fmtNum(n: number): string {
 // ─────────────────────────────────────────────────────────
 
 // ── Pricing (Bug #6) — per-token USD rate ─────────────────
-// Reads PI_CONTEXT_MODE_PRICE_OUTPUT_PER_TOKEN when set by a Pi host;
-// falls back to the Opus 4.7/4.8 input rate ($5/1M) for all other adapters.
-// Verified against platform.claude.com/docs/en/about-claude/pricing 2026-06.
+// Reads PI_CONTEXT_MODE_PRICE_OUTPUT_PER_TOKEN when set; falls back to the
+// Opus 4.7/4.8 input rate ($5/1M) otherwise. Verified against
+// platform.claude.com/docs/en/about-claude/pricing 2026-06.
 //
-// IMPORTANT: this is a FUNCTION, not a const. Pi sets the env var
-// AFTER the MCP server has been imported (the bridge spawns the server
-// child, then the child reads its own env on every render). A
-// module-load-time const would freeze to the fallback because
-// process.env.PI_CONTEXT_MODE_PRICE_OUTPUT_PER_TOKEN is unset at
-// import time. Resolving on every call keeps the dynamic-pricing
-// contract honest — the env var works without an MCP restart.
+// The variable is named after the host that introduced it, and that host is
+// gone. The override is not: it is the only way to price a session at a rate
+// other than the built-in fallback, and renaming it would break anyone who
+// set it. Renaming belongs with a deprecation window, not with a removal wave.
+//
+// IMPORTANT: this is a FUNCTION, not a const. The env var may be set AFTER
+// this module has been imported (a host that spawns the server as a child sets
+// it on the child, which reads its own env on every render). A module-load-time
+// const would freeze to the fallback. Resolving on every call keeps the
+// dynamic-pricing contract honest — the env var works without an MCP restart.
 // (Reverted module-load const semantics, PR #741 follow-up.)
 
 /**
  * Per-token USD rate — resolves on every call.
- * Dynamic when PI_CONTEXT_MODE_PRICE_OUTPUT_PER_TOKEN is set, Opus 4.7/4.8 input
- * ($5 per 1M tokens) otherwise.
+ * Dynamic when PI_CONTEXT_MODE_PRICE_OUTPUT_PER_TOKEN is set, Opus 4.7/4.8
+ * input ($5 per 1M tokens) otherwise.
  */
 export function pricePerToken(): number {
   const env = process.env.PI_CONTEXT_MODE_PRICE_OUTPUT_PER_TOKEN;
@@ -3082,7 +3063,7 @@ export function pricePerToken(): number {
  * P1.1 — single source of truth). Kept as a literal so any third-party
  * consumer importing the named constant still resolves to the same
  * fallback rate. New code should call pricePerToken() to pick up the
- * dynamic Pi env override.
+ * dynamic env override.
  *
  * @deprecated Use pricePerToken() to honor PI_CONTEXT_MODE_PRICE_OUTPUT_PER_TOKEN.
  */

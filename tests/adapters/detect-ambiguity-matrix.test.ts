@@ -1,16 +1,24 @@
 /**
- * Issue #542 — all-pairs config-dir ambiguity regression matrix.
+ * Issue #542 — config-dir ambiguity matrix.
  *
- * Locks in the post-fix priority order across realistic co-existence
- * scenarios. Every row is a (~/.<dir>/, ~/.<dir>/) pair the user is
- * likely to have on disk simultaneously — e.g. someone who migrated
- * Cursor → Pi, or has Claude Code running inside a Cursor-launched
- * terminal.
+ * The question this file has always asked: when more than one host has left a
+ * config directory in $HOME, which one does the medium-confidence tier pick,
+ * and is that answer stable? It used to take seventeen hosts and an ordering
+ * rule three paragraphs long (agents before editors, forks before parents).
+ * With two hosts the question does not go away — it gets a short answer, and
+ * the answer is still worth pinning, because "which directory wins" is exactly
+ * the decision that silently routes a session's storage to the wrong root.
  *
- * Each test mocks node:fs.existsSync to return true ONLY for the two
- * dirs in the row, then asserts the medium-confidence config-dir tier
- * picks the row's "winner". Companion env-var and clientInfo tiers are
- * exercised in detect.test.ts and detect-config-dir.test.ts.
+ * The fifteen-host removal also created a second question this file is now the
+ * right place for: a user who ran Cursor or Pi last month still has ~/.cursor
+ * and ~/.pi on disk. Those directories must be INERT — detected as nothing,
+ * falling through to the low-confidence default — rather than resolving to a
+ * platform id that no longer has an adapter. A leftover directory that still
+ * won would point storage at a host we cannot serve.
+ *
+ * Each case mocks node:fs.existsSync to return true ONLY for the listed dirs,
+ * then asserts the resulting platform AND confidence. The env-var and
+ * clientInfo tiers are exercised in detect.test.ts and detect-config-dir.test.ts.
  */
 
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
@@ -23,11 +31,7 @@ vi.mock("node:fs", async () => {
 });
 
 import * as fs from "node:fs";
-import {
-  detectPlatform,
-  PLATFORM_ENV_VARS,
-  __seedClaudeCodePluginCacheMissForTests,
-} from "../../src/adapters/detect.js";
+import { detectPlatform, PLATFORM_ENV_VARS } from "../../src/adapters/detect.js";
 
 const existsSyncMock = vi.mocked(fs.existsSync);
 
@@ -36,14 +40,30 @@ const ALL_PLATFORM_ENV_VARS = [
   "CONTEXT_MODE_PLATFORM",
 ];
 
-describe("detectPlatform — all-pairs ambiguity matrix (issue #542)", () => {
+/** Config dirs of hosts removed in the fifteen-host cut, as users still have them. */
+const REMOVED_HOST_DIRS: Array<[string, string[]]> = [
+  ["cursor", [".cursor"]],
+  ["pi", [".pi"]],
+  ["omp", [".omp"]],
+  ["kiro", [".kiro"]],
+  ["qwen-code", [".qwen"]],
+  ["gemini-cli", [".gemini"]],
+  ["openclaw", [".openclaw"]],
+  ["vscode-copilot", [".vscode"]],
+  ["kimi", [".kimi-code"]],
+  ["opencode", [".config", "opencode"]],
+  ["kilo", [".config", "kilo"]],
+  ["zed", [".config", "zed"]],
+  ["jetbrains-copilot", [".config", "JetBrains"]],
+];
+
+describe("detectPlatform — config-dir ambiguity matrix (issue #542)", () => {
   const home = homedir();
   let savedEnv: NodeJS.ProcessEnv;
 
   beforeEach(() => {
     savedEnv = { ...process.env };
     for (const v of ALL_PLATFORM_ENV_VARS) delete process.env[v];
-    __seedClaudeCodePluginCacheMissForTests();
     existsSyncMock.mockReset();
   });
 
@@ -58,43 +78,51 @@ describe("detectPlatform — all-pairs ambiguity matrix (issue #542)", () => {
       typeof p === "string" && targets.has(p)) as typeof fs.existsSync);
   };
 
-  // Row format: [scenario name, [dirA-segments], [dirB-segments], expected winner]
-  const cases: Array<[string, string[], string[], string]> = [
-    // ── CLI agents beat the most-installed host IDE (Cursor) ──
-    ["cursor + pi    → pi",      [".cursor"], [".pi"],      "pi"],
-    ["cursor + omp   → omp",     [".cursor"], [".omp"],     "omp"],
-    ["cursor + kiro  → kiro",    [".cursor"], [".kiro"],    "kiro"],
-    ["cursor + qwen  → qwen",    [".cursor"], [".qwen"],    "qwen-code"],
-    ["cursor + gemini→ gemini",  [".cursor"], [".gemini"],  "gemini-cli"],
-    ["cursor + claude→ claude",  [".cursor"], [".claude"],  "claude-code"],
-    ["cursor + codex → codex",   [".cursor"], [".codex"],   "codex"],
-
-    // ── VSCode coexistence: agent always wins ──
-    ["vscode + claude→ claude",  [".vscode"], [".claude"],  "claude-code"],
-    ["vscode + pi    → pi",      [".vscode"], [".pi"],      "pi"],
-
-    // ── Pi → OMP rebrand collision: OMP wins (more specific) ──
-    ["pi + omp       → omp",     [".pi"],     [".omp"],     "omp"],
-
-    // ── Two-agent collision: priority is documented in detect.ts ──
-    // claude > gemini > codex > kiro > omp > pi > qwen > openclaw > cursor
-    // (issue #542 reorder — agents-first, then editors).
-    ["kiro + gemini  → gemini",  [".kiro"],   [".gemini"],  "gemini-cli"],
-    ["kiro + claude  → claude",  [".kiro"],   [".claude"],  "claude-code"],
-    ["pi + claude    → claude",  [".pi"],     [".claude"],  "claude-code"],
-    ["omp + claude   → claude",  [".omp"],    [".claude"],  "claude-code"],
-
-    // ── Regressions: bare single-dir resolutions still work ──
-    ["cursor only    → cursor",  [".cursor"], [".cursor"],  "cursor"],
-    ["pi only        → pi",      [".pi"],     [".pi"],      "pi"],
-    ["omp only       → omp",     [".omp"],    [".omp"],     "omp"],
-    ["claude only    → claude",  [".claude"], [".claude"],  "claude-code"],
+  // [scenario, dirs present, expected platform, expected confidence]
+  const cases: Array<[string, string[][], string, string]> = [
+    // ── The ambiguity that remains ──
+    ["claude + codex → claude-code", [[".claude"], [".codex"]], "claude-code", "medium"],
+    // ── Each alone ──
+    ["claude only    → claude-code", [[".claude"]], "claude-code", "medium"],
+    ["codex only     → codex", [[".codex"]], "codex", "medium"],
+    // ── Neither: the low-confidence default, not a guess ──
+    ["neither        → claude-code (low)", [], "claude-code", "low"],
   ];
 
-  it.each(cases)("%s", (_name, a, b, expected) => {
-    presentDirs(a, b);
+  it.each(cases)("%s", (_name, dirs, expectedPlatform, expectedConfidence) => {
+    presentDirs(...dirs);
     const signal = detectPlatform();
-    expect(signal.platform).toBe(expected);
-    expect(signal.confidence).toBe("medium");
+    expect(signal.platform).toBe(expectedPlatform);
+    expect(signal.confidence).toBe(expectedConfidence);
+  });
+
+  it("resolves claude + codex the same way regardless of probe order", () => {
+    // The old matrix's whole point was that the winner is a property of the
+    // documented order, not of which existsSync call happened to run first.
+    // With two rows that is cheap to state directly: the answer must not
+    // depend on the set's iteration order.
+    presentDirs([".codex"], [".claude"]);
+    expect(detectPlatform().platform).toBe("claude-code");
+    presentDirs([".claude"], [".codex"]);
+    expect(detectPlatform().platform).toBe("claude-code");
+  });
+
+  describe("directories left behind by removed hosts are inert", () => {
+    it.each(REMOVED_HOST_DIRS)("%s's dir alone detects nothing", (_name, segs) => {
+      presentDirs(segs);
+      const signal = detectPlatform();
+      // Falls through to the low-confidence default. The failure this guards
+      // against is a leftover directory resolving to a platform id with no
+      // adapter behind it, which would point storage at a host we cannot serve.
+      expect(signal.platform).toBe("claude-code");
+      expect(signal.confidence).toBe("low");
+    });
+
+    it("does not let a removed host's dir outrank a supported one", () => {
+      presentDirs([".cursor"], [".codex"]);
+      const signal = detectPlatform();
+      expect(signal.platform).toBe("codex");
+      expect(signal.confidence).toBe("medium");
+    });
   });
 });

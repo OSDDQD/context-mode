@@ -153,7 +153,7 @@ describe("formatPostToolContext — the two hosts that carry the line", () => {
 
   it("says nothing for an empty notice, or for a host with no such channel", () => {
     expect(formatPostToolContext("claude-code", "")).toBeNull();
-    expect(formatPostToolContext("gemini-cli", "hello")).toBeNull();
+    expect(formatPostToolContext("nonexistent-host", "hello")).toBeNull();
   });
 });
 
