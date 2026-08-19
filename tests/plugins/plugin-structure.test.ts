@@ -21,7 +21,8 @@
  *
  * Plus the surface checks for F1/F2: the tools the server registers must be the
  * tools the agent is allowed to call and the tools the plugin's own prose
- * describes.
+ * describes — and, since the host loads the committed server.bundle.mjs rather
+ * than src/, the tools that bundle actually contains.
  */
 
 import "../setup-home";
@@ -268,10 +269,33 @@ describe("hook registration", () => {
 // ─────────────────────────────────────────────────────────
 
 describe("tool surface", () => {
-  /** Tools the server registers, read from src/server.ts's register calls. */
+  const TOOL_REGISTRATION = /registerTool\(\s*"(ctx_[a-z_]+)"/g;
+
+  const toolNamesIn = (body: string): string[] =>
+    [...body.matchAll(TOOL_REGISTRATION)].map((m) => m[1]).sort();
+
+  /**
+   * Tools the sources register. src/server.ts holds only a part of them — the
+   * retrieval surface (ctx_find, ctx_graph, ctx_search, …) registers from
+   * src/tools/*.ts, so scanning the entry point alone would miss exactly the
+   * tools that went missing in the field.
+   */
   const registeredTools = (): string[] => {
-    const src = readFileSync(join(repoRoot, "src", "server.ts"), "utf-8");
-    return [...src.matchAll(/registerTool\(\s*"(ctx_[a-z_]+)"/g)].map((m) => m[1]);
+    const files = [
+      join(repoRoot, "src", "server.ts"),
+      ...readdirSync(join(repoRoot, "src", "tools"))
+        .filter((f) => f.endsWith(".ts"))
+        .map((f) => join(repoRoot, "src", "tools", f)),
+    ];
+    const names = new Set(files.flatMap((f) => toolNamesIn(readFileSync(f, "utf-8"))));
+    return [...names].sort();
+  };
+
+  /** Tools the committed bundle registers — what the host actually loads. */
+  const bundledTools = (): string[] => {
+    const bundle = join(repoRoot, "server.bundle.mjs");
+    expect(existsSync(bundle), "server.bundle.mjs is missing — the plugin ships nothing").toBe(true);
+    return toolNamesIn(readFileSync(bundle, "utf-8"));
   };
 
   it("lets the gather subagent call every retrieval tool it is meant to use", () => {
@@ -314,6 +338,33 @@ describe("tool surface", () => {
     const readme = readFileSync(join(repoRoot, "README.md"), "utf-8");
     const undocumented = registeredTools().filter((tool) => !readme.includes(`\`${tool}\``));
     expect(undocumented, `registered but undocumented: ${undocumented.join(", ")}`).toEqual([]);
+  });
+
+  it("ships every registered tool inside the committed bundle", () => {
+    // The host never loads src/. It loads server.bundle.mjs, which is committed
+    // to this repository and therefore checkable as a source file. This is the
+    // shape of the ctx_find/ctx_graph incident: both tools existed in src/, were
+    // exercised by tests, were listed in every manifest — and were simply absent
+    // from the bundle the host had, so the session saw twelve tools instead of
+    // fourteen while nothing anywhere went red.
+    const bundled = new Set(bundledTools());
+    const missing = registeredTools().filter((tool) => !bundled.has(tool));
+    expect(
+      missing,
+      `missing from server.bundle.mjs: ${missing.join(", ")} — the bundle was built ` +
+        `without these tools, so the host will not see them no matter how many ` +
+        `edits land in src/. Rebuild the bundle and commit it.`,
+    ).toEqual([]);
+  });
+
+  it("keeps the bundle's tool list identical to the sources'", () => {
+    // The reverse direction of the same failure: a stale bundle can also carry
+    // tools that src/ no longer registers. Either way the drift means the bundle
+    // was not rebuilt alongside the change to the tool surface.
+    expect(
+      bundledTools(),
+      "server.bundle.mjs is out of step with src/ — rebuild and commit it",
+    ).toEqual(registeredTools());
   });
 });
 

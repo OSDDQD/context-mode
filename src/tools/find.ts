@@ -116,12 +116,15 @@ export function registerCtxFind(deps: ToolDeps): void {
       description: `One search across everything this project knows about itself, returned as a single ranked list. Five signals run in parallel and are fused with reciprocal-rank fusion: fuzzy file names (frecency-aware, so files this project actually opens rank higher), literal grep over the tree, the FTS5 knowledge base of indexed output and auto-captured session memory, chunk vectors for a query that shares meaning but not words, and the codegraph neighbourhood of whatever the text signals liked. Every row is tagged with the signals that produced it, so a file three signals agree on is visibly stronger than one a single matcher found. Signals that cannot run (no file index, no codegraph index, no embedding endpoint, empty knowledge base) are reported as blind and the rest still fuse.
 
 WHEN:
-  - The question is "where does X live" or "which file handles Y", and the answer is one path rather than a directory listing
+  - Instead of Grep or Glob, when the question is "where does X live" or "which file handles Y" and the answer is one path rather than a page of matches to read through
+  - Instead of Read on a directory of candidates: one ranked list says which file to open, and the other files stay out of your conversation
   - The question is "what do we already know about Z", spanning captured output, session memory and the source tree at once
   - A file-name guess, a grep and a knowledge-base query would otherwise be three separate calls whose results have to be merged by reading all three
   - The search should be confined to one subtree (pass scope) or one kind of source (pass type)
+  - One required parameter, query: a plain question is a valid call, and scope, type and source only narrow it
 WHEN NOT:
-  - The file is already known and the next step is reading or editing it
+  - The file is already known and the next step is editing it — Read first, because Edit matches against the exact bytes in your conversation
+  - The point is an exhaustive literal sweep, every occurrence counted — Grep is the right tool for that; this returns a ranked list, not a complete one
   - The question is structural in itself, such as who calls a symbol or what breaks when it changes — ctx_graph answers those directly
   - The content has never been indexed and does not exist in the tree — capture it first with ctx_batch_execute or ctx_fetch_and_index
 RETURNS:

@@ -50,6 +50,13 @@ import {
   shortBytes,
   type LayerHealth,
 } from "./util/layer-health.js";
+// The delivery layer: what the host unpacked and is running right now, which
+// is not necessarily what this CLI was loaded from. See util/delivery-health.ts.
+import {
+  collectDeliveryHealth,
+  purgePluginCache,
+  renderDeliveryHealth,
+} from "./util/delivery-health.js";
 import { sweepFffMcpLogs } from "./util/fff-logs.js";
 import { drainCodeIndexQueue } from "./session/code-index.js";
 import { drainSubagentQueue } from "./session/subagent-capture.js";
@@ -1660,6 +1667,36 @@ async function doctor(): Promise<number> {
     }
   }
 
+  // ── Delivery: which build is the host actually running? ────────────
+  // The checks above all answer for the tree this CLI was loaded from. The
+  // host does not run that tree — it runs an unpacked copy under
+  // ~/.claude/plugins/cache/context-mode/context-mode/<version>/, keyed by
+  // the version number, so a wave that changes the tool surface without
+  // moving the number leaves every session on the previous copy. That is how
+  // ctx_find and ctx_graph came to be missing from live sessions while the
+  // repository, the marketplace clone and this doctor all looked healthy.
+  // Missing tools are a critical fail: no retry makes them appear.
+  p.log.step("Checking what the host is actually running...");
+  try {
+    const delivery = collectDeliveryHealth({ pluginRoot });
+    const body = renderDeliveryHealth(delivery).map((l) => color.dim(l)).join("\n");
+    if (delivery.status === "fail") {
+      criticalFails++;
+      p.log.error(color.red("Delivery: FAIL") + "\n" + body);
+    } else if (delivery.status === "warn") {
+      p.log.warn(color.yellow("Delivery: WARN") + "\n" + body);
+    } else {
+      p.log.success(color.green("Delivery: PASS") + "\n" + body);
+    }
+  } catch (err) {
+    // collectDeliveryHealth absorbs its own probe failures; this only catches
+    // something pathological, and a doctor must not die of a diagnostic.
+    p.log.warn(
+      color.yellow("Delivery: SKIP") +
+        color.dim(` — ${err instanceof Error ? err.message : String(err)}`),
+    );
+  }
+
   // Version check — adapter-aware
   p.log.step("Checking versions...");
   const localVersion = getLocalVersion();
@@ -2435,6 +2472,51 @@ async function upgrade(opts?: { platform?: string }) {
     );
 
     try { rmSync(tmpDir, { recursive: true, force: true }); } catch { /* ignore */ }
+  }
+
+  // Step 2b: Sweep the host's unpacked plugin cache.
+  //
+  // Claude Code does not run this tree — it runs an unpacked copy under
+  // <config>/plugins/cache/context-mode/context-mode/<version>/, and the cache
+  // key is the version number. Pulling and building alone therefore fixes
+  // nothing for a wave that changed the tool surface without moving the
+  // number: the host keeps serving the old copy, and the session keeps
+  // missing whatever that copy never registered (ctx_find, ctx_graph). Every
+  // stale version directory goes so the host extracts a fresh one.
+  //
+  // The tree we just installed into is kept — deleting it would undo this
+  // upgrade. A stale directory belonging to a still-running session is NOT
+  // spared: it is the exact thing that has to disappear, and this command
+  // already ends by telling the user to restart. (Contrast sessionstart.mjs's
+  // age-gated lazy cleanup from #181, which runs unattended and so has to be
+  // conservative; /ctx-upgrade is explicit and followed by a restart notice.)
+  p.log.step("Clearing the host's unpacked plugin cache...");
+  {
+    const purge = purgePluginCache({ keep: [pluginRoot] });
+    if (purge.error) {
+      p.log.warn(
+        color.yellow("Plugin cache not cleared") + ` — ${purge.error}` +
+          color.dim("\n  The host may keep serving a previously unpacked version until it is removed by hand."),
+      );
+    } else if (purge.removed.length === 0) {
+      p.log.info(
+        color.dim(
+          `Plugin cache: nothing to clear${purge.root ? ` — ${purge.root}` : ""}` +
+          (purge.kept.length > 0 ? ` (kept ${purge.kept.length} in-use director${purge.kept.length === 1 ? "y" : "ies"})` : ""),
+        ),
+      );
+    } else {
+      // Name what went. A cache wipe the user cannot see is a cache wipe the
+      // user cannot trust when the next version still looks stale.
+      p.log.success(
+        color.green(`Plugin cache cleared — removed ${purge.removed.length} unpacked version(s)`) +
+          color.dim("\n  " + purge.removed.join("\n  ")),
+      );
+      changes.push(`Removed ${purge.removed.length} stale unpacked plugin cache version(s)`);
+      for (const k of purge.kept) {
+        p.log.info(color.dim(`  Kept ${k.path} — ${k.reason}`));
+      }
+    }
   }
 
   // Step 3: Backup settings — adapter-aware

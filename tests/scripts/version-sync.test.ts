@@ -208,3 +208,73 @@ describe("version-sync end-to-end", () => {
     }
   });
 });
+
+describe("version-sync --check", () => {
+  // `--check` is what CI runs: it answers "are the eleven manifests in lockstep
+  // with package.json right now" without writing anything, so a drift shows up
+  // as a red build instead of as an install bug months later. It has to stay
+  // read-only — a check that quietly repairs the tree hides the very drift it
+  // was added to report, and would make the release commit depend on whoever
+  // happened to run CI last.
+  function scratch(version: string) {
+    const dir = mkdtempSync(join(tmpdir(), "version-sync-check-"));
+    const dirs = new Set<string>(["scripts"]);
+    for (const t of TARGETS) {
+      const d = t.split("/").slice(0, -1).join("/");
+      if (d) dirs.add(d);
+    }
+    for (const d of dirs) mkdirSync(join(dir, d), { recursive: true });
+    for (const m of TARGETS) cpSync(resolve(REPO_ROOT, m), join(dir, m));
+    cpSync(resolve(REPO_ROOT, "scripts/version-sync.mjs"), join(dir, "scripts/version-sync.mjs"));
+    writeFileSync(
+      join(dir, "package.json"),
+      JSON.stringify({ name: "context-mode", version }, null, 2),
+    );
+    return dir;
+  }
+
+  const check = (cwd: string) =>
+    spawnSync("node", ["scripts/version-sync.mjs", "--check"], { cwd, encoding: "utf8" });
+
+  it("exits 0 when every manifest matches package.json", () => {
+    // Sync first, then check: the two modes must agree about what "in sync"
+    // means, or CI fails on a tree the release script just produced.
+    const dir = scratch("9.9.9-test");
+    try {
+      expect(spawnSync("node", ["scripts/version-sync.mjs"], { cwd: dir, encoding: "utf8" }).status).toBe(0);
+      expect(check(dir).status).toBe(0);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("exits 1 and names the drifted manifest", () => {
+    const dir = scratch("9.9.9-test");
+    try {
+      spawnSync("node", ["scripts/version-sync.mjs"], { cwd: dir, encoding: "utf8" });
+      const victim = TARGETS[0];
+      const content = JSON.parse(readFileSync(join(dir, victim), "utf8"));
+      content.version = "0.0.1-drifted";
+      writeFileSync(join(dir, victim), JSON.stringify(content, null, 2) + "\n");
+
+      const result = check(dir);
+      expect(result.status).toBe(1);
+      expect(result.stderr).toContain(victim);
+      expect(result.stderr).toContain("0.0.1-drifted");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("writes nothing — a check that repairs the tree hides the drift", () => {
+    const dir = scratch("9.9.9-test");
+    try {
+      const before = TARGETS.map((m) => readFileSync(join(dir, m), "utf8"));
+      expect(check(dir).status).toBe(1); // manifests are at the repo version, package.json is not
+      const after = TARGETS.map((m) => readFileSync(join(dir, m), "utf8"));
+      expect(after).toEqual(before);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});

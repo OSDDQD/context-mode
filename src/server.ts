@@ -90,6 +90,10 @@ import {
   layerDiagnosticsEnabled,
   renderLayerHealth,
 } from "./util/layer-health.js";
+import {
+  collectDeliveryHealth,
+  renderDeliveryHealth,
+} from "./util/delivery-health.js";
 import { searchAllSources } from "./search/unified.js";
 import {
   buildCtxSearchInputSchema,
@@ -3919,6 +3923,28 @@ server.registerTool(
       } catch (e) {
         lines.push(`[WARN] Search layers: probe unavailable — ${e instanceof Error ? e.message : String(e)}`);
       }
+    }
+
+    // Delivery: which build is the host actually running?
+    //
+    // Every check above answers for the tree this code was loaded from, and
+    // that tree is exactly where the interesting failure hides: the host runs
+    // an unpacked copy keyed by version number, so a wave that changes the
+    // tool surface without moving the number leaves the session on the old
+    // copy — `ctx_find` and `ctx_graph` were absent from every live session
+    // while both the repository and the marketplace clone carried them, and
+    // this report said everything was fine. REGISTERED_CTX_TOOLS is the
+    // authoritative answer to "what does THIS session have", so pass it.
+    try {
+      const delivery = collectDeliveryHealth({
+        pluginRoot,
+        liveTools: REGISTERED_CTX_TOOLS.map((t) => t.name),
+      });
+      const prefix = delivery.status === "fail" ? "[FAIL]" : delivery.status === "warn" ? "[WARN]" : "[OK]";
+      lines.push(`${prefix} Delivery:`);
+      for (const line of renderDeliveryHealth(delivery)) lines.push(`  ${line}`);
+    } catch (e) {
+      lines.push(`[WARN] Delivery: probe unavailable — ${e instanceof Error ? e.message : String(e)}`);
     }
 
     // Version

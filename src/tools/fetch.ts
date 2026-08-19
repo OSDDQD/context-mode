@@ -649,7 +649,7 @@ export function registerCtxFetch(d: FetchToolDeps): void {
 Caching: every fetch is cached on disk and reused for repeat calls within the TTL window. The default TTL is 24 hours; override per-call with the \`ttl\` parameter (milliseconds, \`ttl: 0\` bypasses cache like \`force: true\`). Stored content older than 14 days is cleaned up on startup.
 
 WHEN:
-  - You need web content (docs, changelogs, API references, spec pages) and the raw page bytes should NOT enter your conversation
+  - Instead of WebFetch, whenever you need web content (docs, changelogs, API references, spec pages): WebFetch returns the page into your conversation, this returns a preview and keeps the rest retrievable via ctx_search
   - Multi-URL research (library evaluation, migration scans, doc comparisons): pass the \`requests\` array and a \`concurrency\` value 2-8 for parallel I/O
   - You want repeat lookups against the same URL to be cheap (TTL cache hits return only a hint, no re-fetch)
   - You want a long-lived cache window (override \`ttl\` upward for stable specs) or a guaranteed-fresh fetch (\`ttl: 0\` or \`force: true\`)
@@ -657,7 +657,8 @@ WHEN:
 SPA pages: fetch them the same way. There is no headless browser, and measurement says none is needed — over 36 documentation pages, 4 had the article absent from the HTTP response and 4 of 4 were recovered without executing JavaScript. The fetch climbs a ladder in cost order and tells you which rung answered: (1) \`Accept: text/markdown\` on the request it was already making, (2a) the page's \`.md\` sibling, (2b) the host's llms.txt, (4) block classification against other pages of the same host, (5) a refusal naming the urls it already tried. Rungs past 1 cost a request only when the cheaper rung returned a JavaScript shell.
 
 WHEN NOT:
-  - You already have the content locally — store it via the inline index tool
+  - You already have the content locally — store it with ctx_index, or read the file if you are about to edit it
+  - The URL is a binary, an archive, or an installer you mean to save rather than read — download it with a command in ctx_batch_execute
   - The page is an application rather than a document (a whiteboard, a diagram editor, a dashboard) — there is no article to fetch, and the fetch will say so rather than index the shell
 
 RETURNS:

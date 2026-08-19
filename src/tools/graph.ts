@@ -200,14 +200,15 @@ export function registerCtxGraph(deps: GraphToolDeps): void {
   The index is a SQLite graph of declarations and the edges between them (calls, imports, extends, implements, references), built by codegraph and read here directly. Seven actions share one contract: \`symbols\` finds where a name is defined, \`outline\` lists every declaration in one file in source order with signatures, \`callers\` and \`callees\` walk the call graph transitively with a depth limit, \`impact\` reports what breaks if a symbol changes (calls plus references plus subclasses), \`related\` names the symbols and files the graph places next to a file, and \`explore\` returns source bodies together with the call paths that reach them. Answers are a few lines each; the graph itself stays in SQLite. Every response states whether the index lags behind the working tree.
 
   WHEN:
-    - You want to know who calls a symbol, what it calls, or what breaks if you change it
-    - You want the shape of a file — its declarations and signatures — before opening it
-    - You want the definition site of a name you have only seen used
+    - Instead of Grep on a symbol name, when you want who calls it, what it calls, or what breaks if you change it — a grep returns matching lines, this returns the edges
+    - Instead of Read on a whole file, when you want its shape: every declaration and signature in source order, a few lines instead of the file
+    - Instead of Grep on a name you have only seen used: this returns the definition site with kind, signature and file:line
     - You want the neighbourhood of a file: what the graph places next to it by imports and calls
     - You want source bodies plus the call paths reaching them for one area of the code (pass \`action: "explore"\`)
 
   WHEN NOT:
     - You are looking for arbitrary text, a comment, or a string literal — that is lexical, so use ctx_find
+    - You are about to edit the file — Read it, because Edit matches against the exact bytes in your conversation
     - You want content you captured earlier (command output, fetched docs, session memory) — that lives in ctx_search
     - The project has no codegraph index yet — run \`codegraph init\` once in the project first
 

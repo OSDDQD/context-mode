@@ -1,6 +1,11 @@
 #!/usr/bin/env node
 // Sync version from package.json to all manifest files.
 // Runs automatically via npm `version` lifecycle hook.
+//
+// `--check` verifies the same invariant without writing anything and exits 1 on
+// drift, so CI can catch a manifest that fell out of lockstep (a release commit
+// that staged package.json but not the manifests) instead of discovering it
+// when a user installs the stale bundle.
 
 import { readFileSync, writeFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
@@ -44,6 +49,30 @@ export const TARGETS = [
   "configs/copilot-cli/.github/plugin/plugin.json",
 ];
 
+// Every place inside a manifest that carries the version. The writer and
+// `--check` both walk this one list, so the check can never assert on a field
+// the sync does not actually write — a mismatch between the two would make CI
+// fail on a manifest that is in fact correct, which is worse than no check.
+// Only fields that already exist are reported: absent ones are absent by
+// design (e.g. .agents/plugins/marketplace.json has no top-level `version`).
+function versionFields(content) {
+  const fields = [];
+  if (content.version !== undefined) {
+    fields.push({ path: "version", owner: content, key: "version" });
+  }
+  if (content.metadata?.version !== undefined) {
+    fields.push({ path: "metadata.version", owner: content.metadata, key: "version" });
+  }
+  if (Array.isArray(content.plugins)) {
+    content.plugins.forEach((p, i) => {
+      if (p?.version !== undefined) {
+        fields.push({ path: `plugins[${i}].version`, owner: p, key: "version" });
+      }
+    });
+  }
+  return fields;
+}
+
 function syncManifests() {
   const pkg = JSON.parse(readFileSync("package.json", "utf8"));
   const version = pkg.version;
@@ -54,13 +83,7 @@ function syncManifests() {
   for (const file of TARGETS) {
     try {
       const content = JSON.parse(readFileSync(file, "utf8"));
-      if (content.version !== undefined) content.version = version;
-      if (content.metadata?.version !== undefined) content.metadata.version = version;
-      if (content.plugins) {
-        for (const p of content.plugins) {
-          if (p.version !== undefined) p.version = version;
-        }
-      }
+      for (const f of versionFields(content)) f.owner[f.key] = version;
       writeFileSync(file, JSON.stringify(content, null, 2) + "\n");
       console.log(`  ✓ ${file}`);
     } catch (e) {
@@ -83,10 +106,62 @@ function syncManifests() {
   console.log(`✓ all manifests at v${version}`);
 }
 
-// Only run the sync when executed directly (npm `version` hook). When imported
-// (e.g. by the test that reads TARGETS as the source of truth), do nothing.
+function checkManifests() {
+  const pkg = JSON.parse(readFileSync("package.json", "utf8"));
+  const version = pkg.version;
+
+  console.log(`→ checking manifests against version ${version}...`);
+
+  const drifted = [];
+  const failures = [];
+  for (const file of TARGETS) {
+    let content;
+    try {
+      content = JSON.parse(readFileSync(file, "utf8"));
+    } catch (e) {
+      // Same reasoning as the writer: an unreadable target is a manifest that
+      // will ship stale, so it is a failure and not a skip.
+      console.error(`  ✗ ${file} — ${e.message}`);
+      failures.push(file);
+      continue;
+    }
+    const fields = versionFields(content);
+    if (fields.length === 0) {
+      // A target with no version field at all cannot be kept in lockstep — it
+      // is either the wrong path or a manifest that lost its version key.
+      console.error(`  ✗ ${file} — no version field to check`);
+      failures.push(file);
+      continue;
+    }
+    const off = fields.filter((f) => f.owner[f.key] !== version);
+    if (off.length > 0) {
+      for (const f of off) {
+        console.error(`  ✗ ${file}#${f.path} — ${String(f.owner[f.key])} (expected ${version})`);
+      }
+      drifted.push(file);
+      continue;
+    }
+    console.log(`  ✓ ${file}`);
+  }
+
+  if (drifted.length > 0 || failures.length > 0) {
+    console.error(
+      `version-sync --check: FAIL — ${drifted.length} manifest(s) out of sync` +
+        `${failures.length > 0 ? `, ${failures.length} unreadable` : ""}. ` +
+        `Run \`node scripts/version-sync.mjs\` and commit the result.`,
+    );
+    process.exit(1);
+  }
+
+  console.log(`✓ all manifests at v${version}`);
+}
+
+// Only run when executed directly (npm `version` hook, or CI passing --check).
+// When imported (e.g. by the test that reads TARGETS as the source of truth),
+// do nothing.
 if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
-  syncManifests();
+  if (process.argv.slice(2).includes("--check")) checkManifests();
+  else syncManifests();
 }
 
 // Note: package.json's `omp` block intentionally has no `version` field.

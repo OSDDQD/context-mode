@@ -70,12 +70,16 @@ export function registerBatchTools(deps: BatchToolDeps): void {
 Concurrency parallelizes the FETCH phase (run-the-commands). The DERIVATION phase — turning raw output into an answer — still belongs in code: add a processing command that consumes the indexed output and prints only the answer, so the raw bytes never enter your conversation (Think-in-Code, same principle as ctx_execute).
 
 WHEN:
+  - Instead of Bash, when the output is long or you intend to filter it — the bytes land in storage and only the matched windows come back, where Bash puts every line in your conversation
   - You have 3+ related commands you would otherwise run sequentially (multi-issue lookups, git log + git diff + git blame, multi-file reads, multi-region cloud queries)
+  - Instead of several Read calls across files: one command per file, indexed, answered by \`queries\` in the same round trip
   - You want to gather AND query in one round trip — pass \`queries\` so the matching sections come back inline
   - You want to parallelize I/O-bound work — pass \`concurrency\` 2-8 (network calls, gh CLI, cloud APIs, multi-repo git reads)
   - The combined output is large enough that piping it through ctx_search later would itself be expensive — let auto-index + inline queries do both in one shot
 
 WHEN NOT:
+  - The output is short, fixed, and you will read it verbatim (git status on a clean tree, whoami, a version string) — Bash is the smaller move
+  - The point is to mutate state and see it succeed or fail (git commit, mkdir, rm, npm install) — Bash is direct, and there is nothing to index
   - Single command with no follow-up query — run it in ctx_execute directly
   - CPU-bound or stateful commands — keep concurrency at 1 (npm test, build, lint, port-binding servers, lock-file holders, anything that races on the same resource)
 
@@ -290,7 +294,8 @@ EXAMPLE: ctx_batch_execute(
 Every command must be provably read-only. Accepted: file inspection (cat, ls, head, tail, grep, find, wc, jq, stat), read subcommands of the common multiplexers (git log|show|diff|status|branch, docker ps|logs|inspect, kubectl get|describe|logs, npm ls|view|outdated), and system probes. Refused: output redirection, command substitution, sudo, and any binary not on the allowlist.
 
 WHEN:
-  - The host is in plan mode, where tools that may write are refused outright — this is the read-only gather path that survives that gate
+  - Instead of Bash while the host is in plan mode, where tools that may write are refused outright — this is the read-only gather path that survives that gate
+  - Instead of a run of Read and Grep calls over a tree you are surveying: the output is indexed and answered by \`queries\`, so the files themselves stay out of your conversation
   - You must be able to promise the caller that a gather step mutated nothing
   - You want ctx_batch_execute's index-and-query round trip for a set of pure inspection commands
 

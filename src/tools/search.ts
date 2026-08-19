@@ -57,6 +57,7 @@ export function registerCtxSearch(deps: ToolDeps): void {
   The knowledge base is unified: queries reach indexed content you stored (ctx_index, ctx_fetch_and_index, ctx_batch_execute output) AND auto-captured session memory written by hooks (decisions, errors, blockers, plans, user prompts, rejected approaches, tool failures, compaction guides — 26 event categories). File-backed sources carry a content hash and auto-flag staleness when the source file changes.
 
   WHEN:
+    - Instead of a second Bash run or a second Read of what already produced the answer once — it is in storage, and recalling it costs a snippet rather than the whole output again
     - You want to recall something that exists in storage (recently indexed content, prior session events, auto-memory) instead of re-reading raw sources
     - You have multiple related questions about the same body of knowledge — batch every question into one call (the ranking pipeline runs per-query but the round-trip cost is paid once)
     - You want to scope the query to one labelled source (pass \`source\` — partial match is fine)
@@ -65,6 +66,8 @@ export function registerCtxSearch(deps: ToolDeps): void {
 
   WHEN NOT:
     - The data you want to query has never been stored in the knowledge base AND no session memory has accumulated around it — capture first (run a gather-and-index call), then come back here to query
+    - You need the state of something that has changed since it was captured (a live log, a file you just wrote) — re-run it with ctx_batch_execute; this returns what was captured, not what is true now
+    - You are about to edit the file you would be recalling — Read it, because Edit matches against the exact bytes in your conversation and a snippet is not those bytes
     - You have one ad-hoc question against data that is not in the knowledge base — answer it inline by running code in ctx_execute; one round-trip instead of capture-then-query
 
   RETURNS:
