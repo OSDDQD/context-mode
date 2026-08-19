@@ -34,6 +34,7 @@ import { serverSource } from "../shared/server-source.js";
 const DISPLACES: Record<string, string[]> = {
   ctx_execute: ["Bash"],
   ctx_execute_file: ["Read"],
+  ctx_read: ["Read"],
   ctx_search: ["Bash", "Read"],
   ctx_find: ["Grep", "Glob"],
   ctx_graph: ["Grep", "Read"],

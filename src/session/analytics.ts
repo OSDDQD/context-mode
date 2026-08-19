@@ -79,6 +79,160 @@ export interface SandboxIO {
   outputBytes: number;
 }
 
+// ─────────────────────────────────────────────────────────
+// Routing adherence — how much of the heavy work went through the plugin
+// ─────────────────────────────────────────────────────────
+
+/**
+ * One tool call, as far as the routing question is concerned.
+ *
+ * `bytes` is the payload the call handled: what a native tool put into the
+ * context window whole, or — for a routed call — what the plugin processed on
+ * the model's behalf (kept out plus handed back). `undefined` means the size
+ * was never recorded, which is a state of its own: such a call is counted
+ * under `unclassified` and never quietly folded into the denominator.
+ */
+export interface RoutingCallSample {
+  /** Did this call go through context-mode (sandbox, redirect) or not? */
+  routed: boolean;
+  /** `Bash`, `Read`, `ctx_execute`, … — whatever made the call. */
+  tool: string;
+  /** Payload size in bytes, or undefined when the call was never sized. */
+  bytes?: number;
+  /**
+   * `bytes` came from this session's per-tool average, not from this call.
+   * Counted, and reported, so nobody reads an estimate as a measurement.
+   */
+  estimated?: boolean;
+  /** Command, path or URL — what leaked, so the number is actionable. */
+  summary?: string;
+}
+
+/** `routed heavy calls / all heavy calls`, plus everything needed to read it. */
+export interface RoutingAdherence {
+  /** The heaviness line, in bytes. Below it a call is not counted at all. */
+  minBytes: number;
+  /** Set when the configured threshold had to be raised to the collection floor. */
+  clampedFrom?: number;
+  routedHeavy: number;
+  /** How many of `routedHeavy` were sized by average rather than measured. */
+  routedEstimated: number;
+  unroutedHeavy: number;
+  /** The denominator: routedHeavy + unroutedHeavy. */
+  heavy: number;
+  /** null when nothing crossed the line — "no data", never a 0/0 zero. */
+  ratio: number | null;
+  routedBytes: number;
+  unroutedBytes: number;
+  /** Calls observed whose payload size is unknown. Shown, never averaged in. */
+  unclassified: number;
+  /** The routed part of `unclassified` — excluded from a ratio it would raise. */
+  unclassifiedRouted: number;
+  /** Heaviest unrouted offenders: what to route next, in order. */
+  top: Array<{ tool: string; calls: number; bytes: number; summary: string }>;
+}
+
+/** The heaviness threshold, and the floor it cannot go under. */
+export function adherenceMinBytes(env: NodeJS.ProcessEnv = process.env): {
+  minBytes: number;
+  clampedFrom?: number;
+} {
+  // The PostToolUse hook only records an unrouted call once it clears
+  // CONTEXT_MODE_MISSED_REDIRECT_MIN_BYTES, so nothing below that line exists
+  // in the data. Measuring under it would drop unrouted calls out of the
+  // denominator while routed ones stayed in — a ratio that flatters by
+  // construction. Hence the clamp, reported rather than applied in silence.
+  const rawFloor = Number.parseInt(env.CONTEXT_MODE_MISSED_REDIRECT_MIN_BYTES ?? "", 10);
+  const floor = Number.isFinite(rawFloor) && rawFloor > 0 ? rawFloor : 2000;
+  const rawWanted = Number.parseInt(env.CONTEXT_MODE_ADHERENCE_MIN_BYTES ?? "", 10);
+  const wanted = Number.isFinite(rawWanted) && rawWanted > 0 ? rawWanted : floor;
+  return wanted < floor ? { minBytes: floor, clampedFrom: wanted } : { minBytes: wanted };
+}
+
+/**
+ * Turn a session's calls into the adherence number.
+ *
+ * Pure — no DB, no env — so the edge cases are testable directly: a session
+ * with nothing heavy in it answers `ratio: null` ("no data") rather than a 0
+ * that reads like total failure, and a call of unknown size lands in
+ * `unclassified` instead of being assumed one way or the other.
+ */
+export function computeRoutingAdherence(
+  samples: readonly RoutingCallSample[],
+  opts: { minBytes: number; clampedFrom?: number; topLimit?: number },
+): RoutingAdherence {
+  const minBytes = opts.minBytes;
+  let routedHeavy = 0, unroutedHeavy = 0, routedBytes = 0, unroutedBytes = 0;
+  let routedEstimated = 0;
+  let unclassified = 0, unclassifiedRouted = 0;
+  // Grouped by tool + what it ran: the same `git log` fired eight times is one
+  // habit to fix, not eight lines to read past.
+  const offenders = new Map<string, { tool: string; calls: number; bytes: number; summary: string }>();
+
+  for (const s of samples) {
+    const bytes = s.bytes;
+    if (bytes === undefined || !Number.isFinite(bytes) || bytes < 0) {
+      unclassified++;
+      if (s.routed) unclassifiedRouted++;
+      continue;
+    }
+    if (bytes < minBytes) continue; // not heavy — outside the question entirely
+    if (s.routed) {
+      routedHeavy++;
+      routedBytes += bytes;
+      if (s.estimated) routedEstimated++;
+      continue;
+    }
+    unroutedHeavy++;
+    unroutedBytes += bytes;
+    const summary = (s.summary ?? "").trim();
+    const key = `${s.tool} ${summary}`;
+    const cur = offenders.get(key) ?? { tool: s.tool, calls: 0, bytes: 0, summary };
+    cur.calls++;
+    cur.bytes += bytes;
+    offenders.set(key, cur);
+  }
+
+  const heavy = routedHeavy + unroutedHeavy;
+  return {
+    minBytes,
+    ...(opts.clampedFrom !== undefined ? { clampedFrom: opts.clampedFrom } : {}),
+    routedHeavy,
+    routedEstimated,
+    unroutedHeavy,
+    heavy,
+    ratio: heavy > 0 ? routedHeavy / heavy : null,
+    routedBytes,
+    unroutedBytes,
+    unclassified,
+    unclassifiedRouted,
+    top: [...offenders.values()]
+      .sort((a, b) => b.bytes - a.bytes)
+      .slice(0, opts.topLimit ?? 5),
+  };
+}
+
+/**
+ * The `ctx_*` tools that exist to move a payload — the routed counterpart of
+ * a heavy `Bash` or `Read`.
+ *
+ * `ctx_doctor`, `ctx_stats`, `ctx_upgrade`, `ctx_purge` and `ctx_insight` are
+ * deliberately absent: they are meta commands about the plugin, and counting
+ * them as routed heavy work would let a session raise its adherence by running
+ * diagnostics.
+ */
+const ROUTED_PAYLOAD_TOOLS: readonly string[] = [
+  "ctx_execute",
+  "ctx_execute_file",
+  "ctx_batch_execute",
+  "ctx_search",
+  "ctx_find",
+  "ctx_graph",
+  "ctx_fetch_and_index",
+  "ctx_gather",
+  "ctx_index",
+];
+
 /** MCP tool usage row — concurrency stats for batch-style tools. */
 export interface McpToolUsageRow {
   tool_name: string;
@@ -144,6 +298,14 @@ export interface ConversationStats {
     /** Heaviest offenders, descending by bytes. */
     top: Array<{ tool: string; bytes: number; summary: string }>;
   };
+  /**
+   * Routing adherence for this conversation: the share of heavy calls that
+   * went through context-mode. Undefined only when the session DB could not
+   * be read at all — a session with nothing heavy in it still reports, with
+   * `ratio: null`, because "nothing crossed the line" is an answer and a
+   * fabricated 0% is not.
+   */
+  adherence?: RoutingAdherence;
 }
 
 // ─────────────────────────────────────────────────────────
@@ -946,6 +1108,11 @@ export function getConversationStats(opts: {
   let missedCount = 0;
   let missedBytes = 0;
   const missedTop: Array<{ tool: string; bytes: number; summary: string }> = [];
+  // Every call this session made that routing has an opinion about, routed or
+  // not. Collected here so the ratio is computed from one pass over the same
+  // rows the savings numbers come from — a second telemetry channel would only
+  // give the two halves of the picture a way to disagree.
+  const routingSamples: RoutingCallSample[] = [];
 
   for (const file of dbFiles) {
     const dbPath = join(sessionsDir, file);
@@ -1016,14 +1183,86 @@ export function getConversationStats(opts: {
           ).all(sessionId) as Array<{ data: string | null }>;
           for (const row of missedRows) {
             const m = /^(\S+):\s+(\d+)\s+bytes unrouted(?:\s+—\s+(.*))?$/.exec(row.data ?? "");
-            if (!m) continue;
+            if (!m) {
+              // A row exists, so a heavy call happened; its size is not
+              // recoverable from this text. Neither half of the ratio may
+              // claim it.
+              routingSamples.push({ routed: false, tool: "unknown" });
+              continue;
+            }
             const bytes = parseInt(m[2], 10);
-            if (!Number.isFinite(bytes) || bytes <= 0) continue;
+            if (!Number.isFinite(bytes) || bytes <= 0) {
+              routingSamples.push({ routed: false, tool: m[1] });
+              continue;
+            }
             missedCount++;
             missedBytes += bytes;
-            missedTop.push({ tool: m[1], bytes, summary: (m[3] ?? "").trim() });
+            const summary = (m[3] ?? "").trim();
+            missedTop.push({ tool: m[1], bytes, summary });
+            routingSamples.push({ routed: false, tool: m[1], bytes, summary });
           }
         } catch { /* old schema */ }
+        // Routed half, part one: `redirect` rows — native calls the PreToolUse
+        // hook turned around before their payload could land. Written by the
+        // same hook as the missed-redirect rows, against the same session id,
+        // with the payload in `bytes_avoided`. One row per call, measured.
+        try {
+          const redirected = sdb.prepare(
+            "SELECT data, bytes_avoided FROM session_events "
+            + "WHERE session_id = ? AND category = 'redirect'",
+          ).all(sessionId) as Array<{ data: string | null; bytes_avoided: number | null }>;
+          for (const row of redirected) {
+            const bytes = Number(row.bytes_avoided ?? 0);
+            const label = (row.data ?? "").trim();
+            const colon = label.indexOf(":");
+            routingSamples.push({
+              routed: true,
+              tool: colon > 0 ? label.slice(0, colon) : (label || "context-mode"),
+              ...(bytes > 0 ? { bytes } : {}),
+              ...(colon > 0 ? { summary: label.slice(colon + 1).trim() } : {}),
+            });
+          }
+        } catch { /* old schema */ }
+        // Routed half, part two: the `ctx_*` calls themselves.
+        //
+        // `tool_calls` is the only per-session record of them — the `sandbox`
+        // events look like a better source but are written against
+        // `getLatestSessionId()` rather than the calling session, so they land
+        // under whichever session happened to be newest in the DB (measured:
+        // a session with nine ctx_* calls in `tool_calls` had zero sandbox
+        // rows of its own). What `tool_calls` does not have is a size per
+        // call, only the session total — so heaviness is decided per tool by
+        // this session's own average, and every call sized that way is
+        // counted in `routedEstimated` and named in the report.
+        //
+        // The average is of bytes RETURNED, which is smaller than the payload
+        // the sandbox actually handled. The bias is therefore downward: this
+        // undercounts routed heavy calls rather than inventing them.
+        try {
+          const routedCalls = sdb.prepare(
+            "SELECT tool, calls, bytes_returned FROM tool_calls WHERE session_id = ?",
+          ).all(sessionId) as Array<{
+            tool: string | null; calls: number | null; bytes_returned: number | null;
+          }>;
+          for (const row of routedCalls) {
+            if (!row.tool || !ROUTED_PAYLOAD_TOOLS.includes(row.tool)) continue;
+            const calls = Math.max(0, Number(row.calls ?? 0));
+            if (calls === 0) continue;
+            const total = Math.max(0, Number(row.bytes_returned ?? 0));
+            // No bytes recorded at all → unknown, not zero. `mean` sizes the
+            // rest; sub-threshold means resolve to unclassified inside
+            // computeRoutingAdherence only if the mean is below the line,
+            // which is the correct verdict for a tool used for small answers.
+            const mean = total > 0 ? Math.round(total / calls) : undefined;
+            for (let i = 0; i < calls; i++) {
+              routingSamples.push({
+                routed: true,
+                tool: row.tool,
+                ...(mean !== undefined ? { bytes: mean, estimated: true } : {}),
+              });
+            }
+          }
+        } catch { /* old schema — the table predates some installs */ }
       } finally {
         sdb.close();
       }
@@ -1069,6 +1308,7 @@ export function getConversationStats(opts: {
           },
         }
       : {}),
+    adherence: computeRoutingAdherence(routingSamples, adherenceMinBytes()),
   };
 }
 
@@ -2509,6 +2749,51 @@ function renderNarrative5Section(args: {
       `  Knowledge base on disk: ${kb(storeUsage.bytes)} across ${storeUsage.stores} store${storeUsage.stores === 1 ? "" : "s"} — this is what it costs to keep, not what it saved.`,
     );
   }
+  // Adherence: the one number that says whether routing is actually happening.
+  // Everything above measures what the plugin did; this measures what share of
+  // the work it was given. Without it, every change to the tool descriptions,
+  // the hooks or the routing block is accepted on belief.
+  const adherence = conversation.adherence;
+  if (adherence) {
+    out.push("");
+    if (adherence.ratio === null) {
+      // Not "0%". Nothing crossed the line, which is a different statement.
+      out.push(
+        `  Routing adherence: no data — no call moved ${kb(adherence.minBytes)} or more this session (CONTEXT_MODE_ADHERENCE_MIN_BYTES).`,
+      );
+    } else {
+      out.push(
+        `  Routing adherence: ${Math.round(adherence.ratio * 100)}% — ${adherence.routedHeavy} of ${adherence.heavy} heavy call${adherence.heavy === 1 ? "" : "s"} went through context-mode.`,
+      );
+      // Name the threshold: a share of "heavy calls" cannot be read without it.
+      out.push(
+        `    Heavy means one call moving ${kb(adherence.minBytes)} or more (CONTEXT_MODE_ADHERENCE_MIN_BYTES).`,
+      );
+      out.push(
+        `    Through the plugin: ${kb(adherence.routedBytes)} · straight into context: ${kb(adherence.unroutedBytes)}.`,
+      );
+      if (adherence.routedEstimated > 0) {
+        // An estimate that does not say it is one is just a wrong measurement.
+        out.push(
+          `    ${adherence.routedEstimated} of the routed call${adherence.routedEstimated === 1 ? " was" : "s were"} sized by this session's per-tool average —`,
+        );
+        out.push("    context-mode records a total per tool, not a size per call.");
+      }
+    }
+    if (adherence.clampedFrom !== undefined) {
+      out.push(
+        `    Raised from ${kb(adherence.clampedFrom)}: below the collection floor unrouted calls are not recorded at all,`,
+      );
+      out.push("    so a lower line would count routed work while missing the leaks it hides.");
+    }
+    if (adherence.unclassified > 0) {
+      out.push(
+        `    Not classified: ${adherence.unclassified} call${adherence.unclassified === 1 ? "" : "s"} with no recorded size`
+        + (adherence.unclassifiedRouted > 0 ? ` (${adherence.unclassifiedRouted} of them routed)` : "")
+        + " — kept out of the ratio rather than averaged into it.",
+      );
+    }
+  }
   // The honest counterweight: what routing did NOT catch. Printed only when
   // there is something to report, so a clean session stays clean.
   const missed = conversation.missedRedirect;
@@ -2517,9 +2802,15 @@ function renderNarrative5Section(args: {
     out.push(
       `  Slipped through unrouted: ${kb(missed.bytes)} across ${missed.count} call${missed.count === 1 ? "" : "s"} — these landed in context whole.`,
     );
-    for (const m of missed.top) {
+    // Prefer the grouped offender list: the same command fired eight times is
+    // one habit to change, and the count is the part that says so.
+    const offenders = adherence && adherence.top.length > 0
+      ? adherence.top.slice(0, 3)
+      : missed.top.map((m) => ({ ...m, calls: 1 }));
+    for (const m of offenders) {
       const summary = m.summary.length > 58 ? m.summary.slice(0, 57) + "…" : m.summary;
-      out.push(`    ${m.tool.padEnd(8)} ${kb(m.bytes).padStart(9)}  ${summary}`);
+      const times = m.calls > 1 ? ` ×${m.calls}` : "";
+      out.push(`    ${m.tool.padEnd(8)} ${kb(m.bytes).padStart(9)}${times}  ${summary}`);
     }
     out.push("    Route these through ctx_execute / ctx_batch_execute, or add them to");
     out.push("    safe-commands.txt if their output really is small.");

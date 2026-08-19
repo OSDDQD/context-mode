@@ -12,10 +12,17 @@ export const formatters = {
         permissionDecisionReason: reason,
       },
     }),
-    ask: () => ({
+    // Carry the reason when there is one. A confirmation prompt with no
+    // explanation is a prompt the user answers by reflex and the model learns
+    // nothing from — and the whole point of escalating a search to `ask`
+    // rather than denying it is that the caller reads the tradeoff and
+    // decides. Omitted when absent, so the security-policy `ask` path (which
+    // carries no reason) keeps the exact shape it had.
+    ask: (reason) => ({
       hookSpecificOutput: {
         hookEventName: "PreToolUse",
         permissionDecision: "ask",
+        ...(reason ? { permissionDecisionReason: reason } : {}),
       },
     }),
     // Tool-aware modify handling for claude-code:
@@ -65,6 +72,14 @@ export const formatters = {
     context: (additionalContext) => ({
       hookSpecificOutput: {
         hookEventName: "PreToolUse",
+        additionalContext,
+      },
+    }),
+    // PostToolUse carries its own event name; reusing the PreToolUse shape
+    // here would make the host drop the line.
+    postToolContext: (additionalContext) => ({
+      hookSpecificOutput: {
+        hookEventName: "PostToolUse",
         additionalContext,
       },
     }),
@@ -198,6 +213,17 @@ export const formatters = {
       codexSupportsRewrite
         ? { hookSpecificOutput: { hookEventName: "PreToolUse", additionalContext } }
         : null,
+    // Ungated, unlike `context` above: PreToolUse additionalContext is gated
+    // because an older Codex that drops it also drops the decision it came
+    // with. PostToolUse carries no decision — the adapter's own
+    // formatPostToolUseResponse emits this same shape unconditionally, and a
+    // build that ignores the field just does not show the line.
+    postToolContext: (additionalContext) => ({
+      hookSpecificOutput: {
+        hookEventName: "PostToolUse",
+        additionalContext,
+      },
+    }),
   },
 
   "kimi": {
@@ -338,6 +364,23 @@ function codexRedirectReason(command) {
  * `codexSupportsRewrite`). Formatters that ignore the extra argument are
  * unaffected.
  */
+/**
+ * Format a line to append to a finished tool's result (PostToolUse).
+ *
+ * Separate from formatDecision because PostToolUse is not a decision: there is
+ * nothing to allow, deny or rewrite, only something to say. Platforms that
+ * have no PostToolUse context channel return null and print nothing — the two
+ * that do are the two whose PostToolUse hook actually measures a payload.
+ *
+ * @returns {object | null} platform-specific JSON, or null for "say nothing"
+ */
+export function formatPostToolContext(platform, additionalContext) {
+  if (!additionalContext) return null;
+  const fmt = formatters[platform];
+  if (!fmt || typeof fmt.postToolContext !== "function") return null;
+  return fmt.postToolContext(additionalContext);
+}
+
 export function formatDecision(platform, decision, opts = {}) {
   if (!decision) return null;
 

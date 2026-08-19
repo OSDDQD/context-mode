@@ -27,6 +27,7 @@ import {
   getRuntimeSummary,
   getAvailableLanguages,
   hasBunRuntime,
+  type Language,
 } from "./runtime.js";
 import { classifyNonZeroExit } from "./exit-classify.js";
 import { drainCodeIndexQueue, bootstrapCodeIndex, pruneDeletedCodeSources, pruneForeignCodeSources } from "./session/code-index.js";
@@ -43,6 +44,7 @@ import {
 } from "./search/completeness.js";
 import { CrossQueryDeduper } from "./search/dedup.js";
 import { registerCtxSearch } from "./tools/search.js";
+import { registerCtxRead, type ReadToolDeps } from "./tools/read.js";
 import { registerCtxFind } from "./tools/find.js";
 import { registerCtxGraph } from "./tools/graph.js";
 import { registerBatchTools } from "./tools/batch.js";
@@ -2653,123 +2655,160 @@ EXAMPLE: ctx_execute_file(path: "data.csv", language: "javascript", code: "const
         ),
     }),
   },
-  async ({ path, language, code, timeout, intent }) => {
-    // Security (#852): confine the processed file to the project root so
-    // ctx_execute_file cannot be used to escape the host's sandbox/permission
-    // controls. Runs before the deny-glob check — boundary first, then policy.
-    const boundaryDenied = checkProjectBoundary(path, "ctx_execute_file");
-    if (boundaryDenied) return boundaryDenied;
+  executeFileHandler,
+);
 
-    // Security: check file path against Read deny patterns
-    const pathDenied = checkFilePathDenyPolicy(path, "ctx_execute_file");
-    if (pathDenied) return pathDenied;
+/**
+ * The `ctx_execute_file` handler, lifted out of its registration so a second
+ * tool can BE this call rather than resemble it.
+ *
+ * `ctx_read` (src/tools/read.ts) is exactly this function with a default
+ * program supplied for `code`. Reimplementing the path would have meant two
+ * routes into the executor and two sets of security checks, and would have
+ * quietly invalidated the latency numbers in BENCHMARK.md Part 4 — those
+ * measure this path, and only stay true of `ctx_read` while `ctx_read` is
+ * this path.
+ *
+ * Three parameters exist only for that second caller. `toolName` carries the
+ * attribution through the stats counters and the security messages, so a
+ * denial names the tool the agent actually called. `policyLabel` follows it.
+ * `echoOverride` replaces the source-code preamble: echoing 4 KB of a program
+ * the agent did not write would cost more than the slice it produced, and
+ * there is no audit value in showing a caller code they never supplied.
+ */
+async function executeFileHandler({
+  path,
+  language,
+  code,
+  timeout,
+  intent,
+  toolName = "ctx_execute_file",
+  echoOverride,
+}: {
+  path: string;
+  language: Language;
+  code: string;
+  timeout?: number;
+  intent?: string;
+  toolName?: string;
+  echoOverride?: string;
+}): Promise<ToolDepsResult> {
+  const policyLabel = toolName.replace(/^ctx_/, "");
+  // Security (#852): confine the processed file to the project root so
+  // ctx_execute_file cannot be used to escape the host's sandbox/permission
+  // controls. Runs before the deny-glob check — boundary first, then policy.
+  const boundaryDenied = checkProjectBoundary(path, toolName);
+  if (boundaryDenied) return boundaryDenied;
 
-    // Security: check code parameter against Bash deny patterns
-    if (language === "shell") {
-      const codeDenied = checkDenyPolicy(code, "execute_file");
-      if (codeDenied) return codeDenied;
-    } else {
-      const codeDenied = checkNonShellDenyPolicy(code, language, "execute_file");
-      if (codeDenied) return codeDenied;
-    }
+  // Security: check file path against Read deny patterns
+  const pathDenied = checkFilePathDenyPolicy(path, toolName);
+  if (pathDenied) return pathDenied;
 
-    try {
-      const effTimeout = resolveExecTimeout(timeout);
-      const result = await executor.executeFile({
-        path,
-        language,
-        code,
-        timeout: effTimeout,
-      });
+  // Security: check code parameter against Bash deny patterns
+  if (language === "shell") {
+    const codeDenied = checkDenyPolicy(code, policyLabel);
+    if (codeDenied) return codeDenied;
+  } else {
+    const codeDenied = checkNonShellDenyPolicy(code, language, policyLabel);
+    if (codeDenied) return codeDenied;
+  }
 
-      // Echo path + executed source code before stdout for audit/debug
-      // (Issues #717 + #736).
-      const echo = buildExecuteEcho(language, code, path);
+  try {
+    const effTimeout = resolveExecTimeout(timeout);
+    const result = await executor.executeFile({
+      path,
+      language,
+      code,
+      timeout: effTimeout,
+    });
 
-      if (result.timedOut) {
-        return trackResponse("ctx_execute_file", {
-          content: [
-            {
-              type: "text" as const,
-              text: `${echo}Timed out processing ${path} after ${effTimeout}ms`,
-            },
-          ],
-          isError: true,
-        });
-      }
+    // Echo path + executed source code before stdout for audit/debug
+    // (Issues #717 + #736).
+    const echo = echoOverride ?? buildExecuteEcho(language, code, path);
 
-      if (result.exitCode !== 0) {
-        const { isError, output } = classifyNonZeroExit({
-          language, exitCode: result.exitCode, stdout: result.stdout, stderr: result.stderr,
-        });
-        if (intent && intent.trim().length > 0 && Buffer.byteLength(output) > INTENT_SEARCH_THRESHOLD) {
-          trackIndexed(Buffer.byteLength(output));
-          return trackResponse("ctx_execute_file", {
-            content: [
-              { type: "text" as const, text: `${echo}${intentSearch(output, intent, isError ? `file:${path}:error` : `file:${path}`)}` },
-            ],
-            isError,
-          });
-        }
-        // Auto-index large error output into FTS5 — no data loss
-        if (Buffer.byteLength(output) > LARGE_OUTPUT_THRESHOLD) {
-          trackIndexed(Buffer.byteLength(output));
-          return trackResponse("ctx_execute_file", {
-            content: [
-              { type: "text" as const, text: `${echo}${intentSearch(output, "errors failures exceptions", isError ? `file:${path}:error` : `file:${path}`)}` },
-            ],
-            isError,
-          });
-        }
-        return trackResponse("ctx_execute_file", {
-          content: [
-            { type: "text" as const, text: `${echo}${output}` },
-          ],
-          isError,
-        });
-      }
-
-      const stdout = result.stdout || "(no output)";
-
-      if (intent && intent.trim().length > 0 && Buffer.byteLength(stdout) > INTENT_SEARCH_THRESHOLD) {
-        trackIndexed(Buffer.byteLength(stdout));
-        return trackResponse("ctx_execute_file", {
-          content: [
-            { type: "text" as const, text: `${echo}${intentSearch(stdout, intent, `file:${path}`)}` },
-          ],
-        });
-      }
-
-      // Auto-index large stdout into FTS5 — return pointer, not raw content
-      if (Buffer.byteLength(stdout) > LARGE_OUTPUT_THRESHOLD) {
-        const indexed = indexStdout(stdout, `file:${path}`);
-        const echoed = {
-          ...indexed,
-          content: indexed.content.map((c, i) =>
-            i === 0 && c.type === "text"
-              ? { ...c, text: `${echo}${(c as { text: string }).text}` }
-              : c,
-          ),
-        };
-        return trackResponse("ctx_execute_file", echoed);
-      }
-
-      return trackResponse("ctx_execute_file", {
+    if (result.timedOut) {
+      return trackResponse(toolName, {
         content: [
-          { type: "text" as const, text: `${echo}${stdout}` },
-        ],
-      });
-    } catch (err: unknown) {
-      const message = err instanceof Error ? err.message : String(err);
-      return trackResponse("ctx_execute_file", {
-        content: [
-          { type: "text" as const, text: `Runtime error: ${message}` },
+          {
+            type: "text" as const,
+            text: `${echo}Timed out processing ${path} after ${effTimeout}ms`,
+          },
         ],
         isError: true,
       });
     }
-  },
-);
+
+    if (result.exitCode !== 0) {
+      const { isError, output } = classifyNonZeroExit({
+        language, exitCode: result.exitCode, stdout: result.stdout, stderr: result.stderr,
+      });
+      if (intent && intent.trim().length > 0 && Buffer.byteLength(output) > INTENT_SEARCH_THRESHOLD) {
+        trackIndexed(Buffer.byteLength(output));
+        return trackResponse(toolName, {
+          content: [
+            { type: "text" as const, text: `${echo}${intentSearch(output, intent, isError ? `file:${path}:error` : `file:${path}`)}` },
+          ],
+          isError,
+        });
+      }
+      // Auto-index large error output into FTS5 — no data loss
+      if (Buffer.byteLength(output) > LARGE_OUTPUT_THRESHOLD) {
+        trackIndexed(Buffer.byteLength(output));
+        return trackResponse(toolName, {
+          content: [
+            { type: "text" as const, text: `${echo}${intentSearch(output, "errors failures exceptions", isError ? `file:${path}:error` : `file:${path}`)}` },
+          ],
+          isError,
+        });
+      }
+      return trackResponse(toolName, {
+        content: [
+          { type: "text" as const, text: `${echo}${output}` },
+        ],
+        isError,
+      });
+    }
+
+    const stdout = result.stdout || "(no output)";
+
+    if (intent && intent.trim().length > 0 && Buffer.byteLength(stdout) > INTENT_SEARCH_THRESHOLD) {
+      trackIndexed(Buffer.byteLength(stdout));
+      return trackResponse(toolName, {
+        content: [
+          { type: "text" as const, text: `${echo}${intentSearch(stdout, intent, `file:${path}`)}` },
+        ],
+      });
+    }
+
+    // Auto-index large stdout into FTS5 — return pointer, not raw content
+    if (Buffer.byteLength(stdout) > LARGE_OUTPUT_THRESHOLD) {
+      const indexed = indexStdout(stdout, `file:${path}`);
+      const echoed = {
+        ...indexed,
+        content: indexed.content.map((c, i) =>
+          i === 0 && c.type === "text"
+            ? { ...c, text: `${echo}${(c as { text: string }).text}` }
+            : c,
+        ),
+      };
+      return trackResponse(toolName, echoed);
+    }
+
+    return trackResponse(toolName, {
+      content: [
+        { type: "text" as const, text: `${echo}${stdout}` },
+      ],
+    });
+  } catch (err: unknown) {
+    const message = err instanceof Error ? err.message : String(err);
+    return trackResponse(toolName, {
+      content: [
+        { type: "text" as const, text: `Runtime error: ${message}` },
+      ],
+      isError: true,
+    });
+  }
+}
 
 // ─────────────────────────────────────────────────────────
 // Tool: index
@@ -3162,6 +3201,26 @@ function fetchToolDeps(): FetchToolDeps {
 }
 
 /**
+ * The read tool's extra wiring, on top of {@link toolDeps}.
+ *
+ * One field, and it is the entire design of ctx_read: the `ctx_execute_file`
+ * handler itself, so the argument-free path is that path with a program
+ * supplied rather than a parallel implementation of it.
+ */
+function readToolDeps(): ReadToolDeps {
+  return {
+    ...toolDeps(),
+    runExecuteFile: (args) => executeFileHandler({
+      ...args,
+      // The program is ours, not the caller's. Echoing it would spend more
+      // bytes than the slice it produces, and provenance is better served by
+      // naming the tool that generated it.
+      echoOverride: `path=${args.path}\n(ctx_read default slice program)\n\n`,
+    }),
+  };
+}
+
+/**
  * The stats tool's extra wiring, on top of {@link toolDeps}.
  *
  * `latestVersion` is a getter for the same reason `detectedAdapter` is: the
@@ -3190,6 +3249,12 @@ registerCtxSearch(toolDeps());
 // lives inside each register function rather than here.
 registerCtxFind(toolDeps());
 registerCtxGraph(toolDeps());
+
+// ctx_read (src/tools/read.ts) registers after them and before the network
+// tools: it is the read-side sibling of ctx_execute_file — the same call with
+// the program already written — and a host rendering the list in registration
+// order should meet it next to the other retrieval answers, not at the end.
+registerCtxRead(readToolDeps());
 
 // ─────────────────────────────────────────────────────────
 // Turndown path resolution (external dep, like better-sqlite3)

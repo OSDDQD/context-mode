@@ -31,6 +31,11 @@ await runHook(async () => {
   const HOOK_DIR = dirname(fileURLToPath(import.meta.url));
   const { loadSessionDB, loadExtract, loadProjectAttribution } = createSessionLoaders(HOOK_DIR);
 
+  // Declared out here so a failure in any later best-effort block cannot
+  // swallow a notice that was already built: the line is printed after the
+  // body, not inside it.
+  let costNotice = null;
+
   try {
     const raw = await readStdin();
     const input = parseStdin(raw);
@@ -152,39 +157,46 @@ await runHook(async () => {
     // more than the threshold WITHOUT a redirect marker is, by definition, a
     // payload that entered the context window whole — record it so the
     // allowlist and thresholds have evidence behind them.
+    //
+    // The classification lives in hooks/core/routing.mjs so the Codex hook
+    // records the same population against the same floor: two hosts, one
+    // definition of "this went straight into the context window".
     try {
-      const toolName = input.tool_name ?? "";
-      const FLOODY_TOOLS = new Set(["Bash", "Read", "Grep", "Glob", "WebFetch", "Shell"]);
-      if (!redirectEmitted && FLOODY_TOOLS.has(toolName)) {
-        const rawMin = Number.parseInt(process.env.CONTEXT_MODE_MISSED_REDIRECT_MIN_BYTES ?? "", 10);
-        // 2000 bytes ≈ the "> 20 lines of output" line the routing block draws.
-        const minBytes = Number.isFinite(rawMin) && rawMin > 0 ? rawMin : 2000;
-        const response = typeof input.tool_response === "string"
-          ? input.tool_response
-          : JSON.stringify(input.tool_response ?? "");
-        const bytes = Buffer.byteLength(response, "utf-8");
-        if (bytes >= minBytes) {
-          const ti = input.tool_input ?? {};
-          const summary = String(
-            ti.command ?? ti.file_path ?? ti.pattern ?? ti.url ?? ti.path ?? "",
-          ).replace(/\s+/g, " ").slice(0, 120);
-          attributeAndInsertEvents(
-            db,
-            sessionId,
-            [{
-              type: "missed_redirect",
-              category: "missed-redirect",
-              // Machine-parseable prefix (analytics reads the byte count back
-              // out of it), human-readable tail.
-              data: `${toolName}: ${bytes} bytes unrouted — ${summary}`,
-              priority: 3,
-            }],
-            input,
-            projectDir,
-            "PostToolUse",
-            resolveProjectAttributions,
-          );
-        }
+      const {
+        describeMissedRedirect, readMissedRedirectTally, buildMissedRedirectNotice,
+        writeUnroutedTally,
+      } = await import("./core/routing.mjs");
+      const missed = describeMissedRedirect(input, { routed: redirectEmitted });
+      if (missed) {
+        attributeAndInsertEvents(
+          db,
+          sessionId,
+          [{
+            type: "missed_redirect",
+            category: "missed-redirect",
+            // Machine-parseable prefix (analytics reads the byte count back
+            // out of it), human-readable tail.
+            data: `${missed.toolName}: ${missed.bytes} bytes unrouted — ${missed.summary}`,
+            priority: 3,
+          }],
+          input,
+          projectDir,
+          "PostToolUse",
+          resolveProjectAttributions,
+        );
+        // Tally AFTER the insert, so the count the model reads is the count
+        // ctx_stats will report for the same session — including this call,
+        // and excluding it in the one case the store deduplicated it away.
+        const tally = readMissedRedirectTally(db, sessionId);
+        // Hand the same two numbers to PreToolUse, which prices its next
+        // decision on them and cannot afford to open SQLite itself.
+        writeUnroutedTally(sessionId, tally);
+        costNotice = buildMissedRedirectNotice({
+          toolName: missed.toolName,
+          bytes: missed.bytes,
+          tally,
+          platform: "claude-code",
+        });
       }
     } catch { /* telemetry is best-effort — never block the hook */ }
 
@@ -335,5 +347,14 @@ await runHook(async () => {
     // PostToolUse must never block the session — silent fallback
   }
 
-  // PostToolUse hooks don't need hookSpecificOutput
+  // The one thing this hook says out loud. Silence on every routed call is
+  // the feature: a line the model sees on correct calls too is a line it
+  // learns to skip.
+  if (costNotice) {
+    try {
+      const { formatPostToolContext } = await import("./core/formatters.mjs");
+      const payload = formatPostToolContext("claude-code", costNotice);
+      if (payload) console.log(JSON.stringify(payload));
+    } catch { /* the notice is advisory — never block the session */ }
+  }
 });

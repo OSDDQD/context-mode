@@ -159,7 +159,7 @@ describe("VS Code Copilot hooks", () => {
     test("run_in_terminal: injects BASH_GUIDANCE additionalContext", () => {
       const result = runHook("pretooluse.mjs", {
         tool_name: "run_in_terminal",
-        tool_input: { command: "npm test" },
+        tool_input: { command: "ps aux" },
       }, vscodeEnv());
 
       expect(result.exitCode).toBe(0);

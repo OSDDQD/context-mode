@@ -173,7 +173,7 @@ describe("collectDeliveryHealth", () => {
     });
     expect(health.status).toBe("ok");
     expect(health.missingTools).toEqual([]);
-    expect(renderDeliveryHealth(health).join("\n")).toContain("all 14 expected ctx_* tools present");
+    expect(renderDeliveryHealth(health).join("\n")).toContain(`all ${EXPECTED_CTX_TOOLS.length} expected ctx_* tools present`);
   });
 
   it("lists unpacked cache versions newest first and marks the running one", () => {
@@ -329,7 +329,7 @@ describe("purgePluginCache", () => {
     const result = purgePluginCache({ env: install.env, keep: [install.versionDir] });
 
     expect(result.removed).toEqual([stale]);
-    expect(result.kept).toEqual([{ path: install.versionDir, reason: "in use by this session" }]);
+    expect(result.kept).toEqual([{ path: install.versionDir, reason: "in use by a live install" }]);
     expect(existsSync(install.versionDir)).toBe(true);
   });
 
@@ -360,6 +360,26 @@ describe("purgePluginCache", () => {
     expect(existsSync(alias)).toBe(false);
     // The link went; what it pointed at did not.
     expect(existsSync(join(outside, "keepme.txt"))).toBe(true);
+  });
+
+  it("spares the tree a live server is running from", () => {
+    // The MCP server resolves dynamic imports against its own directory, so
+    // deleting it mid-session breaks the very session running the upgrade —
+    // and buys nothing, since the bumped version is already a new cache key.
+    const install = fakeInstall({ tools: EXPECTED_CTX_TOOLS, version: "1.0.169" });
+    const fresh = join(resolvePluginCacheVersionsDir(install.env), "1.0.170");
+    const abandoned = join(resolvePluginCacheVersionsDir(install.env), "1.0.166");
+    mkdirSync(fresh, { recursive: true });
+    mkdirSync(abandoned, { recursive: true });
+
+    const result = purgePluginCache({
+      env: install.env,
+      keep: [fresh, install.versionDir], // fresh = just installed, 1.0.169 = running
+    });
+
+    expect(result.removed).toEqual([abandoned]);
+    expect(existsSync(install.versionDir)).toBe(true);
+    expect(existsSync(fresh)).toBe(true);
   });
 
   it("touches nothing under dryRun", () => {
@@ -414,9 +434,11 @@ describe("wiring", () => {
     expect(body).toMatch(/delivery\.status === "fail"[\s\S]{0,80}criticalFails\+\+/);
   });
 
-  it("cli upgrade() sweeps the plugin cache while keeping the tree it installed into", () => {
+  it("cli upgrade() sweeps the plugin cache while keeping the trees still in use", () => {
     const body = CLI_SRC.slice(CLI_SRC.indexOf("async function upgrade"));
-    expect(body).toMatch(/purgePluginCache\(\{\s*keep:\s*\[pluginRoot\]\s*\}\)/);
+    // Both the tree just installed into and any tree a live server runs from.
+    expect(body).toMatch(/purgePluginCache\(\{\s*keep:\s*\[pluginRoot,\s*\.\.\.liveRoots\]\s*\}\)/);
+    expect(body).toContain("discoverRunningStartPaths()");
     // The user has to be told what disappeared, or a cache wipe is unfalsifiable.
     expect(body).toContain("purge.removed.join");
   });

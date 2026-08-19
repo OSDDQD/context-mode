@@ -187,7 +187,7 @@ describe("Bash structurally-bounded allowlist (#463)", () => {
 
   it("unbounded commands still get the nudge", () => {
     for (const command of [
-      "find /",
+      "find /tmp -name '*.log'",
       "cat /var/log/syslog",
       "grep -r foo /etc",
       "ps aux",
@@ -209,16 +209,16 @@ describe("Bash structurally-bounded allowlist (#463)", () => {
       "pwd | xargs cat",
       "pwd > /tmp/out",
       "pwd >> /tmp/out",
-      "echo $(find /)",
-      "echo `find /`",
+      "echo $(find /tmp)",
+      "echo `find /tmp`",
       "git status && cat huge.log",
       "git status || tail -F /var/log/syslog",
-      "whoami; find /",
+      "whoami; find /tmp",
       // Single `&` (background + sequence) — distinct from `&&` and easy to
       // miss in the operator regex. `date & cat huge.log` runs date in the
       // background and immediately tails the unbounded sink.
       "date & cat /var/log/syslog",
-      "whoami & find /",
+      "whoami & find /tmp",
       "pwd & tail -F huge.log",
     ];
     for (const command of cases) {
@@ -333,9 +333,9 @@ describe("Bash structurally-bounded allowlist: extended commands (#517)", () => 
       "uname -a | tee /tmp/x",
       "id > /tmp/leak",
       "realpath /etc/hosts && cat /var/log/syslog",
-      "ln -s a b ; find /",
-      "uname -a\nfind /",
-      "id $(find /)",
+      "ln -s a b ; find /tmp",
+      "uname -a\nfind /tmp",
+      "id $(find /tmp)",
     ];
     for (const command of cases) {
       resetGuidanceThrottle(SID);
@@ -380,8 +380,8 @@ describe("Bash structurally-bounded allowlist: newline injection (#470)", () => 
 
   it("LF newline injection — allowlisted line 1 + unbounded line 2 must nudge", () => {
     const cases = [
-      "git status\nfind /",
-      "echo ok\nfind /",
+      "git status\nfind /tmp",
+      "echo ok\nfind /tmp",
       "echo ok\nrm -rf /",
       "pwd\ncat /var/log/syslog",
       "whoami\ngrep -r foo /etc",
@@ -395,7 +395,7 @@ describe("Bash structurally-bounded allowlist: newline injection (#470)", () => 
 
   it("CRLF newline injection (Windows clipboard) must nudge", () => {
     const cases = [
-      "git status\r\nfind /",
+      "git status\r\nfind /tmp",
       "echo ok\r\nrm -rf /",
       "pwd\r\ncat /var/log/syslog",
     ];
@@ -468,7 +468,7 @@ describe("Bash nudge size threshold (#817)", () => {
   it("threshold set: long unbounded command at/above threshold STILL nudges", () => {
     process.env[ENV] = "16";
     // A long pipeline (> 16 bytes) can flood — must still intercept.
-    const long = "find / -type f -name '*.log' -exec cat {} +";
+    const long = "find /tmp -type f -name '*.log' -exec cat {} +";
     const decision = routePreToolUse("Bash", { command: long }, "/test", "claude-code", SID);
     expect(decision?.action, "long command must still be nudged").toBe("context");
   });

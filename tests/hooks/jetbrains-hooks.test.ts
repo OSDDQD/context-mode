@@ -168,7 +168,7 @@ describe("JetBrains Copilot hooks", () => {
     test("run_in_terminal: injects guidance additionalContext", () => {
       const result = runHook("pretooluse.mjs", {
         tool_name: "run_in_terminal",
-        tool_input: { command: "npm test" },
+        tool_input: { command: "ps aux" },
       }, jetbrainsEnv());
 
       expect(result.exitCode).toBe(0);

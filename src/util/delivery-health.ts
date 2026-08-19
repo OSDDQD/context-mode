@@ -59,6 +59,7 @@ export const EXPECTED_CTX_TOOLS: readonly string[] = [
   "ctx_search",
   "ctx_find",
   "ctx_graph",
+  "ctx_read",
   "ctx_fetch_and_index",
   "ctx_batch_execute",
   "ctx_gather",
@@ -603,9 +604,11 @@ export function renderDeliveryHealth(h: DeliveryHealth): string[] {
 export interface CachePurgeOptions {
   env?: NodeJS.ProcessEnv;
   /**
-   * Trees that must survive — normally the plugin root the upgrade just wrote
-   * new files into. Deleting that one would undo the upgrade it is part of and
-   * pull the tree out from under the session that is running it.
+   * Trees that must survive: the plugin root the upgrade just wrote new files
+   * into, and any tree a live server is running from. Deleting either pulls
+   * the files out from under a process that is still resolving imports
+   * against them, and buys no invalidation — the version number is the cache
+   * key, so a bumped version already gets a fresh directory from the host.
    */
   keep?: readonly string[];
   /** Report what would go without removing anything. */
@@ -710,7 +713,7 @@ export function purgePluginCache(opts: CachePurgeOptions = {}): CachePurgeResult
       try { versionReal = realpathSync(versionDir); } catch { /* dangling alias — the name is all there is */ }
       const spared = [...keep].some((k) => coversPath(versionDir, k) || coversPath(versionReal, k));
       if (spared) {
-        kept.push({ path: versionDir, reason: "in use by this session" });
+        kept.push({ path: versionDir, reason: "in use by a live install" });
         continue;
       }
       if (opts.dryRun) {

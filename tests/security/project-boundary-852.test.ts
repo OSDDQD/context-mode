@@ -154,8 +154,13 @@ describe("ctx_execute_file: project-boundary guard wiring (#852)", () => {
   });
 
   test("ctx_execute_file handler calls the boundary guard", () => {
-    // The guard must run inside the ctx_execute_file handler.
-    expect(serverSrc).toContain('checkProjectBoundary(path, "ctx_execute_file")');
+    // The guard must run inside the ctx_execute_file handler. The handler was
+    // lifted out of its registration so ctx_read could BE this call rather
+    // than a parallel one, which is why the tool name is now a parameter — and
+    // why that matters here: both callers pass through this one guard, and the
+    // denial names whichever tool the agent actually invoked.
+    expect(serverSrc).toContain("checkProjectBoundary(path, toolName)");
+    expect(serverSrc).toContain('toolName = "ctx_execute_file"');
   });
 
   test("escape hatch reuses host permissions.allow Read rules — NO bespoke opt-out env", () => {

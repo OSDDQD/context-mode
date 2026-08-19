@@ -1503,6 +1503,278 @@ skill loader only reads it from the directory it scans, so `skills/` legitimatel
 contains a file among the directories, and the test now says so out loud
 (CONTRIBUTING.md → *Plugin layout contract*).
 
+## 36. Two tools that never arrived
+
+`package.json` and the eleven manifests `scripts/version-sync.mjs` syncs,
+`src/util/delivery-health.ts`, `src/cli.ts`, `src/server.ts`,
+`src/tools/{find,graph,search,batch,fetch}.ts`, `src/session/analytics.ts`,
+`hooks/posttooluse.mjs`, `hooks/codex/posttooluse.mjs`,
+`hooks/core/{routing,formatters}.mjs`, `BENCHMARK.md`,
+`tests/latency-benchmark.ts`, `README.md`,
+`.github/workflows/update-stats.yml` (deleted), `stats.json` (deleted),
+plus the suites named below
+
+Change 34 built `ctx_find` and `ctx_graph`. Change 35 told the host they existed —
+manifests, allowlists, skill descriptions, hook registrations. Neither reached a
+session. Measured in a live Claude Code conversation: the server offered twelve
+tools, and those two were not among them.
+
+The host does not run this repository. It runs an unpacked copy under
+`~/.claude/plugins/cache/context-mode/context-mode/<version>/`, and **the cache key
+is the version number**. `d028f02` and `c50eb66` both changed the tool surface with
+`version` frozen at 1.0.169, so the cache was never invalidated. The marketplace
+clone was correct. The committed bundle was correct — `ctx_find` appears eight times
+in `server.bundle.mjs` here and zero times in the bundle the host was executing,
+which was built on 2026-08-18 at 02:23 and stayed. Same class as 33 and 35 —
+nothing throws, the host simply goes on serving what it already has — one layer
+below both: those fixed manifests and allowlists, this fixes delivery.
+
+`npm version patch` (1.0.169 → 1.0.170, `0e01cb8`) fixed the instance. The rest of
+this entry is about the instance not recurring, and about being able to say whether
+any of it is working.
+
+### The number stops depending on memory
+
+`scripts/version-sync.mjs` already distributed a version across eleven manifests and
+already worked. It was simply never called by the two waves that needed it. Three
+guards now stand where the discipline used to:
+
+- `tests/scripts/version-freshness.test.ts` fails when `server.bundle.mjs`,
+  `cli.bundle.mjs`, `hooks/` or the registered tool list changed since the last tag
+  while `package.json:version` did not. The baseline is the version as it stood *at*
+  that tag, not the tag's name, so a repository whose tags lag its manifests still
+  gets a truthful answer. No tags, or no git at all, is a skip rather than a
+  failure: a guard that fails when it cannot see is a guard people delete.
+- `version-sync.mjs --check` verifies the eleven manifests without writing and exits
+  non-zero on drift. Writer and checker walk one field list, so the check cannot
+  assert on a field the sync does not write.
+- `tests/plugins/plugin-structure.test.ts` compares the committed bundle against the
+  registered tools **in both directions**. The check it replaces scanned
+  `src/server.ts` only — and the two tools that went missing register from
+  `src/tools/`, precisely out of its view.
+
+### The doctor could not see the one failure that mattered
+
+Every other check in `ctx_doctor` answers for the tree the doctor was loaded from,
+which is exactly where this failure hides. `src/util/delivery-health.ts` adds a
+Delivery section that answers about the running process instead: which `start.mjs`
+the host is executing (from this process's own `argv[1]` and from the process table
+via `pgrep`/`ps`/PowerShell, degrading to "not observed" in silence where no such
+tool exists), what version that directory carries, when its bundle was built, and
+the live tool list — `REGISTERED_CTX_TOOLS`, the only fully authoritative answer to
+"what does this session have" — against the expected one, named tool by tool,
+because "12 of 14" tells nobody which call to stop making. On the machine where the
+failure was found it reads:
+
+```
+running: …/cache/context-mode/context-mode/1.0.169/start.mjs (v1.0.169, unpacked cache)
+build:   2026-08-18 02:23 — bundle registers 12 ctx_* tool(s)
+tools:   MISSING from this session: ctx_find, ctx_graph — the running build was made 2026-08-18 02:23 for v1.0.169
+```
+
+Missing tools are a critical fail; no retry makes them appear. Several servers on
+one script collapse into one finding rather than four identical lines, and version
+directories that are symlinks — heal scripts leave those behind, seven of them here
+— are reported as aliases instead of counted as builds.
+
+`ctx_upgrade` gained the other half: it sweeps the unpacked cache instead of only
+pulling and building, and prints what it removed. Two kinds of directory are spared.
+The tree just installed into, because deleting it would undo the upgrade it is part
+of. And any tree a live MCP server is running from, because that server resolves
+dynamic imports against its own directory and would start failing mid-call — sparing
+it costs nothing, since the bumped version is itself a new cache key and the host
+unpacks a fresh directory regardless. The path refuses to resolve when `HOME` is
+unset rather than falling back (`resolve("", ".claude")` collapses to the working
+directory, and this path is a deletion target), every target is checked for
+containment inside the plugin's own cache, and a symlinked version name is unlinked
+rather than followed.
+
+### The description is the last surface before the choice
+
+`CLAUDE.md` and the SessionStart routing block are read long before a tool is
+picked, and every turn pushes them further away. The tool description is read
+immediately before it — and the model is not choosing a tool in isolation, it is
+comparing `ctx_find` against `Grep`. If that comparison is not written down it gets
+made from priors, and the priors were trained on `Grep`.
+
+So every routing target now names the native tool it displaces, and carries a WHEN
+NOT (which ADR-0002 leaves optional) with honest exclusions:
+
+> Instead of Grep or Glob, when the question is "where does X live" and the answer
+> is one path rather than a page of matches to read through.
+>
+> WHEN NOT: the point is an exhaustive literal sweep, every occurrence counted —
+> Grep is the right tool for that; this returns a ranked list, not a complete one.
+>
+> WHEN NOT: the file is already known and the next step is editing it — Read first,
+> because Edit matches against the exact bytes in your conversation.
+
+`tests/core/tool-description-displacement.test.ts` enforces both halves: a routing
+target that competes with a native tool has to name it, and it has to say where it
+does not apply.
+
+### The routing block survives compaction, and now that is measured
+
+`hooks/hooks.json` registers SessionStart with an empty matcher, and for SessionStart
+the matcher is matched against the lifecycle `source`, so empty means all four —
+`startup`, `resume`, `clear`, `compact`. That was the whole argument, and it was half
+of one: the hook *body* reads `input.source` and branches on it, and a branch that
+returned early would drop the block just as effectively as a matcher that never
+fired. `tests/hooks/sessionstart-survives-compaction.test.ts` runs the real hook on
+all four sources and compares the emitted block byte for byte. It is identical.
+(Each run gets its own fake `HOME`/`CLAUDE_CONFIG_DIR`: a true `startup` deliberately
+wipes prior data, so pointing the suite at a developer's config dir would make it
+destructive.)
+
+The neighbouring failure was real rather than hypothetical. An agent's `tools:`
+frontmatter is an allowlist, not a preference, so a subagent handed the routing block
+without the tools it names is instructed to do something it cannot do — and the only
+path left open is the one the instruction forbids. `context-gather`, the one agent
+here written to survey a tree without reading it, listed Bash/Read/Glob/Grep and not
+`ctx_find` until `c50eb66`. `tests/plugins/agent-tool-allowlist.test.ts` derives the
+rule instead of enumerating it: per agent, which flooding tools did you keep, and did
+you keep their replacements. A new agent is covered the moment it is added.
+
+### The price, next to the thing that cost it
+
+Between "called Read on 42 KB" and "learned that it cost 42 KB" there was no link at
+all. `ctx_stats` knows the number, but nothing calls it; the missed-redirect
+telemetry writes it to a database the model does not read. The price was measured in
+a place the decision could not see.
+
+PostToolUse now appends one line to the tool result the model is already looking at:
+
+```
+context-mode: this Bash call put 42.0 KB into your context window; ctx_batch_execute(commands, queries)
+indexes the output and returns only the sections that answer your questions.
+7 such calls so far this session, 310.4 KB in total.
+```
+
+One line per unrouted heavy call, nothing at all on a routed one — a notice that
+fires on correct calls too is noise, and noise is what gets tuned out. The tally
+sentence appears from the second call onward, since on the first it would only
+restate the first sentence. Deliberately **without** a "would have returned ~X KB"
+estimate: nothing in the hook can know what the replacement would have printed, and
+a number invented at that distance would spend the credibility of the one measured
+figure in the line. The alternative is named as a call with its signature rather
+than as a tool name, because the signature is the part that makes the next call
+cheap. `CONTEXT_MODE_COST_NOTICE=0` turns it off. The classification moved into
+`hooks/core/routing.mjs` so the Codex hook records the same population against the
+same floor — two hosts, one definition of "this went straight into the context
+window".
+
+### Whether the routing happens at all is a number now
+
+Every change above tries to make the model route more work through the plugin, and
+until now none of them could be checked: `ctx_stats` could say what routing *saved*
+and what it *missed*, never what share of the heavy work it was given. That is the
+position retrieval was in before 28 made quality a number.
+
+`ctx_stats` now reports `routed heavy calls / all heavy calls` for the conversation:
+
+```
+Routing adherence: 3% — 9 of 276 heavy calls went through context-mode.
+  Heavy means one call moving 2.0 KB or more (CONTEXT_MODE_ADHERENCE_MIN_BYTES).
+  Through the plugin: 138 KB · straight into context: 1.3 MB.
+```
+
+Four decisions keep it honest, and each of them costs the number some flattery:
+
+- **The threshold is named in the line.** A share of "heavy calls" cannot be read
+  without it.
+- **It cannot go below the collection floor.** The PostToolUse hook only records an
+  unrouted call above `CONTEXT_MODE_MISSED_REDIRECT_MIN_BYTES`, so measuring under
+  that line would drop unrouted calls out of the denominator while routed ones
+  stayed in — a ratio that flatters by construction. A lower setting is clamped up,
+  and the report says it was.
+- **Nothing crossed the line is `no data`, not `0%`.** A quiet session and a session
+  that leaked everything must not print the same number.
+- **Calls of unknown size get their own line** ("not classified: N, M of them
+  routed") rather than being spread over the denominator.
+
+The numerator is assembled from what is actually attributable: `redirect` events,
+which the hook writes per call against the calling session with the payload in
+`bytes_avoided`, and the `ctx_*` calls in `tool_calls`. The `sandbox` events look
+like the better source and are not — they are written against `getLatestSessionId()`
+rather than the calling session, so they land under whichever session was newest in
+the database (measured: a session with nine `ctx_*` calls in `tool_calls` had zero
+sandbox rows of its own), and they carry only the bytes returned, not the payload
+handled. `tool_calls` has no per-call size either, so heaviness there is decided by
+the session's own per-tool average and every call sized that way is counted and
+named as an estimate. The average is of bytes *returned*, which is smaller than what
+the sandbox handled, so the bias is downward: the metric undercounts routed heavy
+calls rather than inventing them. Making it a measurement means changing
+`emitSandboxExecuteEvent` to record the calling session and the payload; until then
+the report says which of its numbers are averages.
+
+Meta commands (`ctx_doctor`, `ctx_stats`, `ctx_upgrade`, `ctx_purge`, `ctx_insight`)
+are excluded from the numerator, or a session could raise its adherence by running
+diagnostics.
+
+### What routing costs in time
+
+Everything measured in `BENCHMARK.md` before this wave was bytes saved. Part 4 adds
+what those bytes cost in time, on the grounds that a routed call which answers slower
+is paid for twice — and the model has every incentive to go back to `Grep` the
+moment the detour feels expensive. The harness (`tests/latency-benchmark.ts`) drives
+the committed `server.bundle.mjs` over stdio JSON-RPC, the way a host does, and
+measures `rg` including process spawn, because the host pays that too.
+
+The uncomfortable rows are the point of the section:
+
+- **`ctx_find` does not win on bytes.** 2.6 KB against `rg -l`'s 0.7 KB — roughly
+  four times *more* context, because it returns ranked snippets and graph relations
+  rather than a path list. And it is ranked, not exhaustive. Its case rests entirely
+  on replacing a *sequence* (`rg -l`, then two or three `Read`s at 30 KB each); where
+  that sequence does not happen it is both slower and larger than the tool it
+  replaces.
+- **Cold start is the real cost.** 0.62 s for `ctx_find`, 1.39 s for `ctx_search`
+  with a 1.78 s p90 — and cold `ctx_search` is the least stable row in the set,
+  having reached a 4.1 s p90 on an earlier build. It is paid exactly when the model
+  is deciding, for the rest of the session, whether the routed tool is worth using.
+- **Warm, the detour is invisible**: 26 ms, 152 ms and 188 ms of absolute penalty.
+  The multiples look alarming (8×, 19×, ~110×) only because the native baselines are
+  0.2–26 ms.
+- **The routed call is slower in every pair, in every regime.** There is no
+  configuration in which routing is free.
+
+Which locates the problem. `ctx_execute_file` costs 26 ms warm and returns 529 B
+where `Read` returns 34.0 KB — a 98.5% reduction for a delay nobody can feel. So
+latency is emphatically *not* why a model reaches for `Read` instead; what it avoids
+is having to compose a program. That is an ergonomics problem, not a speed one, and
+it is a different fix from anything in this wave.
+
+Three caveats are stated in the section rather than buried: the OS page cache cannot
+be dropped without root, so the native side has no true cold regime; the machine
+carried a background load of 3.6–5.4 throughout, so sub-10 ms rows should be read as
+"single-digit milliseconds"; and the routed rows move 20–40% run to run, which is
+worth knowing before quoting any single number.
+
+### The CI job that was measuring someone else's package
+
+`.github/workflows/update-stats.yml` ran here every six hours (`0 */6 * * *`) with
+`contents: write`. It fetched total npm downloads for `context-mode` — the package
+upstream publishes — added this repository's own clone count to them, committed the
+sum to this repository as `ci: update install stats`, and then purged
+`purge.jsdelivr.net/gh/mksglu/…`, someone else's CDN path. The README's `users`,
+`npm` and `marketplace` badges read that file from
+`cdn.jsdelivr.net/gh/**mksglu**/context-mode@main/stats.json`, so they displayed
+upstream's numbers live while the `stats.json` the workflow faithfully committed here
+was read by nothing at all — verified across the tree: the pages under `web/` fetch
+upstream's copy by URL, and the only other `stats.json` in the repository belongs to
+a smoke test's temp directory.
+
+The workflow and the file are deleted rather than merely unscheduled: everything the
+job did was upstream-scoped, and a disabled-but-present workflow is an invitation to
+re-enable it. The three dynamic badges are gone with it — there was nothing left to
+point them at — and `stars`, `forks` and `last-commit` now read `OSDDQD/context-mode`,
+which is the repository this README describes. Same class as the manifest ownership
+fixed in 35, in CI and README this time.
+
+`bundle.yml` remains the one workflow that commits to this repository, and stays:
+it rebuilds the bundles when `src/**` changes, which is a defence against the exact
+failure this entry opens with.
+
 ## Merged ahead of upstream: the fetch extraction ladder
 
 `src/fetch/blocks.ts`, `src/fetch/extract.ts`, `src/fetch/page-store.ts`, `src/server.ts`
@@ -1629,6 +1901,8 @@ memory and the code index.
 | `CONTEXT_MODE_EXEC_COMPRESS` | off | `1` enables output folding process-wide; `0` is a kill switch over per-call opt-in |
 | `CONTEXT_MODE_COMPRESS_TESTS` / `_ENV` / `_REPEATS` | on | Individual folding samples within that layer |
 | `CONTEXT_MODE_DOCTOR_LAYERS` | on | `0` drops the search-layers section from doctor and inventory |
+| `CONTEXT_MODE_ADHERENCE_MIN_BYTES` | collection floor (`2000`) | Heaviness line for the routing-adherence metric; clamped up to `CONTEXT_MODE_MISSED_REDIRECT_MIN_BYTES` |
+| `CONTEXT_MODE_COST_NOTICE` | on | `0` drops the per-call line naming what an unrouted payload cost |
 
 The redaction switches are read by `src/session/redact.ts` and applied by
 `ContentStore` on every path that writes to the index — `index`,
@@ -1681,6 +1955,14 @@ rely on when handling credentials.
 - `tests/scripts/bundle-manifest.test.ts` — every hook bundle is built, scanned and committed; the parser itself is pinned first
 - `tests/hooks/attribution-bundle-parity.test.ts` — the shipped bundle against its source, including the Bug 8 case that the orphan lost
 - `tests/plugins/plugin-structure.test.ts` — the plugin as the host sees it: layout, a `SKILL.md` per skill directory, command ↔ platform-skill parity, no absolute paths in committed manifests, non-overlapping `PreToolUse` matchers, a timeout on every hook, the tool surface (agent allowlist, skill description, README table), fork identity, and the savings claim against its measured basis
+- `tests/scripts/version-freshness.test.ts` — the version must move when the bundles, the hooks or the tool list do
+- `tests/scripts/version-sync.test.ts` — also covers `--check`: the eleven manifests verified without writing
+- `tests/util/delivery-health.test.ts` — which `start.mjs` is running, what its bundle registers, and a cache sweep that spares what is in use
+- `tests/core/tool-description-displacement.test.ts` — every routing target names the native tool it displaces, and says where it does not apply
+- `tests/hooks/sessionstart-survives-compaction.test.ts` — the real hook on all four lifecycle sources, block compared byte for byte
+- `tests/plugins/agent-tool-allowlist.test.ts` — no agent keeps a flooding tool without its routed replacement
+- `tests/hooks/missed-redirect-notice.test.ts` — the cost line: when it fires, what it names, and what it refuses to estimate
+- `tests/analytics/routing-adherence.test.ts` — the adherence metric, its floor, and the cases where it must answer "no data" instead of a number
 
 ## Installing this fork in Claude Code
 

@@ -6743,6 +6743,10 @@ describe("ctx_* MCP tool annotations (#846)", () => {
     // feedback loop, which is process-local bookkeeping, not a world effect.
     ctx_find:            { readOnlyHint: true,  destructiveHint: false, idempotentHint: true,  openWorldHint: false },
     ctx_graph:           { readOnlyHint: true,  destructiveHint: false, idempotentHint: true,  openWorldHint: false },
+    // ctx_read runs a fixed program of ours over one file — no caller-supplied
+    // code, so unlike ctx_execute_file it is provably read-only and plan mode
+    // can call it. Same reasoning as ctx_gather.
+    ctx_read:            { readOnlyHint: true,  destructiveHint: false, idempotentHint: true,  openWorldHint: false },
     ctx_fetch_and_index: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true  },
     ctx_batch_execute:   { readOnlyHint: false, destructiveHint: true,  idempotentHint: false, openWorldHint: true  },
     // #1048: read-only sibling of batch_execute — every command is proven

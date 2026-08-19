@@ -8,12 +8,21 @@ import "../ensure-deps.mjs";
 
 import { readStdin, parseStdin, getSessionId, getSessionDBPath, getInputProjectDir, CODEX_OPTS } from "../session-helpers.mjs";
 import { createSessionLoaders, attributeAndInsertEvents } from "../session-loaders.mjs";
+import {
+  describeMissedRedirect,
+  readMissedRedirectTally,
+  buildMissedRedirectNotice,
+  writeUnroutedTally,
+} from "../core/routing.mjs";
 import { dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const HOOK_DIR = dirname(fileURLToPath(import.meta.url));
 const { loadSessionDB, loadExtract, loadProjectAttribution } = createSessionLoaders(HOOK_DIR);
 const OPTS = CODEX_OPTS;
+
+// Set only by an unrouted heavy call; the stdout payload below carries it.
+let costNotice = null;
 
 function normalizeToolName(toolName) {
   // Keep Codex-native tool names like apply_patch intact; only normalize
@@ -55,12 +64,51 @@ try {
 
   attributeAndInsertEvents(db, sessionId, events, input, projectDir, "PostToolUse", resolveProjectAttributions);
 
+  // ─── Missed-redirect telemetry + cost notice ───
+  // Same classification, same floor and same tally as the Claude Code hook —
+  // the whole point of keeping it in hooks/core/routing.mjs is that a second
+  // host costs a call, not a copy. Codex has no PreToolUse redirect marker to
+  // consult, so `routed` stays false: a redirect on Codex is a deny, and a
+  // denied call has no payload to weigh.
+  try {
+    const missed = describeMissedRedirect(normalizedInput);
+    if (missed) {
+      attributeAndInsertEvents(
+        db,
+        sessionId,
+        [{
+          type: "missed_redirect",
+          category: "missed-redirect",
+          data: `${missed.toolName}: ${missed.bytes} bytes unrouted — ${missed.summary}`,
+          priority: 3,
+        }],
+        input,
+        projectDir,
+        "PostToolUse",
+        resolveProjectAttributions,
+      );
+      const tally = readMissedRedirectTally(db, sessionId);
+      // Same hop as the Claude Code hook: PreToolUse reads these two numbers
+      // instead of counting events on its own budget.
+      writeUnroutedTally(sessionId, tally);
+      costNotice = buildMissedRedirectNotice({
+        toolName: missed.toolName,
+        displayName: input.tool_name,
+        bytes: missed.bytes,
+        tally,
+        platform: "codex",
+      });
+    }
+  } catch { /* telemetry is best-effort — never block the hook */ }
+
   db.close();
 } catch {
   // Swallow errors — hook must not fail
 }
 
-// Codex PostToolUse requires hookEventName in hookSpecificOutput
+// Codex PostToolUse requires hookEventName in hookSpecificOutput.
+// The payload is emitted either way; the notice fills it only after an
+// unrouted heavy call, so a routed session sees exactly what it saw before.
 process.stdout.write(JSON.stringify({
-  hookSpecificOutput: { hookEventName: "PostToolUse", additionalContext: "" },
+  hookSpecificOutput: { hookEventName: "PostToolUse", additionalContext: costNotice ?? "" },
 }) + "\n");

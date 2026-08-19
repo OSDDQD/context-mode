@@ -14,6 +14,7 @@
 | Total context consumed | 16.5 KB |
 | Overall context savings | **96%** |
 | Code examples preserved | **100%** (exact, not summarized) |
+| Latency vs. native tools | 25–188 ms warm penalty per call; 0.2–1.4 s on the first call of a session ([Part 4](#part-4-latency--routed-call-vs-native-tool)) |
 
 ## Tool Decision Matrix
 
@@ -97,6 +98,125 @@ Use source: "execute:shell" to scope results.
 
 The LLM retrieves only the relevant sections via `ctx_search()` — no context budget wasted on raw output.
 
+## Part 4: Latency — routed call vs. native tool
+
+*Everything above measures bytes saved. This part measures what those bytes cost in
+time. A routed call that answers slower is paid for twice — by the user waiting and
+by the model, which has every incentive to go back to `Grep` the moment the detour
+feels expensive.*
+
+### Method
+
+| | |
+|---|---|
+| Machine | 13th Gen Intel Core i9-13900H, 20 threads, 30 GB RAM, Linux 7.0.0 |
+| Repository under test | this one — 762 tracked files, 20 MB excluding `.git`/`node_modules` |
+| Version measured | v1.0.170 (`server.bundle.mjs` as committed) |
+| Node / ripgrep | v24.14.1 / ripgrep 15.2.0 |
+| Routed side | child process running the committed `server.bundle.mjs`, driven over stdio JSON-RPC — the same path a host takes, no shortcut |
+| Native side | `rg` measured **including** process spawn (the host spawns it too); `Read` measured as `readFileSync` plus the `cat -n` line prefixes that actually enter context |
+| Runs | 5 cold, 7 warm per pair (after 2 unmeasured warmups), repeated as 3 independent runs |
+| Statistic | median and p90, not mean — a single 2-second index build hides inside a mean, and it is exactly the outlier a user notices. The table reports the median across the 3 runs of each per-run statistic |
+| Machine load | 1-minute load average 3.6–5.4 throughout (20 cores); the machine was not idle |
+| Harness | [`tests/latency-benchmark.ts`](tests/latency-benchmark.ts) — `npx tsx tests/latency-benchmark.ts` |
+| `ctx_read` rows | measured against an esbuild bundle of the same sources built to a temp path (`CTX_LATENCY_BUNDLE`), because `ctx_read` post-dates the committed `server.bundle.mjs`. Same flags, same execution path; the numbers are re-checked whenever the committed bundle catches up |
+
+**Cold** = fresh server process against empty storage (`CONTEXT_MODE_DIR` and
+`CONTEXT_MODE_FFF_DIR` under a fresh temp root), so the call pays for the MCP
+handshake *and* for building whatever index it needs. **Warm** = one server whose
+indexes are already built, which is the steady state of a session.
+
+Three caveats stated up front. The OS page cache cannot be dropped without root, so
+the native side has no true cold regime — `rg` first-touch and warm come out the
+same, and that is a limitation of the measurement, not a property of ripgrep.
+`CLAUDE_PROJECT_DIR` is pinned to the repo in the harness: without it the server
+resolves the project from the most recent session log, and `ctx_find` answers with
+files from whatever repository was open last. And the machine carried a steady
+background load of 3.6–5.4 on 20 cores; a serial benchmark leaves most of that
+capacity unused, but the sub-10 ms rows are close enough to scheduler noise that
+they should be read as "single-digit milliseconds", not as three significant
+figures.
+
+### Results
+
+| Pair | Call | Median | p90 | Context bytes |
+|---|---|---:|---:|---:|
+| **Locate a symbol** | `ctx_find` — cold | 624 ms | 698 ms | 1.5 KB |
+| | `ctx_find` — warm | **160 ms** | 342 ms | 2.6 KB |
+| | `rg -l` (Grep default) | **8 ms** | 10 ms | 0.7 KB |
+| **Read one file's exports** | `ctx_execute_file` — cold | 269 ms | 289 ms | 529 B |
+| | `ctx_execute_file` — warm | **26 ms** | 44 ms | 529 B |
+| | `Read src/adapters/detect.ts` | **0.2 ms** | 0.4 ms | 34.0 KB |
+| **The same file, no program written** | `ctx_read` — cold | 215 ms | 228 ms | 1.3 KB |
+| | `ctx_read` — warm, structural slice | **25 ms** | 34 ms | 1.3 KB |
+| | `ctx_read` — warm, `intent: "exports"` | **25 ms** | 30 ms | 2.5 KB |
+| **Three questions, indexed content** | `ctx_search` — cold (incl. indexing `src/`) | 1,390 ms | 1,777 ms | 4.5 KB |
+| | `ctx_search` — warm, 3 queries in one call | **214 ms** | 357 ms | 3.6 KB |
+| | `rg -n` × 3 | **26 ms** | 28 ms | 34.6 KB |
+
+Queries: `registerTool`, `detectPlatform`, `PLATFORM_ENV_VARS`.
+
+Spread across the three runs, as per-run medians: `ctx_find` cold 585–647 ms, warm
+146–190 ms; `ctx_execute_file` cold 239–274 ms, warm 20–36 ms; `ctx_read` cold
+210–230 ms, warm 22–27 ms; `ctx_search` cold 1,336–1,643 ms, warm 212–300 ms;
+`rg -l` 8–9 ms; `rg -n` × 3 26–28 ms. The
+routed rows move by 20–40% run to run under background load, which is worth
+knowing before treating any single number as precise — but the gap to the native
+baseline is an order of magnitude wider than that spread, so the conclusions below
+do not depend on which run is quoted.
+
+### Reading the numbers honestly
+
+**The routed call is slower in every pair, in every regime.** Warm, the penalty is
+8× (`ctx_search`), 19× (`ctx_find`) and roughly 110× for both file-reading tools
+(`ctx_execute_file` and `ctx_read`, against a `Read` that costs 0.2 ms). There is
+no configuration in which routing is free.
+
+**Relative multiples overstate it; absolute deltas are what a session feels.** Warm,
+the detour costs 26 ms, 152 ms and 188 ms respectively. Against a model turn that
+already runs into seconds, none of these is perceptible. The multiples look
+alarming because the native baselines are 0.2–26 ms, not because the routed path
+is slow.
+
+**Cold is the real cost, and it lands on the first call of a session.** 0.62 s for
+`ctx_find`, 1.39 s for `ctx_search` with a p90 of 1.78 s — and cold `ctx_search`
+is the least stable row in the set, having reached a 4.1 s p90 on an earlier
+build. This is the number to attack: it is paid exactly when the model is
+deciding, for the rest of the session, whether the routed tool is worth using.
+
+**`ctx_find` does not win on bytes, and should not be sold as if it did.** It
+returns 2.6 KB against ripgrep's 0.7 KB — roughly 4× *more* context, because it
+carries ranked snippets and graph relations rather than a bare path list. Its case
+rests entirely on replacing a *sequence* (`rg -l`, then `Read` two or three
+candidates at 30 KB each), not on beating a single `rg -l`. Where that sequence
+does not happen, `ctx_find` is both slower and larger than the tool it replaces.
+
+**`ctx_execute_file` is the best trade in the set — and that is the finding that
+built `ctx_read`.** 26 ms warm buys a 98.5% byte reduction (34.0 KB → 529 B).
+Latency is emphatically *not* why a model reaches for `Read` instead: 26 ms is
+invisible. What it avoids is composing a program. That located the problem in the
+call's ergonomics rather than its speed, which is what `ctx_read(path, intent)`
+removes — the same handler, with the program supplied instead of demanded.
+
+**`ctx_read` costs what `ctx_execute_file` costs, because it is that call.** 25 ms
+warm against 26 ms, 215 ms cold against 269 ms — both differences sit inside the
+run-to-run spread of either row, which is the expected result when one tool is
+the other with a generated `code` argument. It returns 1.3 KB of structural slice, or 2.5 KB when
+an `intent` selects matching regions, against `Read`'s 34.0 KB: a 96% reduction
+for the structural slice, 93% with intent. Against `ctx_execute_file`'s 529 B it
+is two to five times larger, which is the honest price of a program written
+without knowing the question — a hand-written derivation that prints one number
+will always beat a general slice, and the point of `ctx_read` is the calls where
+nobody was going to write that program. (`ctx_execute_file` also accepts an
+`intent` parameter, but it means the opposite end of the pipe: an *output*-side
+hint that auto-indexes large stdout. `ctx_read`'s selects the *input*, and the
+two are deliberately never forwarded into one another.)
+
+**`ctx_search` earns its 8× warm penalty.** 214 ms for three questions answered in
+one call, returning 3.6 KB against 34.6 KB from three greps — a 90% reduction for
+the largest absolute saving in the set. Its problem is cold start, not steady
+state.
+
 ## Context Window Impact
 
 Claude's context window: **200,000 tokens**
@@ -140,7 +260,14 @@ npm run test:all
 
 # Live benchmark (requires Context7 fixture)
 npx tsx tests/live-benchmark.ts
+
+# Latency: routed call vs. native tool (Part 4)
+npx tsx tests/latency-benchmark.ts
 ```
+
+The latency harness needs `rg` on `PATH` and the committed `server.bundle.mjs`; it
+writes only into a fresh temp root and never touches the real
+`~/.claude/context-mode` store.
 
 ## Fixtures
 

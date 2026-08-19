@@ -100,6 +100,7 @@ describe("ContextModePlugin", () => {
         "ctx_index",
         "ctx_insight",
         "ctx_purge",
+        "ctx_read",
         "ctx_search",
         "ctx_stats",
         "ctx_upgrade",

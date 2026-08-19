@@ -54,6 +54,7 @@ import {
 // is not necessarily what this CLI was loaded from. See util/delivery-health.ts.
 import {
   collectDeliveryHealth,
+  discoverRunningStartPaths,
   purgePluginCache,
   renderDeliveryHealth,
 } from "./util/delivery-health.js";
@@ -2484,15 +2485,21 @@ async function upgrade(opts?: { platform?: string }) {
   // missing whatever that copy never registered (ctx_find, ctx_graph). Every
   // stale version directory goes so the host extracts a fresh one.
   //
-  // The tree we just installed into is kept — deleting it would undo this
-  // upgrade. A stale directory belonging to a still-running session is NOT
-  // spared: it is the exact thing that has to disappear, and this command
-  // already ends by telling the user to restart. (Contrast sessionstart.mjs's
-  // age-gated lazy cleanup from #181, which runs unattended and so has to be
-  // conservative; /ctx-upgrade is explicit and followed by a restart notice.)
+  // Two kinds of directory are spared. The tree we just installed into,
+  // because deleting it would undo this upgrade — and any tree a live MCP
+  // server is running from, because that server resolves dynamic imports
+  // against its own directory and would start failing mid-call the moment the
+  // files went. Sparing it costs nothing: the bumped version number is itself
+  // a new cache key, so the host unpacks a fresh directory regardless, and
+  // sessionstart.mjs's age-gated sweep (#181) collects the old one once
+  // nothing is running from it.
   p.log.step("Clearing the host's unpacked plugin cache...");
   {
-    const purge = purgePluginCache({ keep: [pluginRoot] });
+    // Best-effort — discoverRunningStartPaths returns [] when the platform has
+    // no usable process tool, and an empty list only means fewer directories
+    // are spared, never that a wrong one is removed.
+    const liveRoots = discoverRunningStartPaths().map((s) => resolve(s.startPath, ".."));
+    const purge = purgePluginCache({ keep: [pluginRoot, ...liveRoots] });
     if (purge.error) {
       p.log.warn(
         color.yellow("Plugin cache not cleared") + ` — ${purge.error}` +

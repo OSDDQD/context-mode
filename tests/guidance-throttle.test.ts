@@ -36,7 +36,7 @@ describe("guidance throttle", () => {
     // (#463) does NOT short-circuit them, so the throttle semantics still
     // apply: guidance once, then null.
     const r1 = routePreToolUse("Bash", { command: "npm install" }, PROJECT_DIR);
-    const r2 = routePreToolUse("Bash", { command: "find /" }, PROJECT_DIR);
+    const r2 = routePreToolUse("Bash", { command: "cat /var/log/syslog" }, PROJECT_DIR);
 
     expect(r1?.action).toBe("context");
     expect(r2).toBeNull();
@@ -65,7 +65,7 @@ describe("guidance throttle", () => {
 
     // All second calls return null
     const read2 = routePreToolUse("Read", { file_path: "/tmp/b.ts" }, PROJECT_DIR);
-    const bash2 = routePreToolUse("Bash", { command: "find /" }, PROJECT_DIR);
+    const bash2 = routePreToolUse("Bash", { command: "cat /var/log/syslog" }, PROJECT_DIR);
     const grep2 = routePreToolUse("Grep", { pattern: "bar" }, PROJECT_DIR);
 
     expect(read2).toBeNull();
@@ -125,7 +125,7 @@ describe("guidance throttle", () => {
     const r1 = routePreToolUse("Bash", { command: "npm install" }, PROJECT_DIR);
     expect(r1?.action).toBe("context");
 
-    const r2 = routePreToolUse("Bash", { command: "find /" }, PROJECT_DIR);
+    const r2 = routePreToolUse("Bash", { command: "cat /var/log/syslog" }, PROJECT_DIR);
     expect(r2).toBeNull();
   });
 

@@ -85,6 +85,12 @@ const REDIRECTS: Array<{ label: string; tool: string; input: Record<string, unkn
     input: { command: "node -e \"fetch('https://example.com').then(r => r.text())\"" },
   },
   { label: "WebFetch", tool: "WebFetch", input: { url: "https://example.com/docs" } },
+  // A named heavy command is the same shape as the four above: the loss is
+  // known before the call and the replacement is a concrete call, so the
+  // reason has to read as a redirect rather than as a capability being taken
+  // away. (The large-file Read refusal is held to the same contract in
+  // tests/hooks/enforcement-deny.test.ts, where the fixture file lives.)
+  { label: "heavy Bash command", tool: "Bash", input: { command: "npm test" } },
 ];
 
 describe("CASE A — redirects must not speak the vocabulary of restrictions", () => {
