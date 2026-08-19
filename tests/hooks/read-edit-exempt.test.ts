@@ -25,13 +25,15 @@
 
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, rmSync, writeFileSync, readFileSync, existsSync, unlinkSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync, readFileSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import {
   resetGuidanceThrottle,
   readUnroutedTally,
   escalationLevel,
+  callKeyFor,
+  redirectMarkerPathFor,
 } from "../../hooks/core/routing.mjs";
 
 const REPO_ROOT = resolve(__dirname, "..", "..");
@@ -70,8 +72,9 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  // resetGuidanceThrottle clears the session's whole marker directory, which
+  // is where refusals and accounted-for calls both live since v1.0.173.
   resetGuidanceThrottle(sessionId);
-  try { unlinkSync(resolve(tmpdir(), `context-mode-redirect-${sessionId}.txt`)); } catch { /* gone */ }
   rmSync(home, { recursive: true, force: true });
   rmSync(project, { recursive: true, force: true });
   rmSync(sentinelDir, { recursive: true, force: true });
@@ -93,8 +96,25 @@ function run(hook: string, payload: Record<string, unknown>): HookRun {
   return { status: r.status ?? 1, stdout: (r.stdout ?? "").trim(), stderr: (r.stderr ?? "").trim() };
 }
 
+/** The payload a Read of this path arrives as — the hook's stdin and the
+ *  input the call key is derived from are the same object by construction. */
+function readPayload(filePath: string): Record<string, unknown> {
+  return { tool_name: "Read", tool_input: { file_path: filePath } };
+}
+
+/** Where this call files a marker it expects to collect itself. */
+function ownMarkerFor(filePath: string): string {
+  return redirectMarkerPathFor(sessionId, { callKey: callKeyFor(readPayload(filePath)) });
+}
+
+/** Where a refusal for this path is filed — by target, since a refused call
+ *  never reaches PostToolUse to claim a key of its own. */
+function denyMarkerFor(filePath: string): string {
+  return redirectMarkerPathFor(sessionId, { denied: true, denyPath: filePath });
+}
+
 function pre(filePath: string): { status: number; decision: string; reason: string } {
-  const r = run(PRETOOL, { tool_name: "Read", tool_input: { file_path: filePath } });
+  const r = run(PRETOOL, readPayload(filePath));
   let decision = "passthrough";
   let reason = "";
   try {
@@ -192,7 +212,7 @@ describe("the read-before-edit escape hatch is not a violation", () => {
     pre(file);
     pre(file);
 
-    const markerPath = resolve(tmpdir(), `context-mode-redirect-${sessionId}.txt`);
+    const markerPath = ownMarkerFor(file);
     expect(existsSync(markerPath), "the repeat wrote no marker at all").toBe(true);
     const marker = readFileSync(markerPath, "utf-8");
     expect(marker.startsWith("Read:read-edit-exempt:0:")).toBe(true);
@@ -208,8 +228,7 @@ describe("the read-before-edit escape hatch is not a violation", () => {
     env.CONTEXT_MODE_READ_DENY_BYTES = "10000";
 
     expect(pre(file).decision).toBe("deny");
-    const markerPath = resolve(tmpdir(), `context-mode-redirect-${sessionId}.txt`);
-    const marker = readFileSync(markerPath, "utf-8");
+    const marker = readFileSync(denyMarkerFor(file), "utf-8");
     expect(marker.startsWith(`Read:read-redirected:${MID_SIZE}:`)).toBe(true);
   });
 });

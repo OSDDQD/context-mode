@@ -1,5 +1,5 @@
 /**
- * The price of a violation grows instead of resetting.
+ * The price of a violation tracks what the session is doing NOW.
  *
  * The advisory used to fire once per session per tool and then latch shut with
  * an O_CREAT|O_EXCL marker — the first Read of a session got advice, the two
@@ -7,19 +7,31 @@
  * matter most, and the ones where compaction has already removed those rules
  * from the system text.
  *
- * What replaces it is a function of the session's own behaviour: the tally of
- * unrouted heavy calls, which only grows. Severity derived from a quantity
- * that only grows can only grow too, and that is asserted here directly rather
- * than left as an argument — a ladder that can quietly step back down is the
- * old bug wearing different clothes.
+ * The first replacement swung too far the other way: severity was derived from
+ * a session total that only grows, so nine unrouted calls in the first ten
+ * minutes priced every read for the next six hours. Monotonicity-for-the-whole-
+ * session was asserted here as the property, and it was the wrong property — a
+ * session cannot apologise to a number that never goes down.
  *
- * Two properties are load-bearing besides monotonicity. Silence on a healthy
- * session is a requirement, not a nicety: a session that routes its heavy work
- * hears nothing at all. And when the tally cannot be read — no session id, no
+ * What is asserted now is decay: the level reads a sliding window, so a quiet
+ * window returns the session to silence on its own, with no command and no
+ * second counter to drift out of step. The session totals survive, but only as
+ * something to quote — the notice says what the session has spent, the ladder
+ * prices what it is doing now. Monotonicity survives too, in its honest form:
+ * at a fixed instant, a larger window tally is never treated more gently.
+ *
+ * Two further properties are load-bearing. Silence on a healthy session is a
+ * requirement, not a nicety: a session that routes its heavy work hears
+ * nothing at all. And when the tally cannot be read — no session id, no
  * PostToolUse yet, an unreadable store — the behaviour must fall back to the
  * advisory this hook has always emitted, never to the violation branch.
  * Punishing a session for a file we failed to open is the one outcome with no
  * defence.
+ *
+ * The last group here is about the price of the message itself. Refusing costs
+ * roughly a kilobyte of reason text, every time, on exactly the sessions that
+ * are already refusing repeatedly — so the fine print is worth saying once,
+ * and the floor under a refusal has to sit where the refusal pays for itself.
  */
 
 import { describe, it, expect, beforeAll, beforeEach, afterAll } from "vitest";
@@ -32,6 +44,9 @@ import {
   writeUnroutedTally,
   readUnroutedTally,
   escalationLevel,
+  escalationWindowMs,
+  escalationDenyFloorBytes,
+  escalationAskFloorBytes,
 } from "../../hooks/core/routing.mjs";
 
 interface Decision {
@@ -41,10 +56,29 @@ interface Decision {
   redirectMeta?: { bytesAvoided?: number };
 }
 
+/**
+ * The window pair prices the decision; the session pair is only quoted. Both
+ * are optional here so the old two-field records still typecheck — that shape
+ * is a supported input, not a legacy accident (see the compatibility test).
+ */
 interface Tally {
   count: number;
   bytes: number;
+  windowCount?: number;
+  windowBytes?: number;
+  at?: number;
 }
+
+/** ADR-0003: a redirect is a redirect, never a wall. */
+const FORBIDDEN = [
+  "blocked",
+  "not allowed",
+  "restricted",
+  "forbidden",
+  "prohibited",
+  "permission denied",
+  "unavailable",
+];
 
 const PROJECT = process.cwd();
 
@@ -52,18 +86,35 @@ const SENTINEL_DIR = mkdtempSync(join(tmpdir(), "ctx-ladder-sentinel-"));
 process.env.CONTEXT_MODE_MCP_SENTINEL_DIR = SENTINEL_DIR;
 const SENTINEL = resolve(SENTINEL_DIR, `context-mode-mcp-ready-${process.pid}`);
 
-const ENV_KEYS = ["CONTEXT_MODE_NUDGE_AFTER_CALLS", "CONTEXT_MODE_NUDGE_AFTER_BYTES"];
+const ENV_KEYS = [
+  "CONTEXT_MODE_NUDGE_AFTER_CALLS",
+  "CONTEXT_MODE_NUDGE_AFTER_BYTES",
+  "CONTEXT_MODE_ESCALATION_WINDOW_MS",
+  "CONTEXT_MODE_ESCALATION_DENY_MIN_BYTES",
+];
 
 let scratch: string;
 /** Big enough to be a violation, small enough that the size rule ignores it. */
 let midFile: string;
+/** A second one, so a refusal can be provoked twice without hitting the retry window. */
+let otherMidFile: string;
+/** Over the collection floor, under the floor a refusal would have to earn. */
+let smallFile: string;
+/** Under every floor on the ladder — nothing here is worth a word. */
+let tinyFile: string;
 let bigFile: string;
 
 beforeAll(() => {
   scratch = mkdtempSync(join(tmpdir(), "ctx-ladder-"));
   midFile = join(scratch, "mid.ts");
+  otherMidFile = join(scratch, "mid-two.ts");
+  smallFile = join(scratch, "small.ts");
+  tinyFile = join(scratch, "tiny.ts");
   bigFile = join(scratch, "big.ts");
   writeFileSync(midFile, "x".repeat(20_000));
+  writeFileSync(otherMidFile, "x".repeat(20_000));
+  writeFileSync(smallFile, "x".repeat(2_400));
+  writeFileSync(tinyFile, "x".repeat(500));
   writeFileSync(bigFile, "x".repeat(120_000));
 });
 
@@ -104,6 +155,20 @@ function severity(decision: Decision | null): number {
   return SEVERITY[decision?.action ?? "null"] ?? 0;
 }
 
+/** A rung-by-rung climb, all of it inside one window. */
+function growingWindow(): Tally[] {
+  return [
+    [0, 0],
+    [1, 20_000],
+    [3, 60_000],
+    [5, 90_000],
+    [6, 150_000],
+    [8, 220_000],
+    [9, 400_000],
+    [40, 2_000_000],
+  ].map(([count, bytes]) => ({ count, bytes, windowCount: count, windowBytes: bytes }));
+}
+
 describe("escalationLevel — the steps", () => {
   it("is silent until a threshold is crossed", () => {
     expect(escalationLevel({ count: 0, bytes: 0 })).toBe(0);
@@ -135,6 +200,20 @@ describe("escalationLevel — the steps", () => {
   it("treats an unreadable tally as no information, not as zero", () => {
     expect(escalationLevel(null)).toBe(0);
     expect(readUnroutedTally("ladder-nonexistent-session")).toBeNull();
+  });
+
+  it("reads a record with no window fields as all of it being recent", () => {
+    // Every assertion above passes a bare {count, bytes} — the shape written
+    // before the window existed, and the shape a session upgraded mid-flight
+    // still has on disk until its next PostToolUse. It has to mean what it
+    // meant then, or upgrading the plugin silently disarms the ladder for the
+    // rest of that session. Spelled out once rather than left implied by the
+    // other cases.
+    const now = 1_700_000_000_000;
+    const legacy = { count: 9, bytes: 400_000 };
+    expect(escalationLevel(legacy, {}, now)).toBe(3);
+    expect(escalationLevel(legacy, {}, now + 24 * 60 * 60_000)).toBe(3);
+    expect(escalationLevel({ ...legacy, windowCount: 9, windowBytes: 400_000 }, {}, now)).toBe(3);
   });
 });
 
@@ -227,22 +306,90 @@ describe("the ladder, step by step", () => {
   });
 });
 
-describe("the price never goes back down", () => {
-  it("gives a strictly non-decreasing response as the tally grows", () => {
-    // The old behaviour failed exactly here: call 1 got advice and call 2 got
-    // silence. Severity is a function of a quantity that only grows, so this
-    // holds by construction — asserted anyway, because "by construction" is
-    // what the previous design believed about itself too.
-    const growing: Tally[] = [
-      { count: 0, bytes: 0 },
-      { count: 1, bytes: 20_000 },
-      { count: 3, bytes: 60_000 },
-      { count: 5, bytes: 90_000 },
-      { count: 6, bytes: 150_000 },
-      { count: 8, bytes: 220_000 },
-      { count: 9, bytes: 400_000 },
-      { count: 40, bytes: 2_000_000 },
+describe("the price decays with the window", () => {
+  // Time is a parameter here, not a global. escalationLevel takes `now` as its
+  // third argument precisely so the ageing rule can be stated as arithmetic;
+  // faking the clock would test the fake instead.
+  const NOW = 1_700_000_000_000;
+
+  it("goes silent once the newest event is older than the window", () => {
+    // The incident this replaced: a burst of leakage in the first ten minutes
+    // priced every call for the next six hours. Size of the burst is
+    // deliberately absurd — no quantity of *old* evidence buys a step.
+    const stale: Tally = {
+      count: 400,
+      bytes: 40_000_000,
+      windowCount: 400,
+      windowBytes: 40_000_000,
+      at: NOW - escalationWindowMs({}) - 1,
+    };
+    expect(escalationLevel(stale, {}, NOW)).toBe(0);
+
+    // One millisecond on the other side of the boundary is still the burst.
+    expect(escalationLevel({ ...stale, at: NOW - escalationWindowMs({}) }, {}, NOW)).toBe(3);
+  });
+
+  it("shortens or lengthens that memory from the environment", () => {
+    const env = { CONTEXT_MODE_ESCALATION_WINDOW_MS: "60000" };
+    const tally: Tally = { count: 9, bytes: 0, windowCount: 9, windowBytes: 0, at: NOW - 90_000 };
+    expect(escalationLevel(tally, env, NOW)).toBe(0);
+    expect(escalationLevel(tally, {}, NOW)).toBe(3); // default 15 min still covers it
+  });
+
+  it("prices the window pair and quotes the session pair", () => {
+    // The two pairs are allowed to disagree, and which one drives the level is
+    // the whole point of the wave. A session that leaked hard an hour ago and
+    // has been clean since is a silent session, however large its totals.
+    const at = NOW - 1000;
+    expect(escalationLevel({ count: 400, bytes: 40_000_000, windowCount: 0, windowBytes: 0, at }, {}, NOW)).toBe(0);
+    expect(escalationLevel({ count: 0, bytes: 0, windowCount: 9, windowBytes: 0, at }, {}, NOW)).toBe(3);
+    expect(escalationLevel({ count: 0, bytes: 0, windowCount: 0, windowBytes: 300 * 1024, at }, {}, NOW)).toBe(3);
+  });
+
+  it("still tells the agent what the whole session has spent", () => {
+    // Decay changes what is charged for, not what is reported. The notice has
+    // to keep naming the session's own totals — a line that quoted the window
+    // instead would read as the leak having been forgiven.
+    const sid = session({ count: 42, bytes: 130_000, windowCount: 4, windowBytes: 0 });
+    const text = route("Read", { file_path: midFile }, sid)?.additionalContext ?? "";
+    expect(text).toContain("42 unrouted heavy calls");
+    expect(text).toContain("127.0 KB");
+    expect(text).not.toContain("4 unrouted heavy calls");
+  });
+
+  it("never softens as the window tally grows at one instant", () => {
+    // What survives of the old monotonicity claim. Across time the level may
+    // fall — that is the feature. At a FIXED instant it may not: more recent
+    // leakage can never buy a gentler answer, which is the property the ladder
+    // would be worthless without.
+    const growing: Array<[number, number]> = [
+      [0, 0],
+      [1, 20_000],
+      [3, 60_000],
+      [5, 90_000],
+      [6, 150_000],
+      [8, 220_000],
+      [9, 400_000],
+      [40, 2_000_000],
     ];
+    let previous = -1;
+    for (const [windowCount, windowBytes] of growing) {
+      const level = escalationLevel(
+        { count: 40, bytes: 2_000_000, windowCount, windowBytes, at: NOW },
+        {},
+        NOW,
+      );
+      expect(level, `softened at ${windowCount}/${windowBytes}: ${level} after ${previous}`)
+        .toBeGreaterThanOrEqual(previous);
+      previous = level;
+    }
+  });
+
+  it("carries that through the routed decision, tool by tool", () => {
+    // Same property one layer up, where it is what the caller actually feels.
+    // writeUnroutedTally stamps `at` itself, so every one of these is a fresh
+    // window and the only thing varying is how much is in it.
+    const growing: Tally[] = growingWindow();
     for (const tool of [
       { tool: "Read", input: { file_path: midFile } },
       { tool: "Bash", input: { command: "ps aux" } },
@@ -312,11 +459,39 @@ describe("no tally, no escalation", () => {
 });
 
 describe("the tally hop between the two hooks", () => {
-  it("round-trips the two numbers PostToolUse counted", () => {
+  it("round-trips both pairs and the timestamp PostToolUse counted", () => {
     const sid = `ladder-roundtrip-${process.pid}`;
     resetGuidanceThrottle(sid);
+    const before = Date.now();
+    writeUnroutedTally(sid, {
+      count: 7,
+      bytes: 123_456,
+      windowCount: 2,
+      windowBytes: 40_000,
+    });
+    const read = readUnroutedTally(sid);
+    // `at` is stamped by the writer, not carried from the caller: PreToolUse
+    // needs to know when this record was made, and only the writer knows.
+    expect(read).toEqual({
+      count: 7,
+      bytes: 123_456,
+      windowCount: 2,
+      windowBytes: 40_000,
+      at: expect.any(Number),
+    });
+    expect(read!.at).toBeGreaterThanOrEqual(before);
+  });
+
+  it("fills the window pair from the session pair when PostToolUse sends only two numbers", () => {
+    const sid = `ladder-roundtrip-legacy-${process.pid}`;
+    resetGuidanceThrottle(sid);
     writeUnroutedTally(sid, { count: 7, bytes: 123_456 });
-    expect(readUnroutedTally(sid)).toEqual({ count: 7, bytes: 123_456 });
+    expect(readUnroutedTally(sid)).toMatchObject({
+      count: 7,
+      bytes: 123_456,
+      windowCount: 7,
+      windowBytes: 123_456,
+    });
   });
 
   it("is cleared with the rest of the session's markers", () => {
@@ -324,5 +499,142 @@ describe("the tally hop between the two hooks", () => {
     writeUnroutedTally(sid, { count: 7, bytes: 123_456 });
     resetGuidanceThrottle(sid);
     expect(readUnroutedTally(sid)).toBeNull();
+  });
+});
+
+describe("a step has to be worth its own text", () => {
+  /** Deep enough into the ladder that only the file's size is left in doubt. */
+  const AT_DENY: Tally = { count: 9, bytes: 400_000 };
+  /** One rung down, where the question is whether asking is worth asking. */
+  const AT_ASK: Tally = { count: 6, bytes: 80_000 };
+
+  it("does not refuse a file smaller than the refusal", () => {
+    // The observed incident: a 2.4 KB read refused with ~1 KB of reason text,
+    // after which the caller took the escape hatch and read it anyway. That
+    // trade spends context to save none of it. The collection floor (2000
+    // bytes) is a telemetry number and was never meant to authorise this.
+    const sid = session(AT_DENY);
+    const action = route("Read", { file_path: smallFile }, sid)?.action ?? "null";
+    expect(action).not.toBe("deny");
+    // Nor a prompt: 2.4 KB is under the ask floor too, so what is left is the
+    // advisory, which costs a line and blocks nothing.
+    expect(action).not.toBe("ask");
+    expect(action).toBe("context");
+  });
+
+  it("refuses the same session's read once the file is worth refusing", () => {
+    // Nothing about the session changed — only the size of what it is about
+    // to pull in. That is the whole distinction the floor draws.
+    const sid = session(AT_DENY);
+    expect(route("Read", { file_path: midFile }, sid)?.action).toBe("deny");
+  });
+
+  it("does not prompt for a file smaller than the prompt", () => {
+    // The ask branch had no size test at all, so a session on the `ask` rung
+    // was interrupted for a 500-byte file. A prompt is not free either: its
+    // reason text lands whatever the user answers, and the answer is usually
+    // yes.
+    expect(route("Read", { file_path: tinyFile }, session(AT_ASK))?.action ?? "null").not.toBe("ask");
+    expect(route("Read", { file_path: smallFile }, session(AT_ASK))?.action ?? "null").not.toBe("ask");
+    // Above the floor the rung works exactly as before.
+    expect(route("Read", { file_path: midFile }, session(AT_ASK))?.action).toBe("ask");
+  });
+
+  it("lets the environment raise the refusal floor and refuses to let it fall", () => {
+    expect(escalationDenyFloorBytes({})).toBe(16_384);
+    expect(escalationDenyFloorBytes({ CONTEXT_MODE_ESCALATION_DENY_MIN_BYTES: "65536" })).toBe(65_536);
+    // A lower enforcement floor is the setting that produced the incident, so
+    // the knob is one-directional: it can buy more restraint, never less.
+    for (const raw of ["2000", "1", "0", "-5", "nonsense"]) {
+      expect(
+        escalationDenyFloorBytes({ CONTEXT_MODE_ESCALATION_DENY_MIN_BYTES: raw }),
+        `${raw} must not lower the floor`,
+      ).toBe(16_384);
+    }
+  });
+
+  it("keeps the ask floor at half the refusal floor, whichever way it moves", () => {
+    // Derived rather than configured, so the two steps cannot be set into the
+    // wrong order by an operator moving one and forgetting the other.
+    for (const env of [
+      {},
+      { CONTEXT_MODE_ESCALATION_DENY_MIN_BYTES: "65536" },
+      { CONTEXT_MODE_ESCALATION_DENY_MIN_BYTES: "2000" },
+    ]) {
+      expect(escalationAskFloorBytes(env)).toBe(Math.floor(escalationDenyFloorBytes(env) / 2));
+      expect(escalationAskFloorBytes(env)).toBeLessThan(escalationDenyFloorBytes(env));
+    }
+    expect(escalationAskFloorBytes({})).toBe(8_192);
+  });
+
+  it("holds both floors through the routed decision, not just the accessors", () => {
+    process.env.CONTEXT_MODE_ESCALATION_DENY_MIN_BYTES = "2000";
+    const sid = session(AT_DENY);
+    expect(route("Read", { file_path: smallFile }, sid)?.action ?? "null").not.toBe("deny");
+    // Raising it does take effect, which is what makes the clamp a clamp and
+    // not the env var being ignored outright — and it drags the ask floor up
+    // with it, so a 20 KB read on a refusing session goes quiet.
+    process.env.CONTEXT_MODE_ESCALATION_DENY_MIN_BYTES = String(64 * 1024);
+    const raised = session(AT_DENY);
+    const action = route("Read", { file_path: midFile }, raised)?.action ?? "null";
+    expect(action).not.toBe("deny");
+    expect(action).not.toBe("ask");
+  });
+});
+
+describe("the fine print is worth saying once", () => {
+  /**
+   * One session, no reset in between — the throttle is the thing under test,
+   * and `session()` clears it. Two different paths, because a repeat of the
+   * same path is the edit escape hatch and would be allowed rather than
+   * refused a second time.
+   */
+  function twoRefusals(): { first: string; second: string } {
+    const sid = session({ count: 9, bytes: 400_000 });
+    const a = route("Read", { file_path: midFile }, sid);
+    const b = route("Read", { file_path: otherMidFile }, sid);
+    // Asserted here rather than per-case: every claim below is about the text
+    // of a refusal, and "shorter" is trivially true of a decision that never
+    // happened.
+    expect(a?.action, "the first call must actually be refused").toBe("deny");
+    expect(b?.action, "the second call must actually be refused").toBe("deny");
+    return { first: a?.reason ?? "", second: b?.reason ?? "" };
+  }
+
+  it("spells the whole thing out the first time a session is refused", () => {
+    const { first } = twoRefusals();
+    expect(first).toContain("ctx_execute_file");
+    expect(first).toContain("CONTEXT_MODE_READ_DENY_BYTES");
+    expect(first).toContain("CONTEXT_MODE_READ_EDIT_WINDOW_MS");
+  });
+
+  it("drops to one line on every refusal after it", () => {
+    const { first, second } = twoRefusals();
+    // The reasoning and the knob names are what the caller has already read;
+    // the refusal itself is what changed. On a session refusing repeatedly,
+    // repeating the kilobyte makes the plugin the largest single writer to the
+    // window it exists to protect.
+    expect(second.length).toBeLessThan(first.length / 2);
+    expect(second).not.toContain("CONTEXT_MODE_READ_DENY_BYTES");
+    expect(second).not.toContain("CONTEXT_MODE_READ_EDIT_WINDOW_MS");
+  });
+
+  it("keeps everything the caller has to act on in the short form", () => {
+    const { second } = twoRefusals();
+    // A redirect, a ready replacement call, and the escape hatch with its
+    // deadline. Drop any one of these and the short form stops being a
+    // redirect and starts being a wall.
+    expect(second).toContain("redirected");
+    expect(second).toContain("ctx_read(");
+    expect(second).toMatch(/repeat this Read within \d+s/);
+  });
+
+  it("stays inside the ADR-0003 vocabulary in both forms", () => {
+    const { first, second } = twoRefusals();
+    for (const text of [first, second]) {
+      for (const word of FORBIDDEN) {
+        expect(text.toLowerCase(), `"${word}" turns a redirect into a wall`).not.toContain(word);
+      }
+    }
   });
 });

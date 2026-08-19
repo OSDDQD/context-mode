@@ -439,6 +439,15 @@ export const categoryLabels: Record<string, string> = {
   plan: "Plans drafted",
   "blocked-on": "Blockers logged",
   "missed-redirect": "Payloads that slipped through",
+  // Heavy calls the routing rules themselves send to the native tool — a
+  // `git diff`, an offset/limit Read, a call the user confirmed at a prompt.
+  // Recorded so the bytes stay visible, and kept out of `missed-redirect` so
+  // neither the adherence denominator (the query at L1175 filters on that
+  // category) nor the escalation ladder (which filters on the event TYPE, in
+  // hooks/core/routing.mjs::readMissedRedirectTally) charges the session for
+  // doing what it was told. The two exclusions have to move together, or
+  // ctx_stats and the ladder start describing different sessions.
+  "sanctioned-heavy": "Heavy calls the rules asked for",
 };
 
 /** Explains why each category matters for continuity. */

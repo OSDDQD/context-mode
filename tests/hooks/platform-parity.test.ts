@@ -33,7 +33,12 @@ import { spawnSync } from "node:child_process";
 import { mkdtempSync, rmSync, writeFileSync, readFileSync, existsSync, unlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
-import { resetGuidanceThrottle, writeUnroutedTally } from "../../hooks/core/routing.mjs";
+import {
+  resetGuidanceThrottle,
+  writeUnroutedTally,
+  callKeyFor,
+  redirectMarkerPathFor,
+} from "../../hooks/core/routing.mjs";
 
 const REPO_ROOT = resolve(__dirname, "..", "..");
 const HOOKS = {
@@ -125,12 +130,10 @@ beforeEach(() => {
 });
 
 afterEach(() => {
-  for (const platform of PLATFORMS) {
-    resetGuidanceThrottle(`${sessionId}-${platform}`);
-    try {
-      unlinkSync(resolve(tmpdir(), `context-mode-redirect-${sessionId}-${platform}.txt`));
-    } catch { /* gone */ }
-  }
+  // resetGuidanceThrottle drops each host's whole marker directory — refusals,
+  // accounted-for calls and consent markers alike — so no leftover from one
+  // case can be swept into the next one's accounting.
+  for (const platform of PLATFORMS) resetGuidanceThrottle(`${sessionId}-${platform}`);
   try { unlinkSync(CODEX_CAPS_CACHE); } catch { /* gone */ }
   rmSync(scratch, { recursive: true, force: true });
   rmSync(sentinelDir, { recursive: true, force: true });
@@ -279,11 +282,17 @@ describe("the read-before-edit escape hatch works on both hosts", () => {
     it(`${platform}: the promised repeat goes through and is not a violation`, () => {
       const file = makeFile(`mid-${platform}.ts`, 20_000);
       const env = { CONTEXT_MODE_READ_DENY_BYTES: "10000" };
+      const toolInput = { file_path: file };
 
-      expect(pre(platform, "Read", { file_path: file }, env).kind).toBe("deny");
-      expect(pre(platform, "Read", { file_path: file }, env).kind, "the repeat must go through").toBe("silent");
+      expect(pre(platform, "Read", toolInput, env).kind).toBe("deny");
+      expect(pre(platform, "Read", toolInput, env).kind, "the repeat must go through").toBe("silent");
 
-      const markerPath = resolve(tmpdir(), `context-mode-redirect-${sessionFor(platform)}.txt`);
+      // The repeat expects its own PostToolUse, so its marker is filed under
+      // the key both hooks derive from the same call — ask routing.mjs for the
+      // path rather than spelling it, or the test pins yesterday's layout.
+      const markerPath = redirectMarkerPathFor(sessionFor(platform), {
+        callKey: callKeyFor({ tool_name: "Read", tool_input: toolInput }),
+      });
       expect(existsSync(markerPath), `${platform} wrote no accounted-for marker`).toBe(true);
       expect(readFileSync(markerPath, "utf-8").startsWith("Read:read-edit-exempt:0:")).toBe(true);
 

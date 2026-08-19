@@ -14,7 +14,7 @@ import "../suppress-stderr.mjs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { readStdin, parseStdin, getInputProjectDir, getSessionId, CODEX_OPTS } from "../session-helpers.mjs";
-import { routePreToolUse, initSecurity, writeRedirectMarker } from "../core/routing.mjs";
+import { routePreToolUse, initSecurity, writeRedirectMarker, writeAskMarker, callKeyFor } from "../core/routing.mjs";
 import { formatDecision } from "../core/formatters.mjs";
 import { codexSupportsUpdatedInput } from "../core/codex-caps.mjs";
 
@@ -50,7 +50,22 @@ const response = formatDecision(
 // as a fresh violation and pushed the escalation ladder up a step. The loop
 // was fixed on Claude Code first; this is the same fix on the second host.
 if (decision && decision.redirectMeta) {
-  writeRedirectMarker(getSessionId(input, CODEX_OPTS), decision.redirectMeta);
+  const denied = decision.action === "deny";
+  writeRedirectMarker(getSessionId(input, CODEX_OPTS), decision.redirectMeta, {
+    callKey: denied ? undefined : callKeyFor(input, decision.updatedInput),
+    denied,
+    denyPath: decision.redirectMeta.commandSummary,
+  });
+}
+
+// Codex cannot show a confirmation prompt, so an `ask` reaches the model as
+// guidance and the call runs. Recording it as consent anyway is the honest
+// reading: nothing stood between the guidance and the call, so treating it as
+// a violation would charge the session for a prompt the host never showed.
+if (decision && decision.action === "ask") {
+  try {
+    writeAskMarker(getSessionId(input, CODEX_OPTS), callKeyFor(input));
+  } catch { /* best-effort */ }
 }
 
 const output = response ?? {

@@ -5395,10 +5395,14 @@ describe("hook routing prompt-surface contract (#683 ADR-0002 + ADR-0003)", () =
 
         test("MUST name at least one ctx_* alternative tool", () => {
           // ADR-0003 §CASE A: "MUST specify the alternative tool to use."
-          // The current four sites all name ctx_execute and/or
-          // ctx_fetch_and_index — we just enforce that SOMETHING ctx_*
-          // is mentioned so the agent has a concrete next call.
-          expect(cs.payload).toMatch(/ctx_(execute|fetch_and_index|search|batch_execute)/);
+          // Any ctx_* tool satisfies it — the rule is that the agent is left
+          // with a concrete next call, not that it is left with a particular
+          // one. The pattern used to enumerate the four tools the CASE A sites
+          // happened to name at the time, which made it a list of today's
+          // tools rather than the rule: the short refusal form added in
+          // v1.0.173 names `ctx_read`, which is exactly as concrete and failed
+          // the enumeration.
+          expect(cs.payload).toMatch(/ctx_[a-z][a-z_]*/);
         });
 
         // ── PR #683 follow-up (Mert flag): negation-pattern eradication ──

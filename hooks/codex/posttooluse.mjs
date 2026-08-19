@@ -14,7 +14,11 @@ import {
   buildMissedRedirectNotice,
   writeUnroutedTally,
   consumeRedirectMarker,
+  consumeAskMarker,
+  callKeyFor,
   READ_EDIT_EXEMPT_TYPE,
+  SANCTIONED_HEAVY_TYPE,
+  SANCTIONED_HEAVY_CATEGORY,
 } from "../core/routing.mjs";
 import { dirname } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -73,30 +77,45 @@ try {
   // would push the escalation ladder up a step, which is the loop this wave
   // exists to close.
   let redirectEmitted = false;
+  let askConfirmed = false;
   try {
-    const marker = consumeRedirectMarker(sessionId);
+    // Same per-call keying as the Claude Code hook. Codex supplies no
+    // tool_use_id, so callKeyFor falls back to fingerprinting the call — which
+    // is exactly why the fallback exists.
+    const callKey = callKeyFor(input);
+    askConfirmed = consumeAskMarker(sessionId, callKey);
+    const marker = consumeRedirectMarker(sessionId, { callKey });
+    const savings = [];
     if (marker) {
       if (marker.type === READ_EDIT_EXEMPT_TYPE) {
         // Routed, and saved nothing: the bytes really did arrive.
         redirectEmitted = true;
       } else if (marker.bytesAvoided > 0) {
-        attributeAndInsertEvents(
-          db,
-          sessionId,
-          [{
-            type: marker.type,
-            category: "redirect",
-            data: `${marker.tool}: ${marker.summary}`,
-            priority: 2,
-            bytes_avoided: marker.bytesAvoided,
-          }],
-          input,
-          projectDir,
-          "PreToolUse",
-          resolveProjectAttributions,
-        );
+        savings.push(marker);
         redirectEmitted = true;
       }
+      // Refusals have no PostToolUse of their own; this pass is what accounts
+      // for them.
+      for (const s of marker.swept ?? []) {
+        if (s.bytesAvoided > 0) savings.push(s);
+      }
+    }
+    for (const s of savings) {
+      attributeAndInsertEvents(
+        db,
+        sessionId,
+        [{
+          type: s.type,
+          category: "redirect",
+          data: `${s.tool}: ${s.summary}`,
+          priority: 2,
+          bytes_avoided: s.bytesAvoided,
+        }],
+        input,
+        projectDir,
+        "PreToolUse",
+        resolveProjectAttributions,
+      );
     }
   } catch { /* best-effort — never block the hook */ }
 
@@ -105,14 +124,18 @@ try {
   // the whole point of keeping it in hooks/core/routing.mjs is that a second
   // host costs a call, not a copy.
   try {
-    const missed = describeMissedRedirect(normalizedInput, { routed: redirectEmitted });
+    const isSubagentCall = input.agent_id != null;
+    const missed = isSubagentCall ? null : describeMissedRedirect(normalizedInput, {
+      routed: redirectEmitted,
+      sanctioned: askConfirmed,
+    });
     if (missed) {
       attributeAndInsertEvents(
         db,
         sessionId,
         [{
-          type: "missed_redirect",
-          category: "missed-redirect",
+          type: missed.sanctioned ? SANCTIONED_HEAVY_TYPE : "missed_redirect",
+          category: missed.sanctioned ? SANCTIONED_HEAVY_CATEGORY : "missed-redirect",
           data: `${missed.toolName}: ${missed.bytes} bytes unrouted — ${missed.summary}`,
           priority: 3,
         }],
@@ -121,17 +144,19 @@ try {
         "PostToolUse",
         resolveProjectAttributions,
       );
-      const tally = readMissedRedirectTally(db, sessionId);
-      // Same hop as the Claude Code hook: PreToolUse reads these two numbers
-      // instead of counting events on its own budget.
-      writeUnroutedTally(sessionId, tally);
-      costNotice = buildMissedRedirectNotice({
-        toolName: missed.toolName,
-        displayName: input.tool_name,
-        bytes: missed.bytes,
-        tally,
-        platform: "codex",
-      });
+      if (!missed.sanctioned) {
+        const tally = readMissedRedirectTally(db, sessionId);
+        // Same hop as the Claude Code hook: PreToolUse reads these two numbers
+        // instead of counting events on its own budget.
+        writeUnroutedTally(sessionId, tally);
+        costNotice = buildMissedRedirectNotice({
+          toolName: missed.toolName,
+          displayName: input.tool_name,
+          bytes: missed.bytes,
+          tally,
+          platform: "codex",
+        });
+      }
     }
   } catch { /* telemetry is best-effort — never block the hook */ }
 

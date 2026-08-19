@@ -5,10 +5,16 @@
  *            command is intercepted.
  * Slice 3.2: PostToolUse reads the marker, emits a `category=redirect,
  *            type=bash-redirected, bytes_avoided=8192` event, and unlinks.
- * Slice 3.3: marker is unlinked after read (no double-emit on a follow-up
- *            PostToolUse for an unrelated tool call).
+ * Slice 3.3: the marker belongs to ONE call — a concurrent call's PostToolUse
+ *            cannot take it, and the owner takes it exactly once.
  * Slice 3.4: when no marker is present, no phantom event is emitted.
  * Slice 3.5: long curl/wget commands are truncated to 200 chars in the marker.
+ *
+ * Since v1.0.173 the markers live one-file-per-call under a per-session
+ * directory, so nothing here spells a path itself: `callKeyFor` is fed the
+ * SAME payload the hook is fed on stdin, and `redirectMarkerPathFor` turns
+ * that key into the path. A test that hard-codes the filename is a test that
+ * agrees with yesterday's layout rather than with the hook.
  */
 
 import { describe, test, beforeAll, beforeEach, afterAll, afterEach, expect } from "vitest";
@@ -22,6 +28,7 @@ import { createHash } from "node:crypto";
 
 import { SessionDB } from "../../src/session/db.js";
 import { loadDatabase } from "../../src/db-base.js";
+import { callKeyFor, redirectMarkerPathFor, resetGuidanceThrottle } from "../../hooks/core/routing.mjs";
 
 
 const _hashCanonical = (p: string) => createHash("sha256").update(
@@ -94,48 +101,68 @@ describe("D2 Phase 3 — bash-redirected marker pattern", () => {
 
   beforeEach(() => {
     writeFileSync(mcpSentinel, String(process.pid));
-    // Clean any leftover marker so each slice starts clean.
-    const m = resolve(tmpdir(), `context-mode-redirect-${sessionId}.txt`);
-    try { unlinkSync(m); } catch {}
+    // The session id is fixed, so markers left behind by a previous RUN of the
+    // suite would otherwise be swept into this one's accounting. This clears
+    // the whole per-session marker directory, not one filename.
+    resetGuidanceThrottle(sessionId);
   });
 
   afterEach(() => {
     try { unlinkSync(mcpSentinel); } catch {}
   });
 
-  function runPre(cmd: string) {
-    return spawnSync("node", [PRETOOL_PATH], {
-      input: JSON.stringify({
-        session_id: sessionId,
-        tool_name: "Bash",
-        tool_input: { command: cmd },
-      }),
+  type Payload = Record<string, unknown>;
+
+  /**
+   * One payload, used for both the hook's stdin and the call key.
+   *
+   * `tool_use_id` is what the host itself supplies on both PreToolUse and
+   * PostToolUse, and it is the only handle that survives a rewrite: the curl
+   * branch replaces the command, so PostToolUse sees different `tool_input`
+   * for the same call.
+   */
+  function bashPre(command: string, toolUseId: string): Payload {
+    return {
+      session_id: sessionId,
+      tool_use_id: toolUseId,
+      tool_name: "Bash",
+      tool_input: { command },
+    };
+  }
+
+  function bashPost(command: string, toolUseId: string, response = "ok"): Payload {
+    return {
+      session_id: sessionId,
+      tool_use_id: toolUseId,
+      tool_name: "Bash",
+      tool_input: { command },
+      tool_response: response,
+    };
+  }
+
+  function markerFor(payload: Payload): string {
+    return redirectMarkerPathFor(sessionId, { callKey: callKeyFor(payload) });
+  }
+
+  function runHook(hookPath: string, payload: Payload) {
+    return spawnSync("node", [hookPath], {
+      input: JSON.stringify(payload),
       encoding: "utf-8",
       timeout: 30_000,
       env: { ...process.env, ...env },
     });
   }
 
-  function runPost(toolName: string, toolInput: object, response: string) {
-    return spawnSync("node", [POSTTOOL_PATH], {
-      input: JSON.stringify({
-        session_id: sessionId,
-        tool_name: toolName,
-        tool_input: toolInput,
-        tool_response: response,
-      }),
-      encoding: "utf-8",
-      timeout: 30_000,
-      env: { ...process.env, ...env },
-    });
-  }
+  const runPre = (payload: Payload) => runHook(PRETOOL_PATH, payload);
+  const runPost = (payload: Payload) => runHook(POSTTOOL_PATH, payload);
 
   // ─── Slice 3.1 ───────────────────────────────────────────
   test("3.1: PreToolUse writes redirect marker on curl", () => {
-    const r = runPre("curl https://api.example.com/data.json");
+    const pre = bashPre("curl https://api.example.com/data.json", "call-3-1");
+    const r = runPre(pre);
     assert.equal(r.status, 0, `pretooluse non-zero. stderr: ${r.stderr}`);
 
-    const markerPath = resolve(tmpdir(), `context-mode-redirect-${sessionId}.txt`);
+    const markerPath = markerFor(pre);
     assert.ok(existsSync(markerPath), "marker file must be written");
     const content = readFileSync(markerPath, "utf-8");
     expect(content.startsWith("Bash:bash-redirected:8192:")).toBe(true);
@@ -144,8 +171,11 @@ describe("D2 Phase 3 — bash-redirected marker pattern", () => {
 
   // ─── Slice 3.2 ───────────────────────────────────────────
   test("3.2: PostToolUse reads marker + emits redirect event with bytes_avoided=8192", () => {
-    runPre("curl https://example.com/secret");
-    const post = runPost("Bash", { command: "echo blocked" }, "ok");
+    const pre = bashPre("curl https://example.com/secret", "call-3-2");
+    runPre(pre);
+    // The command the host actually runs is the rewritten one; the id is what
+    // ties it back to the decision that rewrote it.
+    const post = runPost(bashPost("echo blocked", "call-3-2"));
     assert.equal(post.status, 0, `posttooluse non-zero. stderr: ${post.stderr}`);
 
     const rows = readEvents(dbPath, sessionId, "bash-redirected");
@@ -157,26 +187,48 @@ describe("D2 Phase 3 — bash-redirected marker pattern", () => {
   });
 
   // ─── Slice 3.3 ───────────────────────────────────────────
-  test("3.3: marker is unlinked after PostToolUse reads it (no double-emit)", () => {
-    runPre("curl https://example.com");
-    const markerPath = resolve(tmpdir(), `context-mode-redirect-${sessionId}.txt`);
+  test("3.3: the marker is this call's alone, and is spent exactly once", () => {
+    const pre = bashPre("curl https://example.com", "call-3-3");
+    runPre(pre);
+    const markerPath = markerFor(pre);
     assert.ok(existsSync(markerPath), "marker should exist before PostToolUse");
 
-    runPost("Bash", { command: "echo blocked" }, "ok");
-    assert.ok(!existsSync(markerPath), "marker must be deleted after PostToolUse");
-
-    // Second PostToolUse for an unrelated tool — no new redirect event should land.
+    // Somebody else's PostToolUse. Under the single-cell layout it would have
+    // walked off with this marker and booked 8 KB against the wrong call.
     const before = readEvents(dbPath, sessionId, "bash-redirected").length;
-    runPost("Edit", { file_path: "/tmp/x.ts", old_string: "a", new_string: "b" }, "ok");
-    const after = readEvents(dbPath, sessionId, "bash-redirected").length;
-    expect(after).toBe(before);
+    runPost({
+      session_id: sessionId,
+      tool_use_id: "call-3-3-unrelated",
+      tool_name: "Edit",
+      tool_input: { file_path: "/tmp/x.ts", old_string: "a", new_string: "b" },
+      tool_response: "ok",
+    });
+    assert.ok(existsSync(markerPath), "an unrelated call must not consume this marker");
+    expect(readEvents(dbPath, sessionId, "bash-redirected").length).toBe(before);
+
+    // The owner takes it, and it is gone.
+    runPost(bashPost("echo blocked", "call-3-3"));
+    assert.ok(!existsSync(markerPath), "marker must be deleted after its own PostToolUse");
+    const afterOwner = readEvents(dbPath, sessionId, "bash-redirected").length;
+    expect(afterOwner).toBe(before + 1);
+
+    // A repeat of the same PostToolUse (a retried hook, a duplicated event)
+    // finds nothing left to charge.
+    runPost(bashPost("echo blocked", "call-3-3"));
+    expect(readEvents(dbPath, sessionId, "bash-redirected").length).toBe(afterOwner);
   });
 
   // ─── Slice 3.4 ───────────────────────────────────────────
   test("3.4: no marker → no phantom redirect event", () => {
     // No PreToolUse → no marker.
     const before = readEvents(dbPath, sessionId, "bash-redirected").length;
-    runPost("Read", { file_path: "/tmp/whatever.ts" }, "ok");
+    runPost({
+      session_id: sessionId,
+      tool_use_id: "call-3-4",
+      tool_name: "Read",
+      tool_input: { file_path: "/tmp/whatever.ts" },
+      tool_response: "ok",
+    });
     const after = readEvents(dbPath, sessionId, "bash-redirected").length;
     expect(after).toBe(before);
   });
@@ -184,9 +236,9 @@ describe("D2 Phase 3 — bash-redirected marker pattern", () => {
   // ─── Slice 3.5 ───────────────────────────────────────────
   test("3.5: long command summary truncated to 200 chars in marker", () => {
     const longCmd = "curl " + "https://example.com/" + "a".repeat(500);
-    runPre(longCmd);
-    const markerPath = resolve(tmpdir(), `context-mode-redirect-${sessionId}.txt`);
-    const content = readFileSync(markerPath, "utf-8");
+    const pre = bashPre(longCmd, "call-3-5");
+    runPre(pre);
+    const content = readFileSync(markerFor(pre), "utf-8");
     // Format: tool:type:bytes:summary — extract everything after the 3rd colon.
     const i1 = content.indexOf(":");
     const i2 = content.indexOf(":", i1 + 1);
@@ -194,5 +246,36 @@ describe("D2 Phase 3 — bash-redirected marker pattern", () => {
     const summary = content.slice(i3 + 1);
     expect(summary.length).toBeLessThanOrEqual(200);
     expect(summary.length).toBeGreaterThan(0);
+  });
+
+  // ─── Two calls in flight at once ─────────────────────────
+  test("concurrent calls each keep their own marker and their own accounting", () => {
+    // The reason the markers moved to one file per call. Two curls are
+    // intercepted before either finishes; each PostToolUse must charge its own
+    // URL, and neither may consume the other's marker.
+    const preA = bashPre("curl https://a.example.com/one", "call-par-a");
+    const preB = bashPre("curl https://b.example.com/two", "call-par-b");
+    runPre(preA);
+    runPre(preB);
+
+    const markerA = markerFor(preA);
+    const markerB = markerFor(preB);
+    assert.ok(existsSync(markerA) && existsSync(markerB), "both markers must coexist");
+    expect(markerA).not.toBe(markerB);
+
+    const before = readEvents(dbPath, sessionId, "bash-redirected").length;
+
+    runPost(bashPost("echo a", "call-par-a"));
+    assert.ok(!existsSync(markerA), "A's marker was not consumed by A");
+    assert.ok(existsSync(markerB), "A's PostToolUse consumed B's marker");
+
+    runPost(bashPost("echo b", "call-par-b"));
+    assert.ok(!existsSync(markerB), "B's marker was not consumed by B");
+
+    const rows = readEvents(dbPath, sessionId, "bash-redirected").slice(before);
+    expect(rows.length).toBe(2);
+    expect(rows.map(r => r.data).join("\n")).toContain("https://a.example.com/one");
+    expect(rows.map(r => r.data).join("\n")).toContain("https://b.example.com/two");
+    for (const row of rows) expect(row.bytes_avoided).toBe(8192);
   });
 });

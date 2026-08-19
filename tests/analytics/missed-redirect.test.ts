@@ -51,6 +51,27 @@ describe("missed-redirect reporting", () => {
     expect(categoryLabels["missed-redirect"]).toBeTruthy();
   });
 
+  test("heavy calls the rules asked for have a label of their own", () => {
+    // They are recorded under a separate category precisely so they read as
+    // spending rather than as leakage; without a label the renderer would
+    // print the raw id next to the block that does mean leakage.
+    expect(categoryLabels["sanctioned-heavy"]).toBeTruthy();
+
+    const text = formatReport(baseReport(), "1.0.169", null, {
+      conversation: {
+        ...conversation(),
+        byCategory: [
+          {
+            category: "sanctioned-heavy",
+            count: 2,
+            label: categoryLabels["sanctioned-heavy"],
+          },
+        ],
+      },
+    });
+    expect(text).toContain(categoryLabels["sanctioned-heavy"]);
+  });
+
   test("the block lists the heaviest unrouted calls with a next step", () => {
     const text = formatReport(baseReport(), "1.0.169", null, {
       conversation: conversation({

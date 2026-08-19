@@ -2001,6 +2001,88 @@ to the branch that does not matter is entry 33 and entry 35 again, one layer fur
 down: `resolveUpgradeRepo({ pluginRoot }).url` now feeds the clone, and the `fork`
 block in `package.json` resolves it to `OSDDQD/context-mode` on the first step.
 
+## 38. The plugin stops charging for obedience
+
+`hooks/core/routing.mjs`, `hooks/pretooluse.mjs`, `hooks/posttooluse.mjs`,
+`hooks/codex/pretooluse.mjs`, `hooks/codex/posttooluse.mjs`,
+`src/session/analytics.ts`, `docs/adr/0008-escalation-economics.md`
+
+A live session refused a `Read` of a **2.4 KB** file. The standard refusal
+threshold is 50 KB. The refusal text was about a kilobyte, the model took the
+escape hatch and read the file anyway, and the session had been pinned to the
+top step of the ladder for hours: *"93 unrouted heavy calls, 619.9 KB"*.
+
+Seven defects, one theme. **The price of an intervention was never compared
+with the price of the bytes it defended against**, and the counter that set the
+price was being filled by behaviour the plugin itself calls correct.
+
+**The DENY step was refusing at the telemetry floor.** 2000 bytes decides what
+is worth *recording*; it was also deciding what was worth *refusing*. Refusing a
+2.4 KB file spends ~1 KB of reason text and a round trip, and then the file
+arrives anyway. Enforcement gets its own floor —
+`max(16384, CONTEXT_MODE_ESCALATION_DENY_MIN_BYTES)`, an 8–16× margin over the
+refusal's own price — and the env var can only raise it.
+
+The step below had no size test at all, so a session at `ask` was asked to
+confirm a 500-byte read. It gets the same arithmetic at half the number (8 KB,
+derived from the refusal floor so the two cannot end up in the wrong order): a
+prompt is cheaper than a refusal, but its text still enters the conversation and
+the common answer is yes, which buys nothing. Below 8 KB the ladder keeps only
+its advisory.
+
+**The ladder could only climb.** Nine unrouted calls bought a refusal on every
+subsequent `Read` ≥ 2 KB for the rest of the session, however carefully it
+behaved afterwards — and long sessions are the ones this plugin exists for. The
+level is now read from a sliding window
+(`CONTEXT_MODE_ESCALATION_WINDOW_MS`, 15 min). Fifteen quiet minutes return a
+session to silence on its own. Session totals are still counted and still
+quoted: the notice says what the session has spent, the ladder prices what it is
+doing now.
+
+**The tally was full of sanctioned calls.** A bounded `Read` — the one the
+refusal text promises in writing "goes through unchanged" — moved the ladder. So
+did `git diff`, which the routing block tells the agent to run in Bash. So did
+calls the user had explicitly confirmed at an `ask` prompt. And so did every
+read made by a **subagent**: `pretooluse.mjs` knew about subagents,
+`posttooluse.mjs` did not, so an `Explore` agent pulling 500 KB escalated the
+main loop — for bytes that never entered the main window at all, since a
+subagent's context is discarded and only its report comes back. That is the most
+likely source of the 93 calls.
+
+Bounded reads and subagent calls are now not events. The rest are recorded as
+`sanctioned_heavy` — same data line, visible in `ctx_stats`, excluded from both
+the ladder (which filters on event **type**) and the adherence denominator
+(which filters on **category**). ADR-0008 records that those two exclusions have
+to move together.
+
+The subagent test is `agent_id`, never `agent_type`. Claude Code's schema:
+*"agent_type … Present when the hook fires from within a subagent (alongside
+agent_id), **or on the main thread of a session started with `--agent`**"*. The
+old `agent_id ?? agent_type` disjunct therefore reported "subagent" for every
+call in an `--agent` session and silently disabled enforcement there.
+
+**`ctx_stats` was reporting savings for bytes that arrived.** The advisory
+branch — which ALLOWS the read — stamped `bytesAvoided: st.size` on its
+decision. Reachable on any fallthrough, and unavoidable with
+`CONTEXT_MODE_READ_DENY_BYTES=0`: the operator turns enforcement off, and every
+large read is then booked as a win. `bytesAvoided > 0` now survives on real
+refusals and nowhere else.
+
+**One marker cell per session, and Claude Code runs tool calls concurrently.**
+PreToolUse B routinely overwrote A's marker before A's PostToolUse read it.
+Markers are keyed per call now — `tool_use_id` where the host supplies one, a
+fingerprint of the call's name and canonicalised arguments where it does not.
+Refusals get a path-keyed marker instead, because a denied call has no
+PostToolUse of its own: a later one sweeps it once no matching call can still be
+in flight, and PreToolUse **deletes** it when it lets the read-before-edit retry
+through — at that moment the bytes are entering the conversation and the saving
+is not real.
+
+**The fine print was reprinted on every refusal.** Full refusal text and full
+escalation note now fire once per session each; after that, one line carrying
+only what the caller has to act on. ADR-0003's CASE A rubric holds for the short
+form and its contract test still passes.
+
 ## Merged ahead of upstream: the fetch extraction ladder
 
 `src/fetch/blocks.ts`, `src/fetch/extract.ts`, `src/fetch/page-store.ts`, `src/server.ts`
@@ -2134,6 +2216,8 @@ memory and the code index.
 | `CONTEXT_MODE_BASH_DENY_COMMANDS` | `npm test,docker logs,git log -p,find /(\s\|$)` | Comma-separated regexes refused with a ready `ctx_batch_execute`; empty turns the list off |
 | `CONTEXT_MODE_GREP_ASK` | on | `0` stops unbounded `Grep`/`Glob` asking for confirmation |
 | `CONTEXT_MODE_NUDGE_AFTER_CALLS` | `3` | Unrouted heavy calls per step of the escalation ladder (silent → advise → ask → deny) |
+| `CONTEXT_MODE_ESCALATION_WINDOW_MS` | `900000` | How far back the ladder looks; a window with no heavy call returns the session to silence |
+| `CONTEXT_MODE_ESCALATION_DENY_MIN_BYTES` | `16384` | Size below which the ladder's DENY step refuses nothing. Can only be raised — a refusal costs ~1 KB of reason text and usually ends with the file being read anyway |
 | `CONTEXT_MODE_NUDGE_AFTER_BYTES` | `102400` | The same ladder in leaked bytes; whichever threshold is further along sets the step |
 
 The redaction switches are read by `src/session/redact.ts` and applied by

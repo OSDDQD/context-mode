@@ -101,12 +101,20 @@ await runHook(async () => {
     // output we kept out of the model's context window (curl/wget, WebFetch,
     // large Read). Format: `tool:type:bytesAvoided:commandSummary` (Override C).
     let redirectEmitted = false;
+    let askConfirmed = false;
     try {
       // Shared marker reader (hooks/core/routing.mjs) — the Codex hooks use
       // the same one, so an accounting rule cannot hold on one host and not
       // the other.
-      const { consumeRedirectMarker, READ_EDIT_EXEMPT_TYPE } = await import("./core/routing.mjs");
-      const marker = consumeRedirectMarker(sessionId);
+      const {
+        consumeRedirectMarker, consumeAskMarker, callKeyFor, READ_EDIT_EXEMPT_TYPE,
+      } = await import("./core/routing.mjs");
+      const callKey = callKeyFor(input);
+      askConfirmed = consumeAskMarker(sessionId, callKey);
+      const marker = consumeRedirectMarker(sessionId, { callKey });
+      // Refusals collected on the way past: a denied call has no PostToolUse
+      // of its own, so nobody else will ever account for them.
+      const savings = [];
       if (marker) {
         // "Routed, and saved nothing" — the read-before-edit retry that
         // PreToolUse promised would go through. It has to suppress the
@@ -117,26 +125,32 @@ await runHook(async () => {
         if (marker.type === READ_EDIT_EXEMPT_TYPE) {
           redirectEmitted = true;
         } else if (marker.bytesAvoided > 0) {
-          // v1.0.160: route through wire — the context-saving widget on the
-          // platform reads category='redirect' rows, and bytes_avoided is
-          // stamped by the bytesList branch in attributeAndInsertEvents.
-          attributeAndInsertEvents(
-            db,
-            sessionId,
-            [{
-              type: marker.type,
-              category: "redirect",
-              data: `${marker.tool}: ${marker.summary}`,
-              priority: 2,
-              bytes_avoided: marker.bytesAvoided,
-            }],
-            input,
-            projectDir,
-            "PreToolUse",
-            resolveProjectAttributions,
-          );
+          savings.push(marker);
           redirectEmitted = true;
         }
+        for (const s of marker.swept ?? []) {
+          if (s.bytesAvoided > 0) savings.push(s);
+        }
+      }
+      for (const s of savings) {
+        // v1.0.160: route through wire — the context-saving widget on the
+        // platform reads category='redirect' rows, and bytes_avoided is
+        // stamped by the bytesList branch in attributeAndInsertEvents.
+        attributeAndInsertEvents(
+          db,
+          sessionId,
+          [{
+            type: s.type,
+            category: "redirect",
+            data: `${s.tool}: ${s.summary}`,
+            priority: 2,
+            bytes_avoided: s.bytesAvoided,
+          }],
+          input,
+          projectDir,
+          "PreToolUse",
+          resolveProjectAttributions,
+        );
       }
     } catch { /* best-effort — never block hook */ }
 
@@ -151,21 +165,37 @@ await runHook(async () => {
     // The classification lives in hooks/core/routing.mjs so the Codex hook
     // records the same population against the same floor: two hosts, one
     // definition of "this went straight into the context window".
+    //
+    // Subagent calls are excluded outright. Claude Code sets `agent_id` only
+    // when the hook fires inside an AgentTool worker, and that worker's
+    // context is thrown away when it finishes — what comes back to the main
+    // loop is its report, not its reads. An Explore agent that pulls 500 KB
+    // spends 500 KB of ITS window and none of this one's, so counting those
+    // bytes here escalated the main loop for somebody else's spending. That
+    // is the most likely source of the 93-call tally in the incident.
     try {
       const {
         describeMissedRedirect, readMissedRedirectTally, buildMissedRedirectNotice,
-        writeUnroutedTally,
+        writeUnroutedTally, SANCTIONED_HEAVY_TYPE, SANCTIONED_HEAVY_CATEGORY,
       } = await import("./core/routing.mjs");
-      const missed = describeMissedRedirect(input, { routed: redirectEmitted });
+      // `agent_id`, not `agent_type`: the host's schema says agent_type is
+      // also set on the main thread of an `--agent` session.
+      const isSubagentCall = input.agent_id != null;
+      const missed = isSubagentCall ? null : describeMissedRedirect(input, {
+        routed: redirectEmitted,
+        sanctioned: askConfirmed,
+      });
       if (missed) {
         attributeAndInsertEvents(
           db,
           sessionId,
           [{
-            type: "missed_redirect",
-            category: "missed-redirect",
+            type: missed.sanctioned ? SANCTIONED_HEAVY_TYPE : "missed_redirect",
+            category: missed.sanctioned ? SANCTIONED_HEAVY_CATEGORY : "missed-redirect",
             // Machine-parseable prefix (analytics reads the byte count back
-            // out of it), human-readable tail.
+            // out of it), human-readable tail. Identical for both types on
+            // purpose: the same parser reads both, and the type is what
+            // decides whether the call counts against the session.
             data: `${missed.toolName}: ${missed.bytes} bytes unrouted — ${missed.summary}`,
             priority: 3,
           }],
@@ -174,19 +204,21 @@ await runHook(async () => {
           "PostToolUse",
           resolveProjectAttributions,
         );
-        // Tally AFTER the insert, so the count the model reads is the count
-        // ctx_stats will report for the same session — including this call,
-        // and excluding it in the one case the store deduplicated it away.
-        const tally = readMissedRedirectTally(db, sessionId);
-        // Hand the same two numbers to PreToolUse, which prices its next
-        // decision on them and cannot afford to open SQLite itself.
-        writeUnroutedTally(sessionId, tally);
-        costNotice = buildMissedRedirectNotice({
-          toolName: missed.toolName,
-          bytes: missed.bytes,
-          tally,
-          platform: "claude-code",
-        });
+        if (!missed.sanctioned) {
+          // Tally AFTER the insert, so the count the model reads is the count
+          // ctx_stats will report for the same session — including this call,
+          // and excluding it in the one case the store deduplicated it away.
+          const tally = readMissedRedirectTally(db, sessionId);
+          // Hand the same two numbers to PreToolUse, which prices its next
+          // decision on them and cannot afford to open SQLite itself.
+          writeUnroutedTally(sessionId, tally);
+          costNotice = buildMissedRedirectNotice({
+            toolName: missed.toolName,
+            bytes: missed.bytes,
+            tally,
+            platform: "claude-code",
+          });
+        }
       }
     } catch { /* telemetry is best-effort — never block the hook */ }
 

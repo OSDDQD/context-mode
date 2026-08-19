@@ -164,7 +164,11 @@ await runHook(async () => {
   const tool = input.tool_name ?? "";
   const toolInput = input.tool_input ?? {};
   const projectDir = getInputProjectDir(input);
-  const isSubagentContext = input.agent_id != null || input.agent_type != null;
+  // `agent_id`, and only `agent_id`. Claude Code's own hook schema is explicit
+  // that `agent_type` is also set on the MAIN thread of a session started with
+  // `--agent`, so the old `agent_id ?? agent_type` test reported "subagent" for
+  // every call in such a session and silently disabled enforcement there.
+  const isSubagentContext = input.agent_id != null;
 
   // ─── Route and format response ───
   const decision = routePreToolUse(tool, toolInput, projectDir, "claude-code", getSessionId(input), {
@@ -206,8 +210,30 @@ await runHook(async () => {
   if (decision && decision.redirectMeta) {
     // Shared with the Codex hook (hooks/core/routing.mjs): one writer, one
     // reader, one format. The two hosts drifted here before it was shared.
-    const { writeRedirectMarker } = await import("./core/routing.mjs");
-    writeRedirectMarker(getSessionId(input), decision.redirectMeta);
+    //
+    // Keyed per call now. A denied call never reaches PostToolUse, so its
+    // marker is filed under the path instead and collected by a later sweep;
+    // everything else is filed under this call's own key, so a concurrent
+    // tool call cannot consume it by accident.
+    const { writeRedirectMarker, callKeyFor } = await import("./core/routing.mjs");
+    const denied = decision.action === "deny";
+    writeRedirectMarker(getSessionId(input), decision.redirectMeta, {
+      callKey: denied ? undefined : callKeyFor(input, decision.updatedInput),
+      denied,
+      denyPath: decision.redirectMeta.commandSummary,
+    });
+  }
+
+  // ─── Consent marker: an `ask` the user answers is not a violation ───
+  // PreToolUse cannot know the answer — it returns the prompt and exits. But
+  // an `ask` that produced a PostToolUse for the SAME call is, by definition,
+  // one the user confirmed: a declined call never runs. So the marker is
+  // written here and read there, and its mere survival is the yes.
+  if (decision && decision.action === "ask") {
+    try {
+      const { writeAskMarker, callKeyFor } = await import("./core/routing.mjs");
+      writeAskMarker(getSessionId(input), callKeyFor(input));
+    } catch { /* best-effort — the call is still allowed either way */ }
   }
 
   // ─── stdout write is the LAST action — process exits immediately after ───

@@ -1,6 +1,6 @@
 {
   "name": "context-mode",
-  "version": "1.0.172",
+  "version": "1.0.173",
   "description": "MCP server that keeps raw tool output out of your context window — 315 KB of benchmarked output comes back as 5.4 KB (98% reduction, see BENCHMARK.md), with session continuity across compactions. Sandboxed code execution in 12 languages, FTS5 knowledge base with BM25 ranking, fused project-wide search, and codegraph-backed structural queries. Fork of mksglu/context-mode.",
   "author": {
     "name": "OSDDQD",

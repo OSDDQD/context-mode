@@ -376,4 +376,34 @@ describe("getConversationStats — where the two halves come from", () => {
     expect(a.heavy).toBe(6);
     expect(a.unclassified).toBe(0);
   });
+
+  test("heavy calls the rules asked for never enter the denominator", () => {
+    // `git diff` on Bash is the routing block being obeyed, not a leak. Both
+    // kinds of row carry the same `data` line, so only the category separates
+    // them — and if the query took both, adherence would fall the more
+    // closely the agent followed the plugin.
+    const dir = mkdtempSync(join(tmpdir(), "ctx-sanctioned-"));
+    const sessionId = "66666666-7777-8888-9999-000000000000";
+    const sdb = new SessionDB({ dbPath: join(dir, "0123456789abcdef.db") });
+    try {
+      const event = (category: string, type: string, data: string) => ({
+        type, category, priority: 3, data,
+        project_dir: "/repo", attribution_source: "test", attribution_confidence: 1,
+      });
+      sdb.insertEvent(sessionId, event("missed-redirect", "missed_redirect", "Read: 40000 bytes unrouted — /repo/dump.json"));
+      sdb.insertEvent(sessionId, event("sanctioned-heavy", "sanctioned_heavy", "Bash: 15600 bytes unrouted — git diff"));
+      sdb.insertEvent(sessionId, event("sanctioned-heavy", "sanctioned_heavy", "Bash: 90000 bytes unrouted — npm install"));
+    } finally {
+      sdb.close();
+    }
+
+    const stats = getConversationStats({ sessionId, sessionsDir: dir });
+    const a = stats.adherence!;
+    expect(a.heavy).toBe(1);
+    expect(a.unroutedHeavy).toBe(1);
+    expect(a.unroutedBytes).toBe(40_000);
+    expect(a.unclassified).toBe(0);
+    // Nor may they show up in the offender list the same block prints.
+    expect(stats.missedRedirect?.count).toBe(1);
+  });
 });

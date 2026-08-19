@@ -145,6 +145,7 @@ const READ_ACCOUNTING_DEFAULT_BYTES = 50_000;
  */
 export const READ_EDIT_EXEMPT_TYPE = "read-edit-exempt";
 const READ_EDIT_WINDOW_ENV = "CONTEXT_MODE_READ_EDIT_WINDOW_MS";
+const ESCALATION_DENY_MIN_BYTES_ENV = "CONTEXT_MODE_ESCALATION_DENY_MIN_BYTES";
 const BASH_DENY_COMMANDS_ENV = "CONTEXT_MODE_BASH_DENY_COMMANDS";
 const GREP_ASK_ENV = "CONTEXT_MODE_GREP_ASK";
 
@@ -319,10 +320,24 @@ function isUnboundedGlob(toolInput) {
  * The word "redirected" and the replacement call share a line deliberately:
  * the ADR-0003 contract test reads this file line by line.
  */
-function readDenyReason(t, filePath, size, env = process.env) {
+function readDenyReason(t, filePath, size, env = process.env, sessionId = undefined) {
   const kb = (size / 1024).toFixed(1);
   const seconds = Math.round(readEditWindowMs(env) / 1000);
   const pathJson = JSON.stringify(filePath);
+
+  // The fine print is worth about a kilobyte, and it is worth that once. On a
+  // session that is refusing reads repeatedly — the exact session this whole
+  // wave is about — printing it every time is the plugin becoming the largest
+  // single writer to the context window it exists to protect. The short form
+  // keeps everything the caller has to ACT on (the word "redirected", a ready
+  // replacement call, the escape hatch and its deadline) and drops what it has
+  // already read once: the reasoning, and the names of the knobs.
+  if (sessionId !== undefined && guidanceOnce("read-deny-fine-print", "", sessionId) === null) {
+    return (
+      `context-mode: Read redirected — ${kb} KB. Call ${t("ctx_read")}(path: ${pathJson}) for its shape and regions, or repeat this Read within ${seconds}s when the next step is EDIT; offset and limit go through unchanged.`
+    );
+  }
+
   return (
     `context-mode: Read redirected — this file is ${kb} KB and would enter your conversation whole. Call ${t("ctx_read")}(path: ${pathJson}) to get its shape and the regions you asked for, or ${t("ctx_execute_file")}(path: ${pathJson}, language: "javascript", code: "…") when the answer needs code; either way only the answer comes back, not the file.\n` +
     `Reading it in order to EDIT it? Call Read again on this same path — the repeat is allowed for the next ${seconds}s, because Edit matches against the exact bytes in your conversation and a summary is not those bytes.\n` +
@@ -349,10 +364,23 @@ function bashDenyReason(t, command, opening) {
 // matter most, and they are also the ones where compaction has already
 // removed the rules from the system text.
 //
-// What replaces it is a function of behaviour, not of call ordinality. The
-// tally of unrouted heavy calls only grows within a session, so severity
-// derived from it can only grow too — that monotonicity is the property, and
-// it is asserted directly in the tests rather than inferred.
+// What replaces it is a function of behaviour, not of call ordinality.
+//
+// It used to be a function of ALL the session's behaviour: the tally only
+// grew, so severity only grew, and that monotonicity was stated here as the
+// property. It was the wrong property. A session cannot apologise to a number
+// that never goes down — nine unrouted calls in the first ten minutes and
+// every Read for the next six hours went through a refusal, no matter how
+// carefully the session behaved afterwards. Long sessions are the ones this
+// plugin exists for, and they were the ones it punished permanently.
+//
+// The level is now a function of RECENT behaviour: the same two thresholds,
+// counted over a sliding window (CONTEXT_MODE_ESCALATION_WINDOW_MS, 15 min).
+// A quiet window returns the session to silence on its own, without a
+// confirmation, a command, or a second "credits" counter to drift out of step
+// with the first. The session totals are still counted and still shown — the
+// notice says what the session has spent; the ladder prices what it is doing
+// now.
 //
 // Four steps, and the first one is silence: a session that routes its heavy
 // work says nothing at all, which is not a softer requirement than the others.
@@ -368,6 +396,7 @@ function bashDenyReason(t, command, opening) {
 
 const NUDGE_AFTER_CALLS_ENV = "CONTEXT_MODE_NUDGE_AFTER_CALLS";
 const NUDGE_AFTER_BYTES_ENV = "CONTEXT_MODE_NUDGE_AFTER_BYTES";
+const ESCALATION_WINDOW_ENV = "CONTEXT_MODE_ESCALATION_WINDOW_MS";
 
 /** Steps of the ladder, in order of severity. */
 export const ESCALATION_SILENT = 0;
@@ -385,6 +414,72 @@ function nudgeAfterCalls(env = process.env) {
 function nudgeAfterBytes(env = process.env) {
   const raw = Number.parseInt(env[NUDGE_AFTER_BYTES_ENV] ?? "", 10);
   return Number.isFinite(raw) && raw > 0 ? raw : 100 * 1024;
+}
+
+/**
+ * How far back the ladder looks.
+ *
+ * Long enough that a burst of leakage is still being priced while the session
+ * is plausibly still doing the same thing, short enough that a session which
+ * changes its habits sees the change reflected within one working stretch.
+ *
+ * @param {Record<string, string | undefined>} [env]
+ */
+export function escalationWindowMs(env = process.env) {
+  const raw = Number.parseInt(env[ESCALATION_WINDOW_ENV] ?? "", 10);
+  return Number.isFinite(raw) && raw > 0 ? raw : 15 * 60_000;
+}
+
+/**
+ * Size below which the ladder's own refusal costs more than it saves.
+ *
+ * The collection floor (2000 bytes) is a telemetry number: below it a native
+ * call is not worth *recording*. It was doing double duty as the enforcement
+ * floor on the DENY step, and the arithmetic there does not work. A refusal
+ * is not free — the reason text plus the escalation note is about a kilobyte,
+ * it enters the conversation every single time, and the caller then almost
+ * always takes the escape hatch and reads the file anyway. Refusing a 2.4 KB
+ * file therefore spends ~1 KB and a round trip to save nothing: the observed
+ * incident, exactly.
+ *
+ * 16 KB is where the refusal earns its place with room to spare — an 8-16×
+ * margin over its own price, so it still pays off when the caller ignores the
+ * redirect half the time. Between the collection floor and here the ladder
+ * keeps its cheaper steps (`ask`, advise), which cost a fraction of a deny.
+ *
+ * The env var can only raise it. A lower enforcement floor is the setting
+ * that produced the incident, and there is no session state that makes
+ * refusing a 3 KB read profitable.
+ *
+ * @param {Record<string, string | undefined>} [env]
+ */
+export function escalationDenyFloorBytes(env = process.env) {
+  const raw = Number.parseInt(env[ESCALATION_DENY_MIN_BYTES_ENV] ?? "", 10);
+  return Math.max(16_384, Number.isFinite(raw) && raw > 0 ? raw : 0);
+}
+
+/**
+ * The same arithmetic one step down the ladder.
+ *
+ * A confirmation prompt is cheaper than a refusal, but it is not free and it is
+ * not silent: its reason text enters the conversation whether or not the user
+ * says yes, and saying yes — the common answer, since reading the file is
+ * usually the right call — buys nothing at all. So the same question applies:
+ * is what we are protecting worth more than what asking costs?
+ *
+ * Half the refusal floor, because an `ask` skips the refusal's expensive half
+ * (the wasted turn and the retry round trip) while keeping its text. Derived
+ * from the refusal floor rather than given its own variable: one number to
+ * move, and the two steps cannot drift into the wrong order.
+ *
+ * Below this a Read on the upper steps of the ladder goes through in silence.
+ * The old branch had no size test at all, so a session at `ask` was prompted
+ * for a 500-byte file — friction with nothing on the other side of it.
+ *
+ * @param {Record<string, string | undefined>} [env]
+ */
+export function escalationAskFloorBytes(env = process.env) {
+  return Math.floor(escalationDenyFloorBytes(env) / 2);
 }
 
 /** Where PostToolUse leaves the running tally for PreToolUse to read. */
@@ -409,18 +504,32 @@ export function writeUnroutedTally(sessionId, tally) {
     mkdirSync(dir, { recursive: true });
     writeFileSync(
       unroutedTallyPath(sessionId),
-      JSON.stringify({ count: tally?.count ?? 0, bytes: tally?.bytes ?? 0 }),
+      JSON.stringify({
+        count: tally?.count ?? 0,
+        bytes: tally?.bytes ?? 0,
+        // The window pair drives the ladder; the session pair drives the text.
+        // Both are written because PreToolUse cannot recompute either.
+        windowCount: tally?.windowCount ?? tally?.count ?? 0,
+        windowBytes: tally?.windowBytes ?? tally?.bytes ?? 0,
+        at: Date.now(),
+      }),
       "utf8",
     );
   } catch { /* the ladder degrades to the advisory when it cannot see */ }
 }
 
 /**
- * @returns {{count: number, bytes: number} | null} null when there is nothing
- *   to read — no session id, no PostToolUse has run, an unreadable store. The
- *   distinction between "nothing has leaked" and "cannot tell" is the whole
- *   reason this returns null rather than zeroes: the first means silence, the
- *   second has to mean the pre-existing behaviour.
+ * @returns {{count: number, bytes: number, windowCount: number, windowBytes: number, at?: number} | null}
+ *   null when there is nothing to read — no session id, no PostToolUse has
+ *   run, an unreadable store. The distinction between "nothing has leaked" and
+ *   "cannot tell" is the whole reason this returns null rather than zeroes:
+ *   the first means silence, the second has to mean the pre-existing
+ *   behaviour.
+ *
+ *   A file written before v1.0.173 has only the session pair. It is read as
+ *   "all of it is recent", which is what the old code assumed anyway — so a
+ *   session upgraded mid-flight behaves exactly as it did until its next
+ *   PostToolUse rewrites the file in the new shape.
  */
 export function readUnroutedTally(sessionId) {
   try {
@@ -428,26 +537,49 @@ export function readUnroutedTally(sessionId) {
     const count = Number(parsed?.count);
     const bytes = Number(parsed?.bytes);
     if (!Number.isFinite(count) || !Number.isFinite(bytes)) return null;
-    return { count, bytes };
+    const windowCount = Number(parsed?.windowCount);
+    const windowBytes = Number(parsed?.windowBytes);
+    const at = Number(parsed?.at);
+    return {
+      count,
+      bytes,
+      windowCount: Number.isFinite(windowCount) ? windowCount : count,
+      windowBytes: Number.isFinite(windowBytes) ? windowBytes : bytes,
+      ...(Number.isFinite(at) ? { at } : {}),
+    };
   } catch {
     return null;
   }
 }
 
 /**
- * How far up the ladder this session has climbed.
+ * How far up the ladder this session's RECENT behaviour has taken it.
  *
  * Whichever of the two thresholds is further along wins, and each further
- * multiple of it is one more step: three unrouted heavy calls (or 100 KB) buys
- * the advisory back, six (or 200 KB) turns it into a confirmation, nine (or
- * 300 KB) into a refusal. Capped there — there is no step past refusing.
+ * multiple of it is one more step: three unrouted heavy calls (or 100 KB)
+ * buys the advisory back, six (or 200 KB) turns it into a confirmation, nine
+ * (or 300 KB) into a refusal. Capped there — there is no step past refusing.
+ *
+ * Two things make it come back down. Events ageing out of the window shrink
+ * the pair PostToolUse publishes. And a window with no PostToolUse at all
+ * publishes nothing, so `at` goes stale — which is read here as silence,
+ * because a session that has not made a heavy call in fifteen minutes is not
+ * a session that needs to be refused.
+ *
+ * The session totals in the same record are deliberately NOT consulted: they
+ * exist to be quoted, not to be charged for.
  *
  * @returns {number} 0 silent · 1 advise · 2 ask · 3 deny
  */
-export function escalationLevel(tally, env = process.env) {
+export function escalationLevel(tally, env = process.env, now = Date.now()) {
   if (!tally) return ESCALATION_SILENT;
-  const byCalls = Math.floor((Number(tally.count) || 0) / nudgeAfterCalls(env));
-  const byBytes = Math.floor((Number(tally.bytes) || 0) / nudgeAfterBytes(env));
+  if (Number.isFinite(tally.at) && now - tally.at > escalationWindowMs(env)) {
+    return ESCALATION_SILENT;
+  }
+  const count = Number(tally.windowCount ?? tally.count) || 0;
+  const bytes = Number(tally.windowBytes ?? tally.bytes) || 0;
+  const byCalls = Math.floor(count / nudgeAfterCalls(env));
+  const byBytes = Math.floor(bytes / nudgeAfterBytes(env));
   return Math.min(ESCALATION_DENY, Math.max(0, byCalls, byBytes));
 }
 
@@ -458,8 +590,18 @@ function tallyLine(tally) {
   return `${count} unrouted heavy call${count === 1 ? "" : "s"} so far this session, ${bytes} of it straight into your context window.`;
 }
 
-/** Why the tone just changed, and which knobs move it back. */
-function escalationNote(tally, env = process.env) {
+/**
+ * Why the tone just changed, and which knobs move it back.
+ *
+ * Same diet as the refusal text above: the explanation and the env var names
+ * are worth saying once. After that the note is the number, which is the part
+ * that changes.
+ */
+function escalationNote(tally, env = process.env, sessionId = undefined) {
+  if (sessionId !== undefined && guidanceOnce("escalation-note-fine-print", "", sessionId) === null) {
+    const count = tally?.count ?? 0;
+    return `${count} unrouted call${count === 1 ? "" : "s"} / ${formatNoticeBytes(tally?.bytes ?? 0)} this session.`;
+  }
   return `${tallyLine(tally)} That is why this is no longer a suggestion — the steps are set by ${NUDGE_AFTER_CALLS_ENV} (${nudgeAfterCalls(env)}) and ${NUDGE_AFTER_BYTES_ENV} (${nudgeAfterBytes(env)} bytes), each further multiple raising it again.`;
 }
 
@@ -574,6 +716,11 @@ export function resetGuidanceThrottle(sessionId) {
   rmSyncRobust(guidanceDirFor());
   if (sessionId) {
     rmSyncRobust(guidanceDirFor(sessionId));
+    // The redirect / ask markers are per-session state too, and a session that
+    // starts with a previous session's pending refusal on disk would book its
+    // bytes as its own saving.
+    rmSyncRobust(resolve(tmpdir(), `context-mode-redirect-${sessionId}`));
+    try { unlinkSync(resolve(tmpdir(), `context-mode-redirect-${sessionId}.txt`)); } catch {}
   }
 }
 
@@ -1359,7 +1506,7 @@ export function routePreToolUse(toolName, toolInput, projectDir, platform, sessi
         action: "deny",
         reason:
           bashDenyReason(t, command, "this session keeps sending command output straight into the conversation.") + "\n" +
-          escalationNote(tally),
+          escalationNote(tally, process.env, sessionId),
         redirectMeta: {
           tool: "Bash",
           type: "bash-redirected",
@@ -1374,11 +1521,11 @@ export function routePreToolUse(toolName, toolInput, projectDir, platform, sessi
         action: "ask",
         reason:
           `context-mode: ${tallyLine(tally)} ${t("ctx_batch_execute")}(commands, queries) indexes this command's output and returns only the sections that answer your questions.\n` +
-          `Confirm it when you mean to read the output yourself. ${escalationNote(tally)}`,
+          `Confirm it when you mean to read the output yourself. ${escalationNote(tally, process.env, sessionId)}`,
       };
     }
     if (level >= ESCALATION_ADVISE) {
-      return { action: "context", additionalContext: `context-mode: ${escalationNote(tally)}\n${bashGuidance}` };
+      return { action: "context", additionalContext: `context-mode: ${escalationNote(tally, process.env, sessionId)}\n${bashGuidance}` };
     }
     return null;
   }
@@ -1417,6 +1564,11 @@ export function routePreToolUse(toolName, toolInput, projectDir, platform, sessi
         // direction.) Below the collection floor no marker is needed: nothing
         // under it was ever counted as a violation.
         if (st.isFile() && readRetryArmed(sessionId, filePath)) {
+          // The refusal that opened this window claimed st.size avoided and
+          // left a marker saying so. The bytes are entering the conversation
+          // right now, so that claim is about to become false — drop it here
+          // rather than let the sweep file it as a saving.
+          cancelDenyMarker(sessionId, filePath);
           if (st.size >= missedRedirectFloorBytes()) {
             return {
               action: "allow",
@@ -1442,7 +1594,7 @@ export function routePreToolUse(toolName, toolInput, projectDir, platform, sessi
         ) {
           const denial = mcpRedirect({
             action: "deny",
-            reason: readDenyReason(t, filePath, st.size),
+            reason: readDenyReason(t, filePath, st.size, process.env, sessionId),
             redirectMeta: {
               tool: "Read",
               type: "read-redirected",
@@ -1475,14 +1627,16 @@ export function routePreToolUse(toolName, toolInput, projectDir, platform, sessi
 
         if (
           tally && level >= ESCALATION_DENY && st.isFile() &&
-          // Nothing under the collection floor was ever a violation, so
-          // refusing it would be friction bought with no saving at all.
-          st.size >= missedRedirectFloorBytes() &&
+          // Enforcement has its own floor, well above the collection floor:
+          // a refusal costs about a kilobyte of reason text and usually ends
+          // with the file being read anyway, so below escalationDenyFloorBytes
+          // it is friction bought at a loss. See the function's comment.
+          st.size >= escalationDenyFloorBytes() &&
           !isBoundedRead(toolInput)
         ) {
           const denial = mcpRedirect({
             action: "deny",
-            reason: readDenyReason(t, filePath, st.size) + "\n" + escalationNote(tally),
+            reason: readDenyReason(t, filePath, st.size, process.env, sessionId) + "\n" + escalationNote(tally, process.env, sessionId),
             redirectMeta: meta,
           }, mcpToolsAvailable);
           if (denial) {
@@ -1495,29 +1649,41 @@ export function routePreToolUse(toolName, toolInput, projectDir, platform, sessi
           // The historical large-read branch: advisory plus byte accounting.
           // Kept as the floor of the ladder so the accounting never depends on
           // which step the session is on.
-          const decision = (level >= ESCALATION_ASK && !isBoundedRead(toolInput))
-            ? { action: "ask", reason: readDenyReason(t, filePath, st.size) + "\n" + escalationNote(tally) }
+          // No redirectMeta here, deliberately. This branch ALLOWS the read:
+          // the file enters the conversation whole, and stamping
+          // `bytesAvoided: st.size` on it made ctx_stats report a saving for
+          // bytes that were never saved — most visibly with
+          // CONTEXT_MODE_READ_DENY_BYTES=0, where the operator has turned
+          // enforcement off and every large read was then booked as a win.
+          // An allowed unbounded large read is a miss; PostToolUse counts it
+          // as one.
+          return (level >= ESCALATION_ASK && !isBoundedRead(toolInput))
+            ? { action: "ask", reason: readDenyReason(t, filePath, st.size, process.env, sessionId) + "\n" + escalationNote(tally, process.env, sessionId) }
             : (tally
               ? (level >= ESCALATION_ADVISE
-                ? { action: "context", additionalContext: `context-mode: ${escalationNote(tally)}\n${readGuidance}` }
+                ? { action: "context", additionalContext: `context-mode: ${escalationNote(tally, process.env, sessionId)}\n${readGuidance}` }
                 : { action: "context", additionalContext: readGuidance })
               : (guidanceOnce("read", readGuidance, sessionId)
                 ?? { action: "context", additionalContext: readGuidance }));
-          decision.redirectMeta = meta;
-          return decision;
         }
 
         if (tally) {
-          if (level >= ESCALATION_ASK && !isBoundedRead(toolInput)) {
+          if (
+            level >= ESCALATION_ASK && !isBoundedRead(toolInput)
+            // The prompt has to be worth its own text. See
+            // escalationAskFloorBytes — without this the ladder asked for
+            // permission to read a 500-byte file.
+            && st.isFile() && st.size >= escalationAskFloorBytes()
+          ) {
             return {
               action: "ask",
               reason:
                 `context-mode: ${tallyLine(tally)} ${t("ctx_read")}(path: ${JSON.stringify(filePath)}) answers a question about this file without spending the file on it — one argument, no program to compose.\n` +
-                `Confirm the read when you need the bytes themselves — reading in order to Edit is exactly that case. ${escalationNote(tally)}`,
+                `Confirm the read when you need the bytes themselves — reading in order to Edit is exactly that case. ${escalationNote(tally, process.env, sessionId)}`,
             };
           }
           if (level >= ESCALATION_ADVISE) {
-            return { action: "context", additionalContext: `context-mode: ${escalationNote(tally)}\n${readGuidance}` };
+            return { action: "context", additionalContext: `context-mode: ${escalationNote(tally, process.env, sessionId)}\n${readGuidance}` };
           }
           return null;
         }
@@ -1526,7 +1692,7 @@ export function routePreToolUse(toolName, toolInput, projectDir, platform, sessi
     const tail = readUnroutedTally(sessionId);
     if (tail) {
       return escalationLevel(tail) >= ESCALATION_ADVISE
-        ? { action: "context", additionalContext: `context-mode: ${escalationNote(tail)}\n${readGuidance}` }
+        ? { action: "context", additionalContext: `context-mode: ${escalationNote(tail, process.env, sessionId)}\n${readGuidance}` }
         : null;
     }
     return guidanceOnce("read", readGuidance, sessionId);
@@ -1560,11 +1726,11 @@ export function routePreToolUse(toolName, toolInput, projectDir, platform, sessi
         action: "ask",
         reason:
           `context-mode: ${tallyLine(tally)} ${t("ctx_find")}(query: "…") answers "where does this live" for a fraction of the bytes.\n` +
-          `Confirm this Grep when you need every occurrence — ${t("ctx_find")} ranks, it does not enumerate, and that stays true no matter how much this session has spent. ${escalationNote(tally)}`,
+          `Confirm this Grep when you need every occurrence — ${t("ctx_find")} ranks, it does not enumerate, and that stays true no matter how much this session has spent. ${escalationNote(tally, process.env, sessionId)}`,
       };
     }
     if (level >= ESCALATION_ADVISE) {
-      return { action: "context", additionalContext: `context-mode: ${escalationNote(tally)}\n${grepGuidance}` };
+      return { action: "context", additionalContext: `context-mode: ${escalationNote(tally, process.env, sessionId)}\n${grepGuidance}` };
     }
     return null;
   }
@@ -1780,44 +1946,105 @@ export function routePreToolUse(toolName, toolInput, projectDir, platform, sessi
 //
 // Format: `tool:type:bytesAvoided:commandSummary`. Only the first three colons
 // are structural; the summary may contain more (URLs do).
+//
+// ─── One cell per session was one cell too few ───
+//
+// The marker used to be a single file per session, written by every PreToolUse
+// and consumed by whichever PostToolUse happened to run next. Claude Code runs
+// independent tool calls concurrently, so PreToolUse B routinely overwrote A's
+// marker before A's PostToolUse read it: the accounting landed on the wrong
+// call, or on none.
+//
+// Two kinds of marker now, because they have genuinely different lifetimes:
+//
+//   c-<callKey>  a call that WILL have a PostToolUse (allow / ask / context).
+//                Its own PostToolUse computes the same key from its own
+//                payload and consumes exactly its own marker.
+//   d-<pathKey>  a refusal. A denied call never reaches PostToolUse, so no
+//                one would ever consume it by key. Any later PostToolUse
+//                sweeps these once they are old enough to be certain no
+//                matching call is still in flight — and PreToolUse deletes
+//                one when it lets the read-before-edit retry through, because
+//                at that moment the bytes have entered the conversation and
+//                the saving it would have claimed is not real.
 // ─────────────────────────────────────────────────────────────────────────
 
-function redirectMarkerPath(sessionId) {
+/** Per-session directory holding one file per pending marker. */
+function redirectMarkerDir(sessionId) {
+  return resolve(tmpdir(), `context-mode-redirect-${sessionId}`);
+}
+
+/** The pre-v1.0.173 single-cell path, still read so an upgrade mid-session
+ *  does not drop the one marker already on disk. */
+function legacyRedirectMarkerPath(sessionId) {
   return resolve(tmpdir(), `context-mode-redirect-${sessionId}.txt`);
 }
 
-/**
- * Record a decision for the next PostToolUse to account for.
- * @param {string} sessionId
- * @param {{tool: string, type: string, bytesAvoided: number, commandSummary?: string}} meta
- */
-export function writeRedirectMarker(sessionId, meta) {
-  if (!meta) return;
-  try {
-    writeFileSync(
-      redirectMarkerPath(sessionId),
-      `${meta.tool}:${meta.type}:${meta.bytesAvoided}:${String(meta.commandSummary ?? "").slice(0, 200)}`,
-      "utf-8",
-    );
-  } catch { /* best-effort — never block the hook */ }
+function shortHash(value) {
+  return createHash("sha256").update(String(value)).digest("hex").slice(0, 16);
 }
 
 /**
- * Read and delete the pending marker.
+ * A stable handle for ONE tool call, computable from both hooks' payloads.
  *
- * Consume-once by design: without the delete, one refusal would be accounted
- * for again on every later tool call in the session.
+ * The host's own `tool_use_id` when it supplies one — it is exactly this
+ * identity and costs nothing to use. Otherwise the call is fingerprinted from
+ * its name and its arguments, with object keys sorted so two serialisations of
+ * the same input agree. Two identical calls issued in parallel collide under
+ * the fallback; they are also indistinguishable in every other respect, so
+ * accounting for one of them twice and the other never is a wash.
  *
- * @returns {{tool: string, type: string, bytesAvoided: number, summary: string} | null}
+ * @param {{tool_name?: string, tool_input?: unknown, tool_use_id?: string}} input
+ * @returns {string}
  */
-export function consumeRedirectMarker(sessionId) {
-  let raw;
-  try {
-    raw = readFileSync(redirectMarkerPath(sessionId), "utf-8").trim();
-    unlinkSync(redirectMarkerPath(sessionId));
-  } catch {
-    return null; // no marker — the phantom-event guard
-  }
+export function callKeyFor(input, updatedInput = undefined) {
+  const given = input?.tool_use_id ?? input?.toolUseId ?? input?.toolUseID;
+  if (typeof given === "string" && given) return shortHash(given);
+  // No host-supplied id, so the call is fingerprinted from its arguments — and
+  // a `modify` decision REWRITES those arguments before the tool runs. PostToolUse
+  // sees the rewritten ones, so PreToolUse has to key on them too, or the two
+  // ends of the handshake hash different calls. Only Codex takes this path;
+  // Claude Code supplies tool_use_id, which a rewrite does not change.
+  const toolInput = updatedInput
+    ? { ...(input?.tool_input ?? {}), ...updatedInput }
+    : (input?.tool_input ?? {});
+  return shortHash(`${input?.tool_name ?? ""}|${canonicalJson(toolInput)}`);
+}
+
+/** JSON with object keys in sorted order, so the same input hashes the same. */
+function canonicalJson(value) {
+  if (value === null || typeof value !== "object") return JSON.stringify(value) ?? "null";
+  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(",")}]`;
+  const keys = Object.keys(value).sort();
+  return `{${keys.map(k => `${JSON.stringify(k)}:${canonicalJson(value[k])}`).join(",")}}`;
+}
+
+function markerFilePath(sessionId, name) {
+  return resolve(redirectMarkerDir(sessionId), name);
+}
+
+/**
+ * Where a given marker lives, for callers that need to look rather than
+ * consume — tests, and the session cleanup.
+ *
+ * Exported so nothing outside this file spells the path itself. The old
+ * single-cell name was hard-coded in eight test files, which is why moving it
+ * was a bigger change than it should have been.
+ *
+ * @param {string} sessionId
+ * @param {{callKey?: string, denied?: boolean, denyPath?: string, ask?: string}} [what]
+ */
+export function redirectMarkerPathFor(sessionId, what = {}) {
+  if (what.ask) return markerFilePath(sessionId, `a-${what.ask}.txt`);
+  if (what.denied) return markerFilePath(sessionId, `d-${shortHash(what.denyPath ?? "")}.txt`);
+  return markerFilePath(sessionId, `c-${what.callKey ?? ""}.txt`);
+}
+
+function serializeMarker(meta) {
+  return `${meta.tool}:${meta.type}:${meta.bytesAvoided}:${String(meta.commandSummary ?? "").slice(0, 200)}`;
+}
+
+function parseMarker(raw) {
   if (!raw) return null;
   const i1 = raw.indexOf(":");
   const i2 = i1 >= 0 ? raw.indexOf(":", i1 + 1) : -1;
@@ -1830,6 +2057,157 @@ export function consumeRedirectMarker(sessionId) {
     bytesAvoided: Number.isFinite(bytesAvoided) ? bytesAvoided : 0,
     summary: raw.slice(i3 + 1),
   };
+}
+
+/**
+ * Record a decision for its own PostToolUse to account for.
+ *
+ * @param {string} sessionId
+ * @param {{tool: string, type: string, bytesAvoided: number, commandSummary?: string}} meta
+ * @param {{callKey?: string, denied?: boolean, denyPath?: string}} [opts]
+ */
+export function writeRedirectMarker(sessionId, meta, opts = {}) {
+  if (!meta) return;
+  try {
+    const dir = redirectMarkerDir(sessionId);
+    mkdirSync(dir, { recursive: true });
+    const name = opts.denied
+      ? `d-${shortHash(opts.denyPath ?? meta.commandSummary ?? "")}.txt`
+      : `c-${opts.callKey ?? shortHash(serializeMarker(meta))}.txt`;
+    writeFileSync(markerFilePath(sessionId, name), serializeMarker(meta), "utf-8");
+  } catch { /* best-effort — never block the hook */ }
+}
+
+/**
+ * Note that this call was put to the user as an `ask`.
+ *
+ * Lives beside the redirect markers and under the same per-session directory,
+ * so the session's cleanup already covers it. The TTL is generous: the marker
+ * is only ever read by the PostToolUse of the very call that wrote it, and a
+ * user can sit on a confirmation prompt for a long time.
+ *
+ * @param {string} sessionId
+ * @param {string} callKey
+ */
+export function writeAskMarker(sessionId, callKey) {
+  try {
+    const dir = redirectMarkerDir(sessionId);
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(markerFilePath(sessionId, `a-${callKey}.txt`), String(Date.now()), "utf-8");
+  } catch { /* best-effort — never block the hook */ }
+}
+
+/**
+ * Did the user confirm this call at an `ask` prompt?
+ *
+ * Consume-once: the marker answers for one call and is gone. Stale markers —
+ * from prompts the user declined, so no PostToolUse ever came — are swept by
+ * `consumeRedirectMarker`'s pass over the same directory.
+ *
+ * @param {string} sessionId
+ * @param {string} callKey
+ * @param {number} [ttlMs]
+ * @returns {boolean}
+ */
+export function consumeAskMarker(sessionId, callKey, ttlMs = 30 * 60_000) {
+  if (!callKey) return false;
+  const path = markerFilePath(sessionId, `a-${callKey}.txt`);
+  try {
+    const at = Number.parseInt(readFileSync(path, "utf-8"), 10);
+    unlinkSync(path);
+    return Number.isFinite(at) && Date.now() - at <= ttlMs;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Drop the refusal marker for one path.
+ *
+ * Called when the read-before-edit retry is allowed through: the file is about
+ * to enter the conversation, so the refusal saved nothing and must not be
+ * swept later as though it had. Cheaper and more honest than writing a
+ * negative event after the fact.
+ *
+ * @param {string} sessionId
+ * @param {string} filePath
+ */
+export function cancelDenyMarker(sessionId, filePath) {
+  try {
+    // Same 200-char truncation the writer applied to commandSummary. Without
+    // it the two sides disagree on any path longer than that, and the retry
+    // that just brought the file into the conversation leaves the refusal
+    // standing to be swept as a saving.
+    unlinkSync(markerFilePath(sessionId, `d-${shortHash(String(filePath).slice(0, 200))}.txt`));
+  } catch { /* nothing pending — the common case */ }
+}
+
+/**
+ * Read and delete this call's marker, plus any refusal marker old enough that
+ * no call is still in flight for it.
+ *
+ * Consume-once by design: without the delete, one refusal would be accounted
+ * for again on every later tool call in the session.
+ *
+ * @param {string} sessionId
+ * @param {{callKey?: string, sweepAfterMs?: number}} [opts]
+ * @returns {{tool: string, type: string, bytesAvoided: number, summary: string} | null}
+ *   this call's own marker, when it had one.
+ * @property {Array} swept  refusal markers collected on the way past
+ */
+export function consumeRedirectMarker(sessionId, opts = {}) {
+  const { callKey, sweepAfterMs = 2000 } = opts;
+  let own = null;
+
+  const take = (path) => {
+    try {
+      const raw = readFileSync(path, "utf-8").trim();
+      unlinkSync(path);
+      return parseMarker(raw);
+    } catch {
+      return null;
+    }
+  };
+
+  if (callKey) own = take(markerFilePath(sessionId, `c-${callKey}.txt`));
+  // Pre-v1.0.173 sessions, and any caller that has no key to offer.
+  if (!own) own = take(legacyRedirectMarkerPath(sessionId));
+
+  const swept = [];
+  try {
+    const dir = redirectMarkerDir(sessionId);
+    const now = Date.now();
+    for (const name of readdirSync(dir)) {
+      const isDeny = name.startsWith("d-");
+      const isAsk = name.startsWith("a-");
+      if (!isDeny && !isAsk) continue;
+      const path = markerFilePath(sessionId, name);
+      let age = Infinity;
+      try { age = now - statSync(path).mtimeMs; } catch { /* vanished under us */ }
+      if (isAsk) {
+        // A prompt the user declined leaves a marker no PostToolUse will ever
+        // claim. Expire it rather than let it grant consent to some later call
+        // that happens to hash the same way.
+        if (age >= 30 * 60_000) { try { unlinkSync(path); } catch {} }
+        continue;
+      }
+      if (age < sweepAfterMs) continue;
+      const parsed = take(path);
+      if (parsed) swept.push(parsed);
+    }
+  } catch { /* no directory yet — nothing pending */ }
+
+  if (own) {
+    own.swept = swept;
+    return own;
+  }
+  if (!swept.length) return null;
+  // Refusals were collected, but none of them belongs to THIS call — a denied
+  // call has no PostToolUse, so what was swept is somebody else's. Handing one
+  // back as though it were this call's own marker would tell the caller "this
+  // call was routed" and suppress its own missed-redirect record. So the
+  // sweep travels in the `swept` list and the marker fields stay empty.
+  return { tool: "", type: "", bytesAvoided: 0, summary: "", swept };
 }
 
 /**
@@ -1851,22 +2229,103 @@ export function missedRedirectFloorBytes(env = process.env) {
 const FLOODY_TOOLS = new Set(["Bash", "Read", "Grep", "Glob", "WebFetch", "Shell"]);
 
 /**
+ * Event type for a heavy call the plugin's own rules told the caller to make.
+ *
+ * Same data line, same visibility in ctx_stats, different type — and the type
+ * is what `readMissedRedirectTally` filters on, so these bytes are reported
+ * without moving the escalation ladder. Exported so both hosts' PostToolUse
+ * hooks file them under one name.
+ */
+export const SANCTIONED_HEAVY_TYPE = "sanctioned_heavy";
+/** Category counterpart — src/session/analytics.ts excludes it from adherence. */
+export const SANCTIONED_HEAVY_CATEGORY = "sanctioned-heavy";
+
+/**
+ * Bash commands the plugin's own routing rules send to Bash.
+ *
+ * The routing block tells the agent in as many words that Bash is the right
+ * surface for git and for state mutation, and CLAUDE.md-style project rules
+ * repeat it ("Bash ONLY for: git, mkdir, rm, mv, cd, ls, npm install, pip
+ * install"). A `git diff` of 15 KB is therefore not a missed redirect — it is
+ * the instruction being followed, and counting it as a violation made the
+ * ladder climb on obedience.
+ *
+ * Prefixes rather than the full `isStructurallyBounded` allowlist because the
+ * two answer different questions: that one asks "is this output small?"
+ * (`git diff --stat` yes, `git diff` no), this one asks "did we ask for this
+ * call?" (both yes). Both gates run, and either one is enough.
+ *
+ * The shell-operator gate still applies: `git diff && cat huge-file` starts
+ * with a sanctioned prefix and floods anyway.
+ */
+const SANCTIONED_BASH_PREFIXES = [
+  /^git(\s|$)/,
+  /^npm\s+(install|i|ci)(\s|$)/,
+  /^pnpm\s+(install|i|add)(\s|$)/,
+  /^yarn\s+(install|add)(\s|$)/,
+  /^pip3?\s+install(\s|$)/,
+  /^mkdir(\s|$)/,
+  /^mv(\s|$)/,
+  /^rm(\s|$)/,
+  /^cd(\s|$)/,
+  /^ls(\s|$)/,
+];
+
+/**
+ * Is this a Bash call the routing rules themselves asked for?
+ * @param {string} command
+ */
+function isSanctionedBash(command) {
+  if (!command) return false;
+  const trimmed = String(command).trim();
+  if (SHELL_CONTROL_OPERATORS.test(trimmed)) return false;
+  if (SANCTIONED_BASH_PREFIXES.some(rx => rx.test(trimmed))) return true;
+  return isStructurallyBounded(trimmed);
+}
+
+/**
  * Classify a finished tool call: was this a heavy payload that entered the
  * context window whole?
  *
  * Returns null for anything that is not — a tool that does not flood, a
- * payload under the floor, or a call the caller already knows was routed.
- * The caller passes `routed: true` when a PreToolUse redirect fired for this
- * call, because that state lives in the hook, not here.
+ * payload under the floor, a call the caller already knows was routed, or a
+ * read the caller had already bounded. The caller passes `routed: true` when a
+ * PreToolUse redirect fired for this call, because that state lives in the
+ * hook, not here.
+ *
+ * `sanctioned` on the result means "record it, do not hold it against the
+ * session". Three things earn it, and they have one thing in common: the
+ * plugin, or the user, said yes to the call.
+ *
+ *   - a Read the caller bounded with offset/limit — the refusal text promises
+ *     in writing that this "goes through unchanged", and a promise that still
+ *     moves the ladder is not one;
+ *   - a Bash command the routing rules route TO Bash (see
+ *     SANCTIONED_BASH_PREFIXES);
+ *   - a call the user confirmed at an `ask` prompt — the hook passes
+ *     `sanctioned: true` for those, because consent lives in the marker, not
+ *     in the payload.
+ *
+ * Bounded reads are dropped entirely rather than sanctioned: they are the one
+ * case where the plugin's advice was followed so exactly that there is nothing
+ * left to report.
  *
  * @param {{tool_name?: string, tool_input?: Record<string, unknown>, tool_response?: unknown}} input
- * @param {{routed?: boolean, env?: Record<string, string | undefined>}} [opts]
- * @returns {{toolName: string, bytes: number, summary: string} | null}
+ * @param {{routed?: boolean, sanctioned?: boolean, env?: Record<string, string | undefined>}} [opts]
+ * @returns {{toolName: string, bytes: number, summary: string, sanctioned: boolean} | null}
  */
-export function describeMissedRedirect(input, { routed = false, env = process.env } = {}) {
+export function describeMissedRedirect(
+  input,
+  { routed = false, sanctioned = false, env = process.env } = {},
+) {
   if (routed) return null;
   const toolName = input?.tool_name ?? "";
   if (!FLOODY_TOOLS.has(toolName)) return null;
+
+  const ti = input?.tool_input ?? {};
+
+  // The read the refusal text promised would go through unchanged.
+  if (toolName === "Read" && isBoundedRead(ti)) return null;
 
   const response = typeof input?.tool_response === "string"
     ? input.tool_response
@@ -1874,12 +2333,14 @@ export function describeMissedRedirect(input, { routed = false, env = process.en
   const bytes = Buffer.byteLength(response, "utf-8");
   if (bytes < missedRedirectFloorBytes(env)) return null;
 
-  const ti = input?.tool_input ?? {};
   const summary = String(
     ti.command ?? ti.file_path ?? ti.pattern ?? ti.url ?? ti.path ?? "",
   ).replace(/\s+/g, " ").slice(0, 120);
 
-  return { toolName, bytes, summary };
+  const isSanctioned = sanctioned
+    || ((toolName === "Bash" || toolName === "Shell") && isSanctionedBash(ti.command));
+
+  return { toolName, bytes, summary, sanctioned: isSanctioned };
 }
 
 /**
@@ -1898,27 +2359,64 @@ export function describeMissedRedirect(input, { routed = false, env = process.en
  * cap. The tally therefore counts recorded calls — the same population
  * ctx_stats reports, which is the point.
  *
- * @param {{getEvents: (sessionId: string, opts?: {type?: string, limit?: number}) => Array<{data?: string}>}} db
+ * The `type` filter is load-bearing beyond performance: sanctioned heavy calls
+ * (SANCTIONED_HEAVY_TYPE) carry the same data line and are deliberately not in
+ * this population. They are bytes the session spent on purpose, so they show
+ * up in ctx_stats and never move the ladder.
+ *
+ * Two pairs come back, from one pass over the same rows: what the session has
+ * spent in total (the number the notice quotes) and what it spent inside the
+ * escalation window (the number the ladder prices). `created_at` is SQLite's
+ * `datetime('now')` — UTC, second resolution, which is far finer than a
+ * fifteen-minute window needs. A row whose timestamp will not parse is
+ * counted in the session pair and left out of the window pair: unknown age is
+ * not evidence of recency.
+ *
+ * @param {{getEvents: (sessionId: string, opts?: {type?: string, limit?: number}) => Array<{data?: string, created_at?: string}>}} db
  * @param {string} sessionId
- * @returns {{count: number, bytes: number}}
+ * @param {{env?: Record<string, string | undefined>, now?: number}} [opts]
+ * @returns {{count: number, bytes: number, windowCount: number, windowBytes: number}}
  */
-export function readMissedRedirectTally(db, sessionId) {
+export function readMissedRedirectTally(db, sessionId, opts = {}) {
+  const { env = process.env, now = Date.now() } = opts;
   try {
     const rows = db.getEvents(sessionId, { type: "missed_redirect", limit: 1000 }) ?? [];
+    const cutoff = now - escalationWindowMs(env);
     let count = 0;
     let bytes = 0;
+    let windowCount = 0;
+    let windowBytes = 0;
     for (const row of rows) {
       const m = /^(\S+):\s+(\d+)\s+bytes unrouted/.exec(row?.data ?? "");
       if (!m) continue;
+      const size = Number.parseInt(m[2], 10) || 0;
       count++;
-      bytes += Number.parseInt(m[2], 10) || 0;
+      bytes += size;
+      const at = parseEventTime(row?.created_at);
+      if (at !== null && at >= cutoff) {
+        windowCount++;
+        windowBytes += size;
+      }
     }
-    return { count, bytes };
+    return { count, bytes, windowCount, windowBytes };
   } catch {
     // A tally we cannot read costs the second line of the notice, not the
     // notice itself.
-    return { count: 0, bytes: 0 };
+    return { count: 0, bytes: 0, windowCount: 0, windowBytes: 0 };
   }
+}
+
+/**
+ * SQLite `datetime('now')` output ("2026-08-20 04:09:36") to epoch ms.
+ * Written as UTC because that is what SQLite's `now` means; the space is
+ * swapped for a `T` so every engine parses it the same way.
+ * @returns {number | null}
+ */
+function parseEventTime(value) {
+  if (typeof value !== "string" || !value) return null;
+  const iso = value.includes("T") ? value : value.replace(" ", "T");
+  const at = Date.parse(/[Zz]|[+-]\d\d:?\d\d$/.test(iso) ? iso : `${iso}Z`);
+  return Number.isFinite(at) ? at : null;
 }
 
 /** KB below a megabyte, MB above it — one decimal either way. */

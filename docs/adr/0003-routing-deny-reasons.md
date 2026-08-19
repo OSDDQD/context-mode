@@ -150,6 +150,35 @@ MUST NOT contain `"Do NOT retry"`, MUST NOT contain
   recommended as a follow-up — the rule is already mechanically
   checkable.
 
+## Third amendment (v1.0.173, 2026-08-20) — the short form
+
+CASE A says what a refusal MUST carry. It never said how many times.
+
+`readDenyReason` is about a kilobyte, and on a session sitting on the top step
+of the escalation ladder it fires on every large `Read` — so the tool whose
+entire purpose is to keep bytes out of the context window becomes one of the
+larger writers to it. See ADR-0008 for the incident.
+
+The full text is now printed **once per session**; every refusal after it uses a
+one-line form. The rubric is unchanged, because the short form still satisfies
+all of it:
+
+- opens with `redirected` — no negation, no org-rationale;
+- names a `ctx_*` tool as a concrete imperative call (`ctx_read(path: …)`);
+- carries the escape hatch and its deadline (`repeat this Read within Ns`);
+- no bare-NOT negations, no `BLOCKED`, no CASE B vocabulary.
+
+What it drops is the part the caller has already read once and does not act on:
+the reasoning, the second replacement call, and the names of the env knobs.
+
+One consequence for the contract test in `tests/core/server.test.ts`. Its
+"MUST name at least one ctx_* alternative tool" assertion enumerated the four
+tools the CASE A sites happened to name at the time
+(`ctx_execute|ctx_fetch_and_index|ctx_search|ctx_batch_execute`), which made it
+a list of that day's tools rather than the rule. The short form names `ctx_read`
+— exactly as concrete, and it failed. The assertion now matches any `ctx_*`,
+which is what the rule always said.
+
 ## Alternatives considered
 
 - **Keep "blocked" everywhere; document the convention.** Rejected —
@@ -170,3 +199,4 @@ MUST NOT contain `"Do NOT retry"`, MUST NOT contain
 - ADR-0002 — Tool description voice and structure (companion ADR,
   same PR)
 - `TOOL-DESCRIPTIONS-AUDIT.md` §2 — PR #654 verdict and probe evidence
+- ADR-0008 — the economics of escalation (why the fine print went on a diet)
