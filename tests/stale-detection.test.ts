@@ -11,7 +11,7 @@
  */
 
 import { describe, test, expect, afterEach } from "vitest";
-import { writeFileSync, unlinkSync, existsSync } from "node:fs";
+import { writeFileSync, unlinkSync, existsSync, utimesSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { ContentStore } from "../src/store.js";
@@ -185,5 +185,101 @@ describe("Hash-based stale detection", () => {
     // Source metadata should still exist
     const meta = store.getSourceMeta(filePath);
     expect(meta).not.toBeNull();
+  });
+});
+
+// ── Sweep throttle ──
+
+/**
+ * Push the file's mtime safely past the source's indexed_at, whatever the
+ * filesystem's timestamp resolution is. The sweep gates on mtime before it
+ * ever hashes, so without this a fast rewrite can land in the same second as
+ * the index and read as unchanged.
+ */
+function touchFuture(path: string): void {
+  const futureSeconds = (Date.now() + 2000) / 1000;
+  utimesSync(path, futureSeconds, futureSeconds);
+}
+
+describe("Stale sweep throttle", () => {
+  afterEach(() => {
+    delete process.env.CONTEXT_MODE_STALE_REFRESH_MS;
+  });
+
+  test("a second search inside the window does not walk the sources again", () => {
+    const store = createStore();
+    tempStores.push(store);
+
+    const filePath = tmpFile();
+    tempFiles.push(filePath);
+    writeFileSync(filePath, "# Alpha\n\nOriginal notes about zeppelin navigation charts.");
+    store.index({ path: filePath, source: filePath });
+
+    // First search pays for the walk.
+    store.searchWithFallback("zeppelin navigation charts", 3);
+    expect(store.staleSweeps).toBe(1);
+
+    writeFileSync(filePath, "# Beta\n\nRewritten notes about submarine sonar bearings.");
+    touchFuture(filePath);
+
+    // Second search inside the default 3s window: no statSync walk at all, so
+    // the edit is deliberately not seen yet. That staleness bound is the
+    // tradeoff the throttle buys.
+    const during = store.searchWithFallback("submarine sonar bearings", 3);
+    expect(store.staleSweeps).toBe(1);
+    expect(during.length).toBe(0);
+
+    // The explicit bypass makes the very next search walk again.
+    store.invalidateStaleSweep();
+    const after = store.searchWithFallback("submarine sonar bearings", 3);
+    expect(store.staleSweeps).toBe(2);
+    expect(after.length).toBeGreaterThan(0);
+    expect(after[0].content).toContain("sonar");
+  });
+
+  test("CONTEXT_MODE_STALE_REFRESH_MS=0 restores one walk per search", () => {
+    process.env.CONTEXT_MODE_STALE_REFRESH_MS = "0";
+
+    const store = createStore();
+    tempStores.push(store);
+
+    const filePath = tmpFile();
+    tempFiles.push(filePath);
+    writeFileSync(filePath, "# Alpha\n\nOriginal notes about tectonic drift models.");
+    store.index({ path: filePath, source: filePath });
+
+    store.searchWithFallback("tectonic drift models", 3);
+    expect(store.staleSweeps).toBe(1);
+
+    writeFileSync(filePath, "# Beta\n\nRewritten notes about glacier calving rates.");
+    touchFuture(filePath);
+
+    const after = store.searchWithFallback("glacier calving rates", 3);
+    expect(store.staleSweeps).toBe(2);
+    expect(after.length).toBeGreaterThan(0);
+  });
+
+  test("once the window elapses the next search walks again", async () => {
+    process.env.CONTEXT_MODE_STALE_REFRESH_MS = "5";
+
+    const store = createStore();
+    tempStores.push(store);
+
+    const filePath = tmpFile();
+    tempFiles.push(filePath);
+    writeFileSync(filePath, "# Alpha\n\nOriginal notes about kiln firing schedules.");
+    store.index({ path: filePath, source: filePath });
+
+    store.searchWithFallback("kiln firing schedules", 3);
+    expect(store.staleSweeps).toBe(1);
+
+    writeFileSync(filePath, "# Beta\n\nRewritten notes about lathe tolerance grinding.");
+    touchFuture(filePath);
+
+    await new Promise((resolve) => setTimeout(resolve, 25));
+
+    const after = store.searchWithFallback("lathe tolerance grinding", 3);
+    expect(store.staleSweeps).toBe(2);
+    expect(after.length).toBeGreaterThan(0);
   });
 });

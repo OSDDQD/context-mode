@@ -39,6 +39,17 @@ function toMillis(seconds: number): number {
   return Number.isFinite(seconds) ? Math.round(seconds * 1000) : 0;
 }
 
+/**
+ * The score breakdown, field for field.
+ *
+ * It is copied rather than trimmed because it is consumed: `exactMatch` is what
+ * `filenameCandidates` (src/search/find.ts) reads to lift a literal filename
+ * match above a merely frecency-hot one, and `total` is asserted by the
+ * isolation and native-smoke suites as proof that `scores` stays positionally
+ * aligned with `items` across dropped hits. The remaining fields are the terms
+ * `total` is made of, and a caller that re-ranks needs to see why fff ranked as
+ * it did — a breakdown with holes in it explains nothing.
+ */
 function normalizeScore(score: Score | undefined): FffScore {
   return {
     total: score?.total ?? 0,

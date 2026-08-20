@@ -14,9 +14,12 @@ import type { PreparedStatement } from "./db-base.js";
 import { readFileSync, readdirSync, unlinkSync, existsSync, statSync, openSync, fstatSync, closeSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { tmpdir } from "node:os";
-import { extname, join } from "node:path";
+import { dirname, extname, join } from "node:path";
 import { walkDirectoryDetailed, type WalkOptions } from "./store-directory.js";
 import { redactOptionsFromEnv, redactSecrets, type RedactOptions } from "./session/redact.js";
+import { hasCodegraphIndex, openGraphDb, type GraphDbHandle } from "./graph/db.js";
+import { normalizeFilePath, outline } from "./graph/queries.js";
+import type { SymbolRow } from "./graph/queries.js";
 import type { SearchCompleteness } from "./search/completeness.js";
 export type { SearchCompleteness } from "./search/completeness.js";
 
@@ -259,6 +262,58 @@ const CODE_CHUNK_MAX_DEPTH = 2;
 // docs/research/code-chunking-2026-08-18.md for the sweep.
 const CODE_CHUNK_MIN_BYTES = 1024;
 
+// ─────────────────────────────────────────────────────────
+// Symbol-boundary chunking (codegraph)
+// ─────────────────────────────────────────────────────────
+
+// The line heuristic above guesses where a declaration starts. When the
+// project has a codegraph index, that is not a guess any more: `nodes` already
+// carries every symbol's file_path/start_line/end_line, produced by a real
+// parser. Using it removes the two failure modes the heuristic cannot fix —
+// a declaration whose opening line does not look like one (a multi-line
+// generic signature, a `const x = () => {` arrow export, a decorated Python
+// method), and a body line that does look like one (a nested `function` inside
+// a closure, a string literal starting with `class `).
+//
+// The blocks this produces are handed to #packCodeBlocks unchanged, so every
+// size decision — packing runs of tiny symbols, splitting an oversized one,
+// the byte cap itself — stays exactly where it already was. This layer only
+// decides WHERE the cuts are, never HOW BIG a chunk gets.
+
+/**
+ * Highest number of symbols read out of the graph for one file.
+ *
+ * `outline` clamps to 2 000 itself; naming the number here documents that a
+ * file with more declarations than this is not silently half-chunked — the
+ * truncation is detected (last symbol's endLine short of the file's end is
+ * fine, but a hit on the cap means the tail spans are unknown) and the whole
+ * file falls back to the text path.
+ */
+const GRAPH_CHUNK_SYMBOL_LIMIT = 2_000;
+
+/**
+ * How stale the graph's row for a file may be before its boundaries are
+ * refused, in ms.
+ *
+ * Same one second of slack `checkFreshness` uses, and for the same reason: the
+ * indexer writes `indexed_at` after reading the file, so an equal-second mtime
+ * is not evidence of staleness. Anything past that means the symbol lines
+ * describe a revision we are not chunking, and a wrong boundary is worse than
+ * no boundary.
+ */
+const GRAPH_CHUNK_STALE_TOLERANCE_MS = 1_000;
+
+/**
+ * Directory→project-root memo cap. One entry per directory holding indexed
+ * files; a repository with more distinct directories than this in one session
+ * is unusual enough that dropping the memo and rebuilding costs less than
+ * carrying it.
+ */
+const GRAPH_CHUNK_ROOT_CACHE_MAX = 4_096;
+
+/** How far up the tree `.codegraph/` is looked for before giving up. */
+const GRAPH_CHUNK_ROOT_MAX_DEPTH = 40;
+
 // Line grouping for plain-text output — command captures, logs, and any source
 // file the code heuristic could not read.
 const PLAIN_TEXT_LINES_PER_CHUNK = 20;
@@ -320,6 +375,36 @@ export const CONTENT_RETENTION_DAYS_DEFAULT = 14;
  * `.db` mtime looks old because every recent write landed in the WAL.
  */
 const CONTENT_WAL_STALE_MS = 3600_000;
+
+/**
+ * Default gap between two full stale sweeps of the file-backed sources.
+ *
+ * The sweep is a `statSync` over *every* file-backed source, and it used to run
+ * on every single `searchWithFallback` — so one `ctx_search` with eight queries
+ * paid for eight identical walks of a knowledge base that cannot have changed
+ * between them, and the lexical branch of `ctx_find` paid again right after.
+ *
+ * Three seconds is the tradeoff: a file edited between two searches can be
+ * served stale for at most that long, which is well under the round trip of an
+ * agent turn (edit → tool call → next search), while a burst of searches inside
+ * one tool call collapses to a single walk. Sources under an active fs-bus
+ * watcher do not even wait that long — the watcher re-indexes them on the event
+ * (see src/fs-bus/index.ts); this sweep is the fallback for everything else.
+ */
+export const STALE_REFRESH_INTERVAL_MS_DEFAULT = 3000;
+
+/**
+ * Throttle window for the stale sweep in ms, overridable via
+ * CONTEXT_MODE_STALE_REFRESH_MS. `0` restores the pre-throttle behaviour —
+ * every search sweeps — for anyone who would rather pay the I/O than ever read
+ * a three-second-old answer.
+ *
+ * Read lazily on every call, never memoized, so a test can flip it per case.
+ */
+export function staleRefreshIntervalMs(): number {
+  const raw = Number.parseInt(process.env.CONTEXT_MODE_STALE_REFRESH_MS ?? "", 10);
+  return Number.isFinite(raw) && raw >= 0 ? raw : STALE_REFRESH_INTERVAL_MS_DEFAULT;
+}
 
 /** Retention window in days, overridable via CONTEXT_MODE_CONTENT_RETENTION_DAYS. */
 export function contentRetentionDays(): number {
@@ -625,6 +710,20 @@ export class ContentStore {
    */
   #redactOptions: RedactOptions;
 
+  // ── Codegraph handles, for symbol-boundary chunking ──
+  // Opening `.codegraph/codegraph.db` costs a SQLite connection plus the
+  // schema/metadata gate inside openGraphDb. An indexing run touches hundreds
+  // of files in one project, so both the project-root lookup and the handle
+  // are memoised for the store's lifetime; a `null` value is a memoised
+  // failure, so a project without an index is probed once, not once per file.
+
+  /** Directory → the project root above it holding `.codegraph/`, or null. */
+  #graphRootByDir = new Map<string, string | null>();
+  /** Project root → open read-only handle, or null when it could not be opened. */
+  #graphHandles = new Map<string, GraphDbHandle | null>();
+  /** Project root → prepared `files.indexed_at` lookup for the staleness gate. */
+  #graphFileStmts = new Map<string, PreparedStatement>();
+
   // ── Cached Prepared Statements ──
   // Prepared once at construction, reused on every call to avoid
   // re-compiling SQL on each invocation.
@@ -739,6 +838,7 @@ export class ContentStore {
 
   /** Delete this session's DB files. Call on process exit. */
   cleanup(): void {
+    this.#closeGraphHandles();
     try {
       this.#db.close();
     } catch { /* ignore */ }
@@ -1182,6 +1282,11 @@ export class ContentStore {
     // (directories, character devices) which would otherwise read as ""
     // or throw inconsistently. See #442 round-3.
     let text: string;
+    // Non-null only when `text` IS the bytes on disk at that mtime. Symbol
+    // boundaries are line numbers into the file the graph indexed, so they are
+    // only usable when what we are chunking is that same file — caller-supplied
+    // `content` paired with a path may be anything at all.
+    let diskMtimeMs: number | null = null;
     if (hasContent) {
       text = content!;
     } else {
@@ -1191,6 +1296,7 @@ export class ContentStore {
         if (!st.isFile()) {
           throw new Error(`refusing to index ${path}: not a regular file`);
         }
+        diskMtimeMs = st.mtimeMs;
         text = readFileSync(fd, "utf-8");
       } finally {
         closeSync(fd);
@@ -1201,6 +1307,11 @@ export class ContentStore {
     // Ahead of the hash, the chunking and the vocabulary — see #screen.
     const screened = this.#screen(text);
     text = screened.text;
+    // A PEM block is redacted by collapsing its lines into one marker
+    // (redact.ts), so any redaction at all is enough to put the text out of
+    // step with the line numbers the graph recorded. Cheaper to disqualify the
+    // file than to prove which rule fired.
+    if (screened.count > 0) diskMtimeMs = null;
 
     // Stale detection: file_path + SHA-256. Hashed for EVERY source, not only
     // file-backed ones — a batch command re-run with identical output is just
@@ -1212,7 +1323,7 @@ export class ContentStore {
     const unchanged = this.#skipUnchanged(label, filePath, contentHash);
     if (unchanged) return unchanged;
 
-    const chunks = this.#chunkFile(text, filePath, MAX_CHUNK_BYTES);
+    const chunks = this.#chunkFile(text, filePath, MAX_CHUNK_BYTES, diskMtimeMs);
     const result = withRetry(() => this.#insertChunks(chunks, label, text, filePath, contentHash, attribution));
     return this.#withRedactions(result, screened.count);
   }
@@ -1902,11 +2013,56 @@ export class ContentStore {
   lastRefreshCount = 0;
 
   /**
+   * How many times the stale sweep actually walked the sources — throttled
+   * calls do not count. Observability, and the only way a test can tell a
+   * skipped sweep from a sweep that found nothing.
+   */
+  staleSweeps = 0;
+
+  /** `Date.now()` of the last sweep that actually ran. 0 = never swept. */
+  #lastStaleSweepAt = 0;
+
+  /**
+   * Force the next search's stale sweep to run, whatever the throttle says.
+   *
+   * The escape hatch for callers that know the filesystem moved and cannot
+   * wait out the window — an explicit re-index, a test that edits a file
+   * between two searches. Cheaper than exposing the sweep itself: the work
+   * still happens lazily, inside the search that needs it.
+   */
+  invalidateStaleSweep(): void {
+    this.#lastStaleSweepAt = 0;
+  }
+
+  /**
    * Check all file-backed sources for staleness and auto re-index changed files.
    * Uses mtime as a fast gate — only computes SHA-256 when mtime has advanced
    * past indexed_at. Gracefully skips deleted files and non-file sources.
+   *
+   * Throttled to one walk per {@link staleRefreshIntervalMs} window unless
+   * `force` is set: the walk is a `statSync` per file-backed source and the
+   * retrieval path calls it far more often than the filesystem changes.
    */
-  #refreshStaleSources(): void {
+  #refreshStaleSources(force = false): void {
+    if (!force) {
+      const interval = staleRefreshIntervalMs();
+      const sinceLast = Date.now() - this.#lastStaleSweepAt;
+      // `sinceLast < 0` means the wall clock jumped backwards (NTP, a suspend).
+      // Sweep in that case rather than sitting the window out for however long
+      // the jump was — a wasted walk is cheaper than an unbounded stale answer.
+      if (interval > 0 && sinceLast >= 0 && sinceLast < interval) {
+        // Zero the counter the same way a sweep that found nothing would: the
+        // note in src/tools/search.ts is emitted from it after the whole query
+        // batch, and re-announcing the previous sweep's refreshes there would
+        // claim a re-read this search never made.
+        this.lastRefreshCount = 0;
+        return;
+      }
+    }
+    // Stamped before the walk, not after, so the window is a hard "at most one
+    // sweep per interval" regardless of how long the walk itself takes.
+    this.#lastStaleSweepAt = Date.now();
+    this.staleSweeps++;
     this.lastRefreshCount = 0;
     const sources = this.#db.prepare(
       "SELECT label, file_path, content_hash, indexed_at FROM sources WHERE file_path IS NOT NULL",
@@ -2181,8 +2337,25 @@ export class ContentStore {
   }
 
   close(): void {
+    this.#closeGraphHandles();
     this.#optimizeFTS(); // defragment before close
     closeDB(this.#db); // WAL checkpoint before close — important for persistent DBs
+  }
+
+  /**
+   * Release the read-only codegraph connections held for chunking.
+   *
+   * They are held open across an indexing run on purpose; a store that is
+   * closed without releasing them leaks a file descriptor per project, which
+   * on a long-lived server is a descriptor that never comes back.
+   */
+  #closeGraphHandles(): void {
+    for (const handle of this.#graphHandles.values()) {
+      try { handle?.close(); } catch { /* already closed */ }
+    }
+    this.#graphHandles.clear();
+    this.#graphFileStmts.clear();
+    this.#graphRootByDir.clear();
   }
 
   // ── Vocabulary Extraction ──
@@ -2336,15 +2509,28 @@ export class ContentStore {
    * Pick a chunker for one indexed file.
    *
    * Markdown chunking is the default and stays the default for everything that
-   * is not a source file. A source file gets #chunkCode; if the heuristic finds
-   * no structure in it — a minified bundle, generated output, a language it
-   * does not know — it falls through to #chunkPlainText rather than back to
-   * markdown. Markdown's paragraph split leaves one hole in the byte cap (a
-   * single paragraph larger than the cap is emitted whole), a minified bundle
-   * is exactly one such paragraph, and there were never any headings to find.
+   * is not a source file. A source file gets its boundaries from the codegraph
+   * index when there is one, and from #chunkCode's line heuristic when there is
+   * not; if the heuristic finds no structure either — a minified bundle,
+   * generated output, a language it does not know — it falls through to
+   * #chunkPlainText rather than back to markdown. Markdown's paragraph split
+   * leaves one hole in the byte cap (a single paragraph larger than the cap is
+   * emitted whole), a minified bundle is exactly one such paragraph, and there
+   * were never any headings to find.
+   *
+   * @param diskMtimeMs mtime of the file `text` was read from, or null when
+   *        `text` did not come from disk verbatim. Gates the graph path only.
    */
-  #chunkFile(text: string, filePath: string | undefined, maxChunkBytes: number): Chunk[] {
+  #chunkFile(
+    text: string,
+    filePath: string | undefined,
+    maxChunkBytes: number,
+    diskMtimeMs: number | null = null,
+  ): Chunk[] {
     if (!this.#codeChunkingApplies(filePath)) return this.#chunkMarkdown(text, maxChunkBytes);
+
+    const bySymbol = this.#chunkCodeBySymbols(text, filePath!, maxChunkBytes, diskMtimeMs);
+    if (bySymbol) return bySymbol;
 
     const structured = this.#chunkCode(text, maxChunkBytes);
     if (structured) return structured;
@@ -2362,6 +2548,230 @@ export class ContentStore {
     if (process.env.CONTEXT_MODE_CODE_CHUNKING === "0") return false;
     if (!filePath) return false;
     return CODE_CHUNK_EXTENSIONS.has(extname(filePath).toLowerCase());
+  }
+
+  // ── Symbol-boundary chunking (codegraph) ──
+
+  /**
+   * Cut a source file at the symbol boundaries the codegraph index recorded.
+   *
+   * Every condition that could make those boundaries wrong returns null, and
+   * null puts the caller back on the line heuristic with no trace: no codegraph
+   * index, a file the index does not know, an index older than the file, a
+   * symbol table that disagrees with the text in front of us. The graph is an
+   * optimisation for retrieval precision, never a dependency of indexing —
+   * a project that has never run `codegraph init` must index exactly as it did
+   * before this function existed.
+   *
+   * @returns Chunks cut on symbol boundaries, or null to fall back.
+   */
+  #chunkCodeBySymbols(
+    text: string,
+    filePath: string,
+    maxChunkBytes: number,
+    diskMtimeMs: number | null,
+  ): Chunk[] | null {
+    if (process.env.CONTEXT_MODE_GRAPH_CHUNKING === "0") return null;
+    // Null means the text is not the file's bytes (inline `content`, or a
+    // redaction that may have collapsed lines) — line numbers do not apply.
+    if (diskMtimeMs === null) return null;
+    if (text.trim().length === 0) return null;
+
+    try {
+      const projectDir = this.#graphProjectRoot(filePath);
+      if (!projectDir) return null;
+      const handle = this.#graphHandle(projectDir);
+      if (!handle) return null;
+
+      const relPath = normalizeFilePath(projectDir, filePath);
+      // A path that normalises outside the root (`../`) is not this project's
+      // file, whatever the directory walk concluded.
+      if (!relPath || relPath.startsWith("../")) return null;
+      if (!this.#graphFileIsCurrent(projectDir, handle, relPath, diskMtimeMs)) return null;
+
+      const rows = outline(handle, { filePath: relPath, limit: GRAPH_CHUNK_SYMBOL_LIMIT });
+      if (rows.length === 0) return null;
+      // At the cap the tail of the file has symbols we were not told about, so
+      // the spans we do have describe only part of it. Half a map is not a map.
+      if (rows.length >= GRAPH_CHUNK_SYMBOL_LIMIT) return null;
+
+      const lines = text.split("\n");
+      const blocks = this.#symbolBlocks(lines, rows);
+      if (!blocks) return null;
+
+      // Deliberately the same packer the heuristic path uses: CODE_CHUNK_MIN_BYTES
+      // packing for runs of one-line symbols, #splitOversizedCodeBlock for a
+      // symbol too big to stand alone, and the byte cap decided in exactly one
+      // place. This function chooses cut POINTS and nothing else.
+      const parts = this.#packCodeBlocks(blocks, maxChunkBytes, 0);
+      if (parts.length === 0) return null;
+      return parts.map((p) => ({ ...p, hasCode: true }));
+    } catch {
+      // Any surprise from the graph (locked db, schema drift mid-run, a driver
+      // throw) costs precision, never the index write that is in flight.
+      return null;
+    }
+  }
+
+  /**
+   * Turn symbol spans into contiguous line blocks covering the whole file.
+   *
+   * Two things this must not do. It must not drop the gaps: imports, license
+   * headers and top-level statements sit between symbols and are exactly what
+   * someone searching for `import { readFileSync }` is looking for, so every
+   * line outside a symbol becomes a block of its own. And it must not nest:
+   * a class and its methods are separate rows with overlapping ranges, so a
+   * row starting inside the span already taken is skipped — its parent carries
+   * it, and #splitOversizedCodeBlock re-cuts that parent at member indent if it
+   * turns out to be too large.
+   *
+   * @returns One string[] per block, or null when the rows describe a file
+   *          other than the one in `lines`.
+   */
+  #symbolBlocks(lines: string[], rows: SymbolRow[]): string[][] | null {
+    // Widest-first at equal start so a class wins over its first method and
+    // becomes the enclosing span rather than being swallowed by it.
+    const sorted = [...rows]
+      .filter((r) => Number.isFinite(r.startLine) && r.startLine >= 1)
+      .sort((a, b) => a.startLine - b.startLine || b.endLine - a.endLine);
+    if (sorted.length === 0) return null;
+
+    const spans: Array<[number, number]> = [];
+    let coveredTo = 0;
+    for (const row of sorted) {
+      const start = Math.trunc(row.startLine);
+      // A start line past the end of the text means the index is describing a
+      // different revision — an mtime within tolerance is not proof of equality
+      // (a restored file, a checkout that preserves mtime). Refuse the file
+      // rather than emit spans that slice the wrong lines.
+      if (start > lines.length) return null;
+      if (start <= coveredTo) continue;
+      const end = Math.min(lines.length, Math.max(Math.trunc(row.endLine) || start, start));
+      spans.push([start, end]);
+      coveredTo = end;
+    }
+    // One span covering everything is not a boundary decision, it is the file.
+    if (spans.length === 0) return null;
+
+    const blocks: string[][] = [];
+    let cursor = 1; // 1-based, first line not yet emitted
+    for (const [start, end] of spans) {
+      const gap = lines.slice(cursor - 1, start - 1);
+      // The doc comment or decorator run at the tail of the gap introduces the
+      // symbol below it, so it travels with the symbol — the same rule, and the
+      // same reason, as the walk-back in #codeBlocks. Indexers disagree about
+      // whether start_line includes the docstring; this makes both agree.
+      const carried = this.#carryDocRun(gap);
+      if (gap.some((l) => l.trim().length > 0)) blocks.push(gap);
+      blocks.push([...carried, ...lines.slice(start - 1, end)]);
+      cursor = end + 1;
+    }
+    const tail = lines.slice(cursor - 1);
+    if (tail.some((l) => l.trim().length > 0)) blocks.push(tail);
+
+    return blocks.length > 0 ? blocks : null;
+  }
+
+  /**
+   * Splice the trailing comment/decorator run off `gap` and return it.
+   *
+   * Mutates `gap` — the lines move, they are not copied, so the caller cannot
+   * emit them twice. Blank lines between the run and the declaration are
+   * skipped on the way up but left behind: a banner comment with a blank line
+   * under it still introduces what follows.
+   */
+  #carryDocRun(gap: string[]): string[] {
+    let end = gap.length;
+    while (end > 0 && gap[end - 1].trim().length === 0) end--;
+    let start = end;
+    while (start > 0 && CODE_DOC_LINE.test(gap[start - 1].trim())) start--;
+    return start < end ? gap.splice(start, end - start) : [];
+  }
+
+  /**
+   * The project root above `filePath` that holds a `.codegraph/codegraph.db`.
+   *
+   * Memoised per directory because an indexing run walks a tree: without the
+   * memo every file in `src/search/` repeats the same four `existsSync` calls
+   * up to the root, which is the per-file cost this design exists to avoid.
+   *
+   * @returns The root, or null when no ancestor is an indexed project.
+   */
+  #graphProjectRoot(filePath: string): string | null {
+    const startDir = dirname(filePath);
+    const cached = this.#graphRootByDir.get(startDir);
+    if (cached !== undefined) return cached;
+
+    let dir = startDir;
+    let found: string | null = null;
+    // Every directory on the way up resolves to the same root, so they are all
+    // memoised at once — a sibling directory then costs one Map hit. The memo
+    // is also consulted DURING the walk: without that, indexing a tree would
+    // re-probe the shared upper levels once per subdirectory, which is the
+    // per-file filesystem cost this cache exists to remove.
+    const visited: string[] = [];
+    for (let depth = 0; depth < GRAPH_CHUNK_ROOT_MAX_DEPTH; depth++) {
+      const seen = this.#graphRootByDir.get(dir);
+      if (seen !== undefined) { found = seen; break; }
+      visited.push(dir);
+      if (hasCodegraphIndex(dir)) { found = dir; break; }
+      const parent = dirname(dir);
+      if (parent === dir) break; // filesystem root; dirname("/") === "/"
+      dir = parent;
+    }
+
+    if (this.#graphRootByDir.size + visited.length > GRAPH_CHUNK_ROOT_CACHE_MAX) {
+      this.#graphRootByDir.clear();
+    }
+    for (const seen of visited) this.#graphRootByDir.set(seen, found);
+    return found;
+  }
+
+  /**
+   * The read-only codegraph connection for one project, opened at most once.
+   *
+   * A `null` entry is a remembered refusal (incomplete index, schema drift,
+   * unreadable file) and is never retried: retrying per file would reproduce
+   * the very per-file open cost this cache exists to remove, and none of those
+   * conditions clears within one indexing run.
+   */
+  #graphHandle(projectDir: string): GraphDbHandle | null {
+    const cached = this.#graphHandles.get(projectDir);
+    if (cached !== undefined) return cached;
+
+    const opened = openGraphDb(projectDir);
+    const handle = opened.ok ? opened.handle : null;
+    this.#graphHandles.set(projectDir, handle);
+    return handle;
+  }
+
+  /**
+   * Whether the graph's row for this file still describes what is on disk.
+   *
+   * A file absent from `files` was never indexed (new, ignored, or a language
+   * codegraph does not parse) and has no boundaries to offer. A file whose
+   * mtime has moved past `indexed_at` has boundaries that point at the previous
+   * revision — the case that actually matters, because it is what an editor
+   * produces between a save and the indexer catching up.
+   */
+  #graphFileIsCurrent(
+    projectDir: string,
+    handle: GraphDbHandle,
+    relPath: string,
+    diskMtimeMs: number,
+  ): boolean {
+    let stmt = this.#graphFileStmts.get(projectDir);
+    if (!stmt) {
+      // Prepared once per project, not once per file: this runs for every
+      // source file in the tree during a bulk index.
+      stmt = handle.db.prepare("SELECT indexed_at FROM files WHERE path = ?") as PreparedStatement;
+      this.#graphFileStmts.set(projectDir, stmt);
+    }
+    const row = stmt.get(relPath) as { indexed_at?: number } | undefined;
+    if (!row) return false;
+    const indexedAt = Number(row.indexed_at ?? 0);
+    if (!Number.isFinite(indexedAt) || indexedAt <= 0) return false;
+    return diskMtimeMs <= indexedAt + GRAPH_CHUNK_STALE_TOLERANCE_MS;
   }
 
   /**

@@ -259,6 +259,29 @@ export function outline(
   }
 }
 
+/**
+ * `files.indexed_at` for one path, or `null` when the file has no row.
+ *
+ * The distinction matters to `action: "body"`: a missing row means staleness is
+ * unknowable, and "unknown" must not be rendered as "current" — a line range
+ * quietly pointing at the wrong function is the one failure that looks exactly
+ * like success.
+ */
+export function fileIndexedAt(handle: GraphDbHandle, filePath: string): number | null {
+  const path = normalizeFilePath(handle.projectDir, filePath);
+  if (!path) return null;
+  try {
+    const row = handle.db
+      .prepare("SELECT indexed_at FROM files WHERE path = ?")
+      .get(path) as { indexed_at?: number } | undefined;
+    if (!row) return null;
+    const n = Number(row.indexed_at ?? 0);
+    return Number.isFinite(n) && n > 0 ? n : null;
+  } catch {
+    return null;
+  }
+}
+
 /** Distinct indexed file paths matching a fragment — for "did you mean". */
 export function findFiles(handle: GraphDbHandle, fragment: string, limit = 10): string[] {
   const needle = `%${String(fragment ?? "").replace(/[%_]/g, "")}%`;
@@ -482,6 +505,14 @@ export interface RelatedResult {
   files: RelatedFile[];
   /** True when the node list was cut at `limit`. */
   truncated: boolean;
+  /**
+   * True when the edge scan itself hit {@link EDGE_SCAN_CAP} — a different and
+   * more serious cut than {@link truncated}: not "we showed you fewer of the
+   * neighbours we found", but "we stopped looking". Optional so a caller that
+   * builds a `RelatedResult` by hand (the ranking layer's fixtures) is not
+   * forced to have an opinion about it.
+   */
+  edgesTruncated?: boolean;
 }
 
 /**
@@ -504,12 +535,15 @@ export function related(
     depth?: number;
     limit?: number;
     kinds?: readonly string[];
+    /** Rows scanned per union arm per batch. Tests, and pathological graphs. */
+    edgeScanCap?: number;
   },
 ): RelatedResult {
   const seedFile = normalizeFilePath(handle.projectDir, opts.filePath);
   const depth = Math.max(1, Math.min(opts.depth ?? 1, 3));
   const limit = clampLimit(opts.limit, 40, 400);
   const kinds = (opts.kinds ?? RELATED_KINDS) as readonly string[];
+  const edgeScanCap = clampLimit(opts.edgeScanCap, EDGE_SCAN_CAP, EDGE_SCAN_CAP);
 
   const seedIds = new Set<string>();
   try {
@@ -534,16 +568,17 @@ export function related(
   const acc = new Map<string, Acc>();
   const visited = new Set<string>(seedIds);
   let frontier = [...seedIds];
+  let edgesTruncated = false;
 
   for (let d = 1; d <= depth && frontier.length > 0; d++) {
     const next: string[] = [];
     for (const batch of chunk(frontier, 400)) {
-      const batchSet = new Set(batch);
-      for (const row of edgeBatch(handle, batch, kinds)) {
-        // Which endpoint was the one we asked about decides the direction.
-        // A Set, not `includes`: at 400 ids × 20k edges the linear scan is the
-        // whole cost of the walk.
-        const isOut = batchSet.has(row.source);
+      const scan = edgeBatch(handle, batch, kinds, edgeScanCap);
+      if (scan.truncated) edgesTruncated = true;
+      for (const row of scan.rows) {
+        // The union arm that produced the row already knows which endpoint we
+        // asked about, so the direction is read, not inferred.
+        const isOut = row.direction === "out";
         const other = isOut ? row.target : row.source;
         if (!other || seedIds.has(other)) continue;
         const w = (EDGE_WEIGHTS[row.kind] ?? 0.3) / d;
@@ -567,7 +602,7 @@ export function related(
   }
 
   if (acc.size === 0) {
-    return { seedFile, seedNodes: seedIds.size, nodes: [], files: [], truncated: false };
+    return { seedFile, seedNodes: seedIds.size, nodes: [], files: [], truncated: false, edgesTruncated };
   }
 
   const meta = nodeMeta(handle, [...acc.keys()]);
@@ -615,28 +650,85 @@ export function related(
     nodes: nodes.slice(0, limit),
     files: files.slice(0, limit),
     truncated: nodes.length > limit,
+    edgesTruncated,
   };
 }
 
-interface EdgeRow { source: string; target: string; kind: string }
+interface EdgeRow {
+  source: string;
+  target: string;
+  kind: string;
+  /** Which arm of the union produced the row: the seed was the `source`, or the `target`. */
+  direction: "out" | "in";
+}
 
+/**
+ * Rows scanned per union arm before the scan gives up.
+ *
+ * A cap is necessary — one frontier batch of 400 ids in a hub-shaped graph can
+ * touch six figures of `references` edges — but a cap that is not reported is a
+ * wrong answer wearing a right one's clothes, so {@link EdgeBatchResult}
+ * carries the fact upward and `related` puts it in the response.
+ */
+export const EDGE_SCAN_CAP = 20_000;
+
+interface EdgeBatchResult {
+  rows: EdgeRow[];
+  /** At least one arm hit {@link EDGE_SCAN_CAP}, so the neighbourhood is partial. */
+  truncated: boolean;
+}
+
+/**
+ * Every edge touching one frontier batch, as two index-friendly scans.
+ *
+ * The obvious spelling — `source IN (…) OR target IN (…)` — is the slow one:
+ * SQLite cannot satisfy a disjunction of two different columns from one index
+ * pass, so it degrades to a full scan of `edges` and the `LIMIT` then decides
+ * which arbitrary 20 000 rows the answer is built from. Two separate scans,
+ * each on a single column, each use their own index; `UNION ALL` (not `UNION`)
+ * keeps them cheap, and per-arm limits inside subqueries mean one hub-heavy
+ * direction cannot starve the other.
+ *
+ * The `direction` column is not bookkeeping for the union — it is the answer to
+ * a question the caller could previously only guess at. Testing `batch.has(row.source)`
+ * mislabels an edge whose two endpoints are BOTH in the frontier: such an edge
+ * is genuinely outbound for one endpoint and inbound for the other, and the
+ * union now yields it once per arm, correctly labelled each time.
+ */
 function edgeBatch(
   handle: GraphDbHandle,
   ids: string[],
   kinds: readonly string[],
-): EdgeRow[] {
+  cap: number = EDGE_SCAN_CAP,
+): EdgeBatchResult {
   const idPh = placeholders(ids.length);
   const kindPh = placeholders(kinds.length);
-  const sql =
-    "SELECT source, target, kind FROM edges " +
-    `WHERE kind IN (${kindPh}) AND (source IN (${idPh}) OR target IN (${idPh})) ` +
-    "LIMIT 20000";
+  // One row over the cap is fetched purely as evidence: if it comes back, the
+  // arm had more to give and `truncated` is a fact rather than a suspicion.
+  const probe = cap + 1;
+  const arm = (column: "source" | "target", direction: "out" | "in"): string =>
+    `SELECT * FROM (SELECT source, target, kind, '${direction}' AS direction FROM edges ` +
+    `WHERE kind IN (${kindPh}) AND ${column} IN (${idPh}) LIMIT ${probe})`;
+  const sql = `${arm("source", "out")} UNION ALL ${arm("target", "in")}`;
+
   try {
-    return handle.db
+    const rows = handle.db
       .prepare(sql)
-      .all(...kinds, ...ids, ...ids) as EdgeRow[];
+      .all(...kinds, ...ids, ...kinds, ...ids) as EdgeRow[];
+
+    // One pass: count each arm, and drop only the probe row that proved the arm
+    // was capped. The scores below are sums over edges, so keeping the probe
+    // would make one edge count twice on a truncated batch.
+    let out = 0;
+    let inbound = 0;
+    const kept: EdgeRow[] = [];
+    for (const row of rows) {
+      const seen = row.direction === "out" ? ++out : ++inbound;
+      if (seen <= cap) kept.push(row);
+    }
+    return { rows: kept, truncated: out > cap || inbound > cap };
   } catch {
-    return [];
+    return { rows: [], truncated: false };
   }
 }
 
@@ -667,6 +759,147 @@ function nodeMeta(handle: GraphDbHandle, ids: string[]): Map<string, NodeMeta> {
       }
     } catch { /* skip this batch */ }
   }
+  return out;
+}
+
+// ─────────────────────────────────────────────────────────
+// Repo-map inputs
+// ─────────────────────────────────────────────────────────
+
+/** One declaration, as the repo map ranks it. */
+export interface MapNodeRow {
+  id: string;
+  kind: string;
+  name: string;
+  filePath: string;
+  startLine: number;
+  signature: string | null;
+  isExported: boolean;
+}
+
+/** One file→file link, already aggregated by SQLite. */
+export interface FileEdgeRow {
+  source: string;
+  target: string;
+  kind: string;
+  count: number;
+}
+
+/** Rows the map scans before it stops. Two full-table reads, once per call. */
+export const MAP_NODE_CAP = 60_000;
+export const MAP_EDGE_CAP = 60_000;
+
+export interface MapNodesResult {
+  nodes: MapNodeRow[];
+  /** Every node's file, INCLUDING the `import`/`file` rows dropped from `nodes`. */
+  total: number;
+  capped: boolean;
+}
+
+/**
+ * Every declaration in the index, in one query.
+ *
+ * `import` and `file` rows are excluded here rather than in JS because they are
+ * pure bookkeeping for a MAP: nobody wants "the most important symbol in
+ * src/server.ts is the import of zod". They still contribute to the graph —
+ * their edges are aggregated file-side by {@link fileEdges}, which joins
+ * through `nodes` in SQL and therefore sees them.
+ */
+export function mapNodes(handle: GraphDbHandle, limit = MAP_NODE_CAP): MapNodesResult {
+  const cap = clampLimit(limit, MAP_NODE_CAP, MAP_NODE_CAP);
+  try {
+    const rows = handle.db
+      .prepare(
+        "SELECT id, kind, name, file_path, start_line, signature, is_exported FROM nodes " +
+        "WHERE kind NOT IN ('import', 'file') ORDER BY file_path, start_line LIMIT ?",
+      )
+      .all(cap + 1) as Array<Record<string, unknown>>;
+    const capped = rows.length > cap;
+    const kept = capped ? rows.slice(0, cap) : rows;
+    return {
+      nodes: kept.map(r => ({
+        id: String(r.id ?? ""),
+        kind: String(r.kind ?? ""),
+        name: String(r.name ?? ""),
+        filePath: String(r.file_path ?? ""),
+        startLine: Number(r.start_line ?? 0),
+        signature: r.signature == null ? null : String(r.signature),
+        isExported: Number(r.is_exported ?? 0) === 1,
+      })),
+      total: kept.length,
+      capped,
+    };
+  } catch {
+    return { nodes: [], total: 0, capped: false };
+  }
+}
+
+export interface FileEdgesResult {
+  edges: FileEdgeRow[];
+  capped: boolean;
+}
+
+/**
+ * The file graph, aggregated in SQL rather than in JS.
+ *
+ * The naive version streams every row of `edges` into the process and groups
+ * them there. On this repository that is hundreds of thousands of rows crossing
+ * the driver boundary to produce a few thousand distinct file pairs — the work
+ * is the same, the transfer is not. `GROUP BY` does it inside SQLite and hands
+ * back only the pairs, which is why the map costs three queries total and never
+ * one per file.
+ *
+ * `contains` is excluded: every symbol is contained by its own file, so those
+ * edges are self-loops that carry no ranking signal at file granularity.
+ */
+export function fileEdges(handle: GraphDbHandle, limit = MAP_EDGE_CAP): FileEdgesResult {
+  const cap = clampLimit(limit, MAP_EDGE_CAP, MAP_EDGE_CAP);
+  try {
+    const rows = handle.db
+      .prepare(
+        "SELECT ns.file_path AS src, nt.file_path AS dst, e.kind AS kind, COUNT(*) AS n " +
+        "FROM edges e " +
+        "JOIN nodes ns ON ns.id = e.source " +
+        "JOIN nodes nt ON nt.id = e.target " +
+        "WHERE e.kind <> 'contains' AND ns.file_path <> nt.file_path " +
+        "GROUP BY src, dst, e.kind ORDER BY src, dst, e.kind LIMIT ?",
+      )
+      .all(cap + 1) as Array<Record<string, unknown>>;
+    const capped = rows.length > cap;
+    const kept = capped ? rows.slice(0, cap) : rows;
+    return {
+      edges: kept.map(r => ({
+        source: String(r.src ?? ""),
+        target: String(r.dst ?? ""),
+        kind: String(r.kind ?? ""),
+        count: Number(r.n ?? 0),
+      })),
+      capped,
+    };
+  } catch {
+    return { edges: [], capped: false };
+  }
+}
+
+/**
+ * How many edges point AT each node, aggregated in SQL.
+ *
+ * This is the within-file importance signal: of the forty functions in a file,
+ * the ones the rest of the repository actually calls are the ones a map should
+ * spend its budget on.
+ */
+export function inboundEdgeCounts(handle: GraphDbHandle, limit = MAP_NODE_CAP): Map<string, number> {
+  const cap = clampLimit(limit, MAP_NODE_CAP, MAP_NODE_CAP);
+  const out = new Map<string, number>();
+  try {
+    const rows = handle.db
+      .prepare(
+        "SELECT target AS id, COUNT(*) AS n FROM edges WHERE kind <> 'contains' " +
+        "GROUP BY target ORDER BY n DESC LIMIT ?",
+      )
+      .all(cap) as Array<Record<string, unknown>>;
+    for (const r of rows) out.set(String(r.id ?? ""), Number(r.n ?? 0));
+  } catch { /* an unranked map is still a map */ }
   return out;
 }
 

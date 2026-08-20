@@ -5,7 +5,7 @@ import {
   encodeVectorInt8, decodeVectorInt8, decodeStoredVector,
   parseModelListing, pickEmbeddingModel, detectLocalEmbeddingEndpoint,
   resolveEmbeddingConfigAsync, resetEmbeddingAutodetect, clearEmbeddingCache,
-  DEFAULT_EMBEDDING_MODEL,
+  resetColdStartRetry, DEFAULT_EMBEDDING_MODEL,
 } from "../../src/search/embeddings.js";
 import {
   fuseRankings, hybridSearch, pruneOrphanVectors, pruneStaleModelVectors,
@@ -29,7 +29,7 @@ describe("embedding config", () => {
       CONTEXT_MODE_EMBEDDINGS_MODEL: "m",
       CONTEXT_MODE_EMBEDDINGS_TIMEOUT_MS: "not-a-number",
     } as NodeJS.ProcessEnv);
-    expect(cfg?.timeoutMs).toBe(5_000);
+    expect(cfg?.timeoutMs).toBe(10_000);
   });
 
   test("background backfill gets its own, much larger budget", () => {
@@ -40,9 +40,32 @@ describe("embedding config", () => {
       CONTEXT_MODE_EMBEDDINGS_URL: "http://x/v1/embeddings",
       CONTEXT_MODE_EMBEDDINGS_MODEL: "m",
     } as NodeJS.ProcessEnv);
-    expect(cfg?.timeoutMs).toBe(5_000);
     expect(cfg?.backfillTimeoutMs).toBe(120_000);
-    expect(cfg?.backfillBatch).toBe(16);
+  });
+
+  test("the query budget clears a measured model load, not just a warm query", () => {
+    // The reference local setup (Ollama, bge-m3) answers a warm query in
+    // ~180ms and a query against an unloaded model in 3281ms. That load is
+    // rare — first query after the runtime restarts — but when it happens a
+    // budget under it fails every time, not intermittently, and invisibly:
+    // `embedTexts` returns null and the semantic arm silently stops
+    // contributing to the fusion. Hence 3x the measured load, not 1.5x.
+    const cfg = resolveEmbeddingConfig({
+      CONTEXT_MODE_EMBEDDINGS_URL: "http://x/v1/embeddings",
+      CONTEXT_MODE_EMBEDDINGS_MODEL: "m",
+    } as NodeJS.ProcessEnv);
+    expect(cfg?.timeoutMs).toBeGreaterThanOrEqual(3_281 * 2);
+    expect(cfg?.timeoutMs).toBe(10_000);
+  });
+
+  test("the backfill batch sits at the measured throughput knee", () => {
+    // ms per vector by batch size: 8 → 49.6, 16 → 17.2, 32 → 13.2,
+    // 64 → 10.7, 128 → 9.4. 64 is where the curve flattens.
+    const cfg = resolveEmbeddingConfig({
+      CONTEXT_MODE_EMBEDDINGS_URL: "http://x/v1/embeddings",
+      CONTEXT_MODE_EMBEDDINGS_MODEL: "m",
+    } as NodeJS.ProcessEnv);
+    expect(cfg?.backfillBatch).toBe(64);
   });
 
   test("both budgets and the batch size are overridable", () => {
@@ -96,6 +119,86 @@ describe("vector codec", () => {
 describe("embedTexts", () => {
   test("returns null when disabled", async () => {
     expect(await embedTexts(["hi"], null)).toBeNull();
+  });
+});
+
+describe("cold-start retry", () => {
+  /** A tiny budget keeps the test fast; the policy under test is not the number. */
+  const cfg = {
+    url: "http://x/v1/embeddings",
+    model: "bge-m3",
+    timeoutMs: 20,
+    backfillTimeoutMs: 20,
+    backfillBatch: 4,
+  };
+
+  /**
+   * Accepts the connection and never answers — what a loading model looks
+   * like from the client side. Rejects only when `embedOnce` aborts at the
+   * budget, which is exactly how fetch behaves, so the timeout path is
+   * exercised end to end rather than simulated.
+   */
+  function hangs(_url: string, init?: { signal?: AbortSignal }): Promise<never> {
+    return new Promise((_resolve, reject) => {
+      init?.signal?.addEventListener("abort", () => reject(new Error("aborted")));
+    });
+  }
+
+  const answers = async () => ({ ok: true, json: async () => ({ embeddings: [[1, 0]] }) });
+
+  beforeEach(() => {
+    resetColdStartRetry();
+    clearEmbeddingCache();
+  });
+  afterEach(() => vi.unstubAllGlobals());
+
+  test("a timed-out query is retried once, because the model kept loading", async () => {
+    // Aborting the request does not abort the load: Ollama keeps paging the
+    // weights in, so the second attempt lands on a warm model.
+    const fetchMock = vi.fn()
+      .mockImplementationOnce(hangs)
+      .mockImplementationOnce(answers);
+    vi.stubGlobal("fetch", fetchMock);
+
+    expect(await embedTexts(["q"], cfg)).toEqual([[1, 0]]);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  test("a second timeout means a stalled endpoint, and stops the doubling", async () => {
+    // The whole risk of the retry is turning one stall into two on every
+    // query. A retry that also times out is the evidence that this is not a
+    // cold start, and it puts the retry away for five minutes.
+    const fetchMock = vi.fn(hangs);
+    vi.stubGlobal("fetch", fetchMock);
+
+    expect(await embedTexts(["q"], cfg)).toBeNull();
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+
+    fetchMock.mockClear();
+    expect(await embedTexts(["q2"], cfg)).toBeNull();
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+
+    // The cooldown is state, not a permanent verdict.
+    resetColdStartRetry();
+    fetchMock.mockClear();
+    expect(await embedTexts(["q3"], cfg)).toBeNull();
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  test("a refusing endpoint is never retried — that is not a cold start", async () => {
+    const fetchMock = vi.fn(async () => ({ ok: false, json: async () => ({}) }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    expect(await embedTexts(["q"], cfg)).toBeNull();
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  test("background batches are never retried — their budget already covers a load", async () => {
+    const fetchMock = vi.fn(hangs);
+    vi.stubGlobal("fetch", fetchMock);
+
+    expect(await embedTexts(["a", "b"], cfg, { background: true })).toBeNull();
+    expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 });
 
@@ -453,6 +556,71 @@ describe("backfillVectors", () => {
     written.length = 0;
     expect(await backfillVectors(db, { ...base, quantize: false }, 1)).toBe(1);
     expect((written[0][3] as Buffer).length).toBe(16); // float32
+  });
+
+  test("falls back to 16 when the endpoint rejects the larger batch", async () => {
+    // The default batch moved 16 → 64 on measured throughput. An endpoint with
+    // a per-request input cap between the two would otherwise fail EVERY pass:
+    // the semantic index would never warm and search would quietly stay
+    // lexical, which is the failure mode this whole layer is built to avoid.
+    const sizes: number[] = [];
+    vi.stubGlobal("fetch", vi.fn(async (_url: string, init: { body: string }) => {
+      const inputs = (JSON.parse(init.body) as { input: string[] }).input;
+      sizes.push(inputs.length);
+      if (inputs.length > 16) return { ok: false, json: async () => ({}) };
+      return { ok: true, json: async () => ({ embeddings: inputs.map(() => [0.1, 0.2]) }) };
+    }));
+
+    const written: unknown[][] = [];
+    const db = {
+      exec: () => undefined,
+      prepare: (sql: string) => ({
+        all: (...params: unknown[]) => (sql.includes("LEFT JOIN chunk_vectors")
+          ? Array.from({ length: Number(params[0] ?? 0) }, (_, i) => ({
+            rowid: i + 1, title: "t", content: "c",
+          }))
+          : []),
+        get: () => ({ c: 0 }),
+        run: (...params: unknown[]) => { if (sql.startsWith("INSERT")) written.push(params); return {}; },
+      }),
+    };
+    const cfg = {
+      url: "http://x", model: "bge-m3",
+      timeoutMs: 500, backfillTimeoutMs: 500, backfillBatch: 64,
+    };
+
+    expect(await backfillVectors(db, cfg)).toBe(16);
+    expect(sizes).toEqual([64, 16]);
+    expect(written.length).toBe(16);
+  });
+
+  test("does not double the request when the failing batch is already small", async () => {
+    // Below the fallback size there is nothing to shrink to, so a failure
+    // stays one request. Otherwise a dead endpoint would cost two.
+    const calls: number[] = [];
+    vi.stubGlobal("fetch", vi.fn(async (_url: string, init: { body: string }) => {
+      calls.push((JSON.parse(init.body) as { input: string[] }).input.length);
+      return { ok: false, json: async () => ({}) };
+    }));
+
+    const db = {
+      exec: () => undefined,
+      prepare: (sql: string) => ({
+        all: (...params: unknown[]) => (sql.includes("LEFT JOIN chunk_vectors")
+          ? Array.from({ length: Number(params[0] ?? 0) }, (_, i) => ({
+            rowid: i + 1, title: "t", content: "c",
+          }))
+          : []),
+        get: () => ({ c: 0 }),
+        run: () => ({}),
+      }),
+    };
+
+    expect(await backfillVectors(db, {
+      url: "http://x", model: "bge-m3",
+      timeoutMs: 500, backfillTimeoutMs: 500, backfillBatch: 8,
+    })).toBe(0);
+    expect(calls).toEqual([8]);
   });
 });
 

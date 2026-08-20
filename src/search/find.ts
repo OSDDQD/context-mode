@@ -48,7 +48,7 @@
  * were blind rather than pretending they agreed.
  */
 
-import { join } from "node:path";
+import { isAbsolute, join, relative } from "node:path";
 
 import {
   chunkIdentity, fuseRankedLists, type LexicalResult, type RankedList,
@@ -102,6 +102,12 @@ export interface FindCandidate extends LexicalResult {
   signals: FindSignal[];
   /** Matching lines in this file on the grep page that produced it. */
   matches?: number;
+  /**
+   * The content match this row represents is a DEFINITION (fff's
+   * `classifyDefinitions`), not a usage. Set by `contentCandidates`, which
+   * also promotes such rows inside the content list.
+   */
+  isDefinition?: boolean;
   /** Files the graph places next to this one, best first. */
   relatedFiles?: string[];
   /** fff's git status word, when it supplied one. */
@@ -177,18 +183,90 @@ export function graphSignalSeeds(env: NodeJS.ProcessEnv = process.env): number {
 }
 
 // ─────────────────────────────────────────────────────────
+// Tuning constants — each one is a number the fusion's behaviour rests on
+// ─────────────────────────────────────────────────────────
+
+/**
+ * RRF damping for the `ctx_find` fusion.
+ *
+ * k = 60 comes from the original RRF paper, where the lists were TREC runs of a
+ * thousand documents; here every list is about twenty rows. At 60 the first row
+ * contributes 1/61 and the twentieth 1/80 — a spread of ×1.33, which erases the
+ * intra-list order the sources paid to produce (fff's frecency-aware ranking,
+ * FTS5's bm25) and lets rank 20 in two lists outrank rank 1 in one. At 12 the
+ * same spread is ×2.46: agreement between signals still decides ties, but a
+ * list's leader is no longer interchangeable with its tail.
+ *
+ * Not lowered further: below ~5 the fusion degenerates into "whatever the
+ * single most confident list said", which is the state this tool exists to
+ * leave. The graph list keeps its 0.5 weight, so with this k it can reach the
+ * tail below rank ~12 — the tail is where a neighbourhood belongs.
+ */
+export const FIND_RRF_K = 12;
+
+/**
+ * Matching lines fff may collect from ONE file per grep page.
+ *
+ * `contentCandidates` collapses every match in a file into a single candidate,
+ * so the native default of 200 ships up to 200 line strings across the FFI to
+ * produce one row and a counter. A handful is kept rather than one so that a
+ * definition line further down the file can still be seen and promoted (see
+ * `classifyDefinitions`), which one match per file would make impossible.
+ */
+const GREP_MATCHES_PER_FILE = 4;
+
+/**
+ * Wall-clock ceiling on one grep page. `ctx_find` is interactive and four other
+ * signals are already answering; a grep that has not finished sweeping a large
+ * tree in this long should return what it has and let the coverage line say the
+ * page was partial, rather than hold the whole call.
+ */
+const GREP_TIME_BUDGET_MS = 1500;
+
+/**
+ * How much deeper the fff arms fetch when a `scope` is set.
+ *
+ * Neither `fileSearch` nor `grep` takes a path constraint, so scope is a
+ * post-filter — and a post-filter after a 20-row page returns nothing at all
+ * whenever the top 20 happen to live outside the subtree, which reads as "no
+ * such file" rather than "look further". Fetching wider and filtering is the
+ * only way to answer a scoped query honestly.
+ */
+const SCOPED_FETCH_FACTOR = 10;
+
+/** Ceiling on the widened scoped fetch — a scoped query is not a tree dump. */
+const SCOPED_FETCH_MAX = 500;
+
+/**
+ * Extra grep pages pulled while a scope is set and the in-scope pool is still
+ * short. Bounded: grep pages by file in frecency order, so a subtree that never
+ * appears is a subtree with no matches, and walking the whole cursor to prove
+ * it would cost more than the answer is worth.
+ */
+const SCOPED_GREP_MAX_PAGES = 5;
+
+// ─────────────────────────────────────────────────────────
 // Seams — everything this module talks to, as the least it needs
 // ─────────────────────────────────────────────────────────
 
-/** The two `ContentStore` methods the lexical and semantic arms use. */
+/**
+ * The two `ContentStore` methods the lexical and semantic arms use.
+ *
+ * The parameter names are the store's own (`store.ts` `searchWithFallbackMeta`):
+ * the fifth argument is a SOURCE-LABEL match mode (`like` / `exact` / …), not a
+ * search mode, and the sixth is the session-id allow-set that keeps a shared
+ * database from answering with another project's chunks. Both were nameless
+ * here, and the allow-set was missing entirely — a positional seam that quietly
+ * disagrees with the implementation is how the wrong argument gets passed.
+ */
 export interface FindStore {
   searchWithFallbackMeta(
     query: string,
     limit: number,
     source?: string,
     contentType?: "code" | "prose",
-    mode?: string,
-    allowSet?: Set<string>,
+    sourceMatchMode?: string,
+    sessionIdAllowSet?: Set<string>,
   ): { results: Array<Record<string, unknown>>; completeness: SearchCompleteness };
   rawDb(): unknown;
 }
@@ -217,6 +295,13 @@ export interface FindOptions {
   type?: FindType;
   /** Source label for the lexical and semantic arms. */
   source?: string;
+  /**
+   * Session ids whose chunks the lexical arm may answer with. Absent means "no
+   * restriction", which is right for a per-project database and wrong for a
+   * shared one: without it `ctx_find` reads chunks captured in other projects'
+   * sessions, while `ctx_search` (which does pass it) does not.
+   */
+  sessionIdAllowSet?: Set<string>;
   env?: NodeJS.ProcessEnv;
   /** Null when the knowledge base could not be opened. */
   store?: FindStore | null;
@@ -270,31 +355,60 @@ function fileCandidate(init: {
   };
 }
 
-/** fff filename hits, in fff's own order (frecency-aware fuzzy ranking). */
+/**
+ * fff filename hits, in fff's own order (frecency-aware fuzzy ranking), with
+ * exact matches lifted to the front.
+ *
+ * fff ranks by a blended `total` in which frecency, path distance and the
+ * combo-match boost can all outweigh the fact that a file is LITERALLY called
+ * what was typed. That blend is right for an editor's "open file" palette,
+ * where the hot files are the likely targets; it is wrong for a search whose
+ * query is a name. So `exactMatch` — the one field of the score breakdown that
+ * says something the blended order cannot — is read back out and used to
+ * partition the list. Nothing else is re-applied: `frecencyBoost` and the rest
+ * are already inside `total`, and adding them again would double-count the
+ * signal fff already weighed.
+ *
+ * `scores` is positionally aligned with `items` by `normalizeSearchResult`,
+ * including across drops; a missing entry simply means "not exact".
+ */
 export function filenameCandidates(
   result: FffSearchResult,
   opts: { scope?: string } = {},
 ): FindCandidate[] {
-  const out: FindCandidate[] = [];
-  for (const item of result.items ?? []) {
-    if (!inScope(item.relativePath, opts.scope)) continue;
-    out.push(fileCandidate({
+  const exact: FindCandidate[] = [];
+  const rest: FindCandidate[] = [];
+  (result.items ?? []).forEach((item, i) => {
+    if (!inScope(item.relativePath, opts.scope)) return;
+    const candidate = fileCandidate({
       path: item.path,
       relativePath: item.relativePath,
       signal: "filename",
       content: "",
       gitStatus: item.gitStatus,
-    }));
-  }
-  return out;
+    });
+    (result.scores?.[i]?.exactMatch ? exact : rest).push(candidate);
+  });
+  return [...exact, ...rest];
 }
 
 /**
- * fff grep hits, collapsed to one candidate per FILE.
+ * fff grep hits, collapsed to one candidate per FILE, definitions first.
  *
  * Per-file, not per-match: forty hits in one file is one answer, and letting it
  * occupy forty of the fused list's slots would hand the whole result set to
  * whichever file happens to repeat the token most.
+ *
+ * The definition pass is why `classifyDefinitions` is switched on. Rust already
+ * decides, per line, whether the match is a declaration or a use; before this,
+ * that verdict crossed the FFI and was dropped, so `ctx_find("fuseRankings")`
+ * ranked the file that CALLS it — usually many files, in frecency order —
+ * exactly as high as the file that DECLARES it. Two things change here:
+ * the row's representative line becomes the definition when the file has one
+ * (a caller reading the snippet sees the signature, not a call site), and rows
+ * with a definition are lifted above rows without one, preserving fff's order
+ * inside each group. This is a within-list promotion, not a score: the fusion
+ * still decides whether the content signal wins at all.
  */
 export function contentCandidates(
   result: FffGrepResult,
@@ -304,43 +418,118 @@ export function contentCandidates(
   for (const match of result.items ?? []) {
     if (!inScope(match.relativePath, opts.scope)) continue;
     const rel = toPosix(match.relativePath);
+    const line = String(match.lineContent ?? "").trim().slice(0, 300);
     const existing = byFile.get(rel);
     if (existing) {
       existing.matches = (existing.matches ?? 1) + 1;
+      // A definition found later in the file replaces the first usage as what
+      // this row shows — the first match is only "first" because grep reads
+      // top to bottom, which says nothing about which line answers the query.
+      if (match.isDefinition && !existing.isDefinition) {
+        existing.isDefinition = true;
+        existing.line = match.lineNumber;
+        existing.content = line;
+        existing.title = match.lineNumber > 0 ? `${rel}:${match.lineNumber}` : rel;
+      }
       continue;
     }
-    byFile.set(rel, fileCandidate({
+    const candidate = fileCandidate({
       path: match.path,
       relativePath: match.relativePath,
       signal: "content",
-      content: String(match.lineContent ?? "").trim().slice(0, 300),
+      content: line,
       line: match.lineNumber,
       matches: 1,
       gitStatus: match.gitStatus,
-    }));
+    });
+    if (match.isDefinition) candidate.isDefinition = true;
+    byFile.set(rel, candidate);
   }
-  return [...byFile.values()];
+  const rows = [...byFile.values()];
+  const defs = rows.filter(r => r.isDefinition);
+  return defs.length > 0 && defs.length < rows.length
+    ? [...defs, ...rows.filter(r => !r.isDefinition)]
+    : rows;
 }
 
-/** Rows out of the FTS5 store (or the vector scan) as chunk candidates. */
+/**
+ * The prefix `code-index.ts` writes for a file-backed source:
+ * `code:<relpath>` inside the project, `code:<abspath>` outside it.
+ */
+const CODE_SOURCE_PREFIX = "code:";
+
+/**
+ * The project-relative path a `code:` source label names, or null if the label
+ * is not one, points outside `projectDir`, or no project dir was supplied.
+ */
+function codeSourcePath(source: string, projectDir?: string): string | null {
+  if (!projectDir || !source.startsWith(CODE_SOURCE_PREFIX)) return null;
+  const raw = source.slice(CODE_SOURCE_PREFIX.length).trim();
+  if (!raw) return null;
+  const rel = toPosix(isAbsolute(raw) ? relative(projectDir, raw) : raw);
+  if (!rel || rel.startsWith("../") || isAbsolute(rel)) return null;
+  return rel;
+}
+
+/**
+ * Rows out of the FTS5 store (or the vector scan) as candidates.
+ *
+ * Chunks of an INDEXED FILE come back as file candidates. One file used to
+ * enter the fusion under two identities — `file:src/store.ts` from fff and
+ * `chunk:code:src/store.ts…` from FTS5 — which never collapsed, so the two
+ * signals that agreed most strongly about a file each spent a slot saying so
+ * separately, and the agreement itself was invisible in the ranking. Recognising
+ * the `code:` label converts the row to the file identity the fff arms already
+ * use, and the chunk's text stays on as the row's snippet: the reader gets the
+ * file, plus the indexed text that matched, in one line instead of two.
+ *
+ * Chunks of anything else (captured output, fetched docs, notes) keep the chunk
+ * identity — they are not files and stay individually addressable.
+ */
 export function chunkCandidates(
   rows: Array<Record<string, unknown>>,
   signal: FindSignal,
+  opts: { projectDir?: string; scope?: string } = {},
 ): FindCandidate[] {
-  return rows.map(row => {
+  const out: FindCandidate[] = [];
+  /** Files already represented in THIS list — a second chunk of one file is
+   *  the same answer, and collapsing it here keeps the list's ranks honest. */
+  const seenFiles = new Set<string>();
+
+  for (const row of rows) {
     const base = {
       title: String(row.title ?? "Untitled"),
       content: String(row.content ?? ""),
       source: String(row.source ?? "unknown"),
     };
-    return {
+
+    const rel = codeSourcePath(base.source, opts.projectDir);
+    if (rel) {
+      if (seenFiles.has(rel)) continue;
+      if (!inScope(rel, opts.scope)) continue;
+      seenFiles.add(rel);
+      out.push({
+        ...row,
+        ...base,
+        key: `file:${rel}`,
+        kind: "file",
+        title: rel,
+        path: join(opts.projectDir as string, rel),
+        relativePath: rel,
+        signals: [signal],
+      } as FindCandidate);
+      continue;
+    }
+
+    out.push({
       ...row,
       ...base,
       key: `chunk:${chunkIdentity(base)}`,
       kind: "chunk" as const,
       signals: [signal],
-    } as FindCandidate;
-  });
+    } as FindCandidate);
+  }
+  return out;
 }
 
 /**
@@ -402,34 +591,82 @@ export function relatedTail(result: RelatedResult, max = 3): string[] {
 const SIGNAL_ORDER = new Map<FindSignal, number>(FIND_SIGNALS.map((s, i) => [s, i]));
 
 /**
+ * What every list said about a key, accumulated as the lists are produced.
+ *
+ * Kept separate from the ranking because RRF keeps the FIRST row object it sees
+ * for a key and discards the rest, so the merged row has no memory of the other
+ * lists it appeared in. That memory is exactly what a reader needs — one signal
+ * is a guess, three agreeing is an answer.
+ *
+ * It is a standing index rather than a pass because `runFind` needs the ranking
+ * twice: once early, to pick graph seeds, and once at the end over every list.
+ * Rebuilding provenance for the second call meant walking the same rows twice
+ * and throwing the first set of maps away.
+ */
+export interface FindProvenance {
+  signals: Map<string, Set<FindSignal>>;
+  annotations: Map<string, { line?: number; matches?: number; relatedFiles?: string[] }>;
+}
+
+export function createFindProvenance(): FindProvenance {
+  return { signals: new Map(), annotations: new Map() };
+}
+
+/** Fold one signal's list into the index. Call order does not matter. */
+export function recordProvenance(
+  index: FindProvenance,
+  signal: FindSignal,
+  rows: FindCandidate[],
+): void {
+  for (const row of rows) {
+    let seen = index.signals.get(row.key);
+    if (!seen) index.signals.set(row.key, (seen = new Set()));
+    seen.add(signal);
+    // A file can arrive from `filename` with no line and from `content` with
+    // one. Whichever row object wins the fusion should still carry both.
+    const ann = index.annotations.get(row.key) ?? {};
+    if (row.line != null && ann.line == null) ann.line = row.line;
+    if (row.matches != null) ann.matches = Math.max(ann.matches ?? 0, row.matches);
+    if (row.relatedFiles?.length) ann.relatedFiles = row.relatedFiles;
+    index.annotations.set(row.key, ann);
+  }
+}
+
+/**
+ * Attach graph neighbours to a key.
+ *
+ * Keyed rather than written through the row object: the seed rows come out of
+ * the seed ranking, which may or may not be the same object the final fusion
+ * keeps, and the annotation has to survive either way.
+ */
+export function annotateRelated(
+  index: FindProvenance,
+  key: string,
+  relatedFiles: string[],
+): void {
+  const ann = index.annotations.get(key) ?? {};
+  ann.relatedFiles = relatedFiles;
+  index.annotations.set(key, ann);
+}
+
+/**
  * Fuse the signal lists and stamp each surviving row with every signal that
  * produced it.
  *
- * The provenance pass is separate from the fusion on purpose: RRF keeps the
- * FIRST row object it sees for a key and discards the rest, so the merged row
- * has no memory of the other lists it appeared in. That memory is exactly what
- * a reader needs — one signal is a guess, three agreeing is an answer.
+ * `opts.provenance` lets a caller that already accumulated the index hand it
+ * over instead of paying for it a second time; without it the index is built
+ * here from the lists, which is what every caller outside `runFind` wants.
  */
 export function fuseFindSignals(
   lists: Array<{ signal: FindSignal; rows: FindCandidate[]; weight?: number }>,
-  opts: { limit: number; k?: number },
+  opts: { limit: number; k?: number; provenance?: FindProvenance },
 ): { rows: FindCandidate[]; poolSize: number } {
-  const provenance = new Map<string, Set<FindSignal>>();
-  const annotations = new Map<string, { line?: number; matches?: number; relatedFiles?: string[] }>();
-  for (const list of lists) {
-    for (const row of list.rows) {
-      let seen = provenance.get(row.key);
-      if (!seen) provenance.set(row.key, (seen = new Set()));
-      seen.add(list.signal);
-      // A file can arrive from `filename` with no line and from `content` with
-      // one. Whichever row object wins the fusion should still carry both.
-      const ann = annotations.get(row.key) ?? {};
-      if (row.line != null && ann.line == null) ann.line = row.line;
-      if (row.matches != null) ann.matches = Math.max(ann.matches ?? 0, row.matches);
-      if (row.relatedFiles?.length) ann.relatedFiles = row.relatedFiles;
-      annotations.set(row.key, ann);
-    }
+  let index = opts.provenance;
+  if (!index) {
+    index = createFindProvenance();
+    for (const list of lists) recordProvenance(index, list.signal, list.rows);
   }
+  const { signals: provenance, annotations } = index;
 
   const ranked: Array<RankedList<FindCandidate>> = lists
     .filter(l => l.rows.length > 0)
@@ -437,7 +674,7 @@ export function fuseFindSignals(
 
   const fused = fuseRankedLists<FindCandidate>(ranked, {
     limit: opts.limit,
-    k: opts.k,
+    k: opts.k ?? FIND_RRF_K,
     identity: row => row.key,
   });
 
@@ -468,6 +705,63 @@ function skipped(signal: FindSignal, detail: string): SignalCoverage {
   return { signal, shown: 0, total: 0, detail, skipped: true };
 }
 
+/** How deep an fff arm fetches, given that `scope` can only be a post-filter. */
+function fetchDepth(perSignal: number, scope?: string): number {
+  return scope
+    ? Math.min(SCOPED_FETCH_MAX, perSignal * SCOPED_FETCH_FACTOR)
+    : perSignal;
+}
+
+/**
+ * One grep page — or several, when a scope is set and the pages seen so far
+ * have not produced enough files inside it.
+ *
+ * fff walks files in frecency order and takes no path constraint, so a subtree
+ * that is not currently hot can sit entirely behind the first page. Following
+ * the cursor is the only way to reach it; the page budget is what stops that
+ * from turning into a full-tree sweep for a subtree with nothing to say.
+ *
+ * The pages are merged into one result so the per-file collapse downstream sees
+ * a whole file's matches at once. `totalMatched` and `filesSearched` are summed
+ * because fff reports both per page; the cursor and the eligible-file count
+ * come from the last page, which is what "is there more" is asked of.
+ */
+function collectGrepPages(
+  finder: FindFinder,
+  query: string,
+  opts: { pageSize: number; scope?: string; want: number; maxPages: number },
+): FffGrepResult | null {
+  let cursor: FffGrepResult["nextCursor"] = null;
+  let last: FffGrepResult | null = null;
+  const items: FffGrepResult["items"] = [];
+  const inScopeFiles = new Set<string>();
+  let totalMatched = 0;
+  let filesSearched = 0;
+
+  for (let page = 0; page < opts.maxPages; page++) {
+    const result = finder.grep(query, {
+      pageSize: opts.pageSize,
+      maxMatchesPerFile: GREP_MATCHES_PER_FILE,
+      timeBudgetMs: GREP_TIME_BUDGET_MS,
+      classifyDefinitions: true,
+      ...(cursor ? { cursor } : {}),
+    });
+    if (!result.ok) break;
+    const value = result.value;
+    last = value;
+    for (const match of value.items ?? []) {
+      items.push(match);
+      if (inScope(match.relativePath, opts.scope)) inScopeFiles.add(toPosix(match.relativePath));
+    }
+    totalMatched += value.totalMatched ?? 0;
+    filesSearched += value.filesSearched ?? 0;
+    cursor = value.nextCursor ?? null;
+    if (!cursor || inScopeFiles.size >= opts.want) break;
+  }
+
+  return last ? { ...last, items, totalMatched, filesSearched } : null;
+}
+
 /**
  * Run every enabled signal, fuse, and report what each one saw.
  *
@@ -487,6 +781,16 @@ export async function runFind(opts: FindOptions): Promise<FindOutcome> {
   // Candidate pool per signal: deep enough that the fusion has something to
   // disagree about, shallow enough that a wide grep does not dominate the pool.
   const perSignal = Math.max(limit * 2, 20);
+  // What the fff arms ask for. Equal to `perSignal` unscoped; wider when a
+  // scope is set, because scope can only be applied after the page comes back.
+  const fffDepth = fetchDepth(perSignal, opts.scope);
+  // Provenance is accumulated as the lists are produced, so the seed ranking
+  // and the final fusion share one index instead of building two.
+  const provenance = createFindProvenance();
+  const addList = (list: SignalList) => {
+    lists.push(list);
+    recordProvenance(provenance, list.signal, list.rows);
+  };
 
   // ── fff arms: filename + content ──────────────────────
   let finder: FindFinder | null = null;
@@ -505,10 +809,11 @@ export async function runFind(opts: FindOptions): Promise<FindOutcome> {
   if (wanted("filename")) {
     if (finder) {
       try {
-        const result = finder.fileSearch(opts.query, { pageSize: perSignal });
+        const result = finder.fileSearch(opts.query, { pageSize: fffDepth });
         if (result.ok) {
-          const rows = filenameCandidates(result.value, { scope: opts.scope });
-          lists.push({
+          const rows = filenameCandidates(result.value, { scope: opts.scope })
+            .slice(0, perSignal);
+          addList({
             signal: "filename",
             rows,
             coverage: {
@@ -531,13 +836,21 @@ export async function runFind(opts: FindOptions): Promise<FindOutcome> {
   if (wanted("content")) {
     if (finder) {
       try {
-        const result = finder.grep(opts.query, {
-          pageSize: perSignal,
-          classifyDefinitions: true,
+        // Grep's `pageSize` counts MATCHES across all files, not files. With
+        // at most `GREP_MATCHES_PER_FILE` lines per file, asking for that
+        // multiple is what makes a page worth `perSignal` distinct FILES —
+        // which is the unit the fused list is built from. A scope widens the
+        // number of PAGES rather than the page: grep ships line content, and
+        // following the cursor reaches the same distance for a fraction of it.
+        const value = collectGrepPages(finder, opts.query, {
+          pageSize: perSignal * GREP_MATCHES_PER_FILE,
+          scope: opts.scope,
+          want: perSignal,
+          maxPages: opts.scope ? SCOPED_GREP_MAX_PAGES : 1,
         });
-        if (result.ok) {
-          const value = result.value;
-          const rows = contentCandidates(value, { scope: opts.scope });
+        if (value) {
+          const rows = contentCandidates(value, { scope: opts.scope })
+            .slice(0, perSignal);
           // Grep pages by FILE and `totalMatched` counts only this page —
           // the denominator that means anything is files scanned vs eligible.
           const grepCov: GrepCoverage = {
@@ -547,7 +860,7 @@ export async function runFind(opts: FindOptions): Promise<FindOutcome> {
             filesEligible: value.filteredFileCount,
             morePages: value.nextCursor != null,
           };
-          lists.push({
+          addList({
             signal: "content",
             rows,
             coverage: {
@@ -573,9 +886,13 @@ export async function runFind(opts: FindOptions): Promise<FindOutcome> {
     try {
       const found = opts.store.searchWithFallbackMeta(
         opts.query, perSignal, opts.source, undefined, "like",
+        opts.sessionIdAllowSet,
       );
-      const rows = chunkCandidates(found.results ?? [], "lexical");
-      lists.push({
+      const rows = chunkCandidates(found.results ?? [], "lexical", {
+        projectDir: opts.projectDir,
+        scope: opts.scope,
+      });
+      addList({
         signal: "lexical",
         rows,
         coverage: {
@@ -600,9 +917,10 @@ export async function runFind(opts: FindOptions): Promise<FindOutcome> {
       const rows = chunkCandidates(
         await opts.semantic(opts.query, perSignal, opts.source),
         "semantic",
+        { projectDir: opts.projectDir, scope: opts.scope },
       );
       if (rows.length > 0) {
-        lists.push({
+        addList({
           signal: "semantic",
           rows,
           coverage: { signal: "semantic", shown: rows.length, total: null },
@@ -624,15 +942,19 @@ export async function runFind(opts: FindOptions): Promise<FindOutcome> {
   // signals to tell it where to stand before it can say what is nearby.
   const graphWeight = graphSignalWeight(env);
   let graphCoverage: SignalCoverage | null = null;
-  /** `file:<rel>` → neighbour paths, applied to the ORIGINAL list rows below. */
-  const seedTails = new Map<string, string[]>();
   if (wanted("graph") && opts.openGraph && graphWeight > 0) {
-    const seedRows = fuseFindSignals(
+    // A seed RANKING, not a second fusion. The seeds need nothing but an order
+    // over the two file lists, so this is a bare RRF at the fusion's own k.
+    // It used to call `fuseFindSignals`, which rebuilt the provenance and
+    // annotation maps and allocated a fresh row object per candidate — all of
+    // it discarded except three paths, and all of it rebuilt again by the real
+    // fusion below. Those maps are now the index both passes share.
+    const seedRows = fuseRankedLists<FindCandidate>(
       lists
-        .filter(l => l.signal === "filename" || l.signal === "content")
-        .map(l => ({ signal: l.signal, rows: l.rows })),
-      { limit: graphSignalSeeds(env) },
-    ).rows.filter(r => r.kind === "file" && r.path);
+        .filter(l => (l.signal === "filename" || l.signal === "content") && l.rows.length > 0)
+        .map(l => ({ rows: l.rows })),
+      { limit: graphSignalSeeds(env), k: FIND_RRF_K, identity: row => row.key },
+    ).filter(r => r.kind === "file" && r.path);
 
     if (seedRows.length === 0) {
       graphCoverage = skipped("graph", "no file seeds");
@@ -656,11 +978,10 @@ export async function runFind(opts: FindOptions): Promise<FindOutcome> {
                 seeds.push({ relativePath: seed.relativePath as string, result });
                 // Annotate the seed itself — `[related: …]` is useful on the
                 // row the caller is most likely to open, not only on the
-                // neighbours the graph added. Keyed, not written through
-                // `seed`: seed rows are copies made by the pre-fusion, so the
-                // tail has to be applied to the rows that enter the real one.
+                // neighbours the graph added. Written into the shared index by
+                // key, so it reaches whichever row object the fusion keeps.
                 const tail = relatedTail(result);
-                if (tail.length > 0) seedTails.set(seed.key, tail);
+                if (tail.length > 0) annotateRelated(provenance, seed.key, tail);
               }
             }
             const rows = graphCandidates(seeds, {
@@ -668,7 +989,7 @@ export async function runFind(opts: FindOptions): Promise<FindOutcome> {
               scope: opts.scope,
             });
             if (rows.length > 0) {
-              lists.push({
+              addList({
                 signal: "graph",
                 rows,
                 coverage: {
@@ -685,6 +1006,10 @@ export async function runFind(opts: FindOptions): Promise<FindOutcome> {
               );
             }
           } finally {
+            // Releases the pooled lease; the connection stays open for the next
+            // ctx_find in this session (src/graph/db.ts, handle pool). Still
+            // mandatory in a `finally` — a lease that is never released pins
+            // its entry against eviction for the life of the process.
             try { handle.close(); } catch { /* best-effort */ }
           }
         }
@@ -699,22 +1024,13 @@ export async function runFind(opts: FindOptions): Promise<FindOutcome> {
   }
 
   // ── fuse ──────────────────────────────────────────────
-  if (seedTails.size > 0) {
-    for (const list of lists) {
-      for (const row of list.rows) {
-        const tail = seedTails.get(row.key);
-        if (tail) row.relatedFiles = tail;
-      }
-    }
-  }
-
   const fused = fuseFindSignals(
     lists.map(l => ({
       signal: l.signal,
       rows: l.rows,
       weight: l.signal === "graph" ? graphWeight : 1,
     })),
-    { limit },
+    { limit, k: FIND_RRF_K, provenance },
   );
 
   for (const list of lists) coverage.push(list.coverage);

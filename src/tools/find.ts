@@ -19,13 +19,15 @@
 import { z } from "zod";
 
 import { acquireFinder } from "../fff/index.js";
+import type { FffResult } from "../fff/types.js";
 import { openGraphDb } from "../graph/db.js";
 import {
   formatFindCompletenessLine, formatSignalCoverageLine,
 } from "../search/completeness.js";
+import { CrossQueryDeduper } from "../search/dedup.js";
 import {
   FIND_TYPES, findToolEnabled, formatFindRows, runFind,
-  type FindFinder, type FindStore, type FindType,
+  type FindCandidate, type FindFinder, type FindStore, type FindType,
 } from "../search/find.js";
 import {
   backfillVectors, semanticCandidates, type HybridDb,
@@ -68,6 +70,103 @@ async function semanticProvider(
   } catch {
     return [];
   }
+}
+
+/**
+ * The byte envelope one `ctx_find` answer is allowed to occupy.
+ *
+ * Same 40 KB as `ctx_search`, and the same number on purpose: the cap is a
+ * property of what a tool response may cost the conversation, not of which
+ * pipeline produced it. A plugin whose whole premise is that raw output must
+ * not reach the context window cannot be the thing that floods it — and
+ * `ctx_find` could, since `limit` reaches 50 and a row carries a snippet, a
+ * related-files tail and, for chunk rows, whatever the store held.
+ */
+export const FIND_MAX_TOTAL = 40 * 1024;
+
+/**
+ * Cost of one rendered row, in the shape `formatFindRows` prints it.
+ *
+ * An estimate rather than a render: `formatFindRows` numbers rows in one pass,
+ * so rendering a row alone to measure it would either restart the numbering or
+ * force a second renderer to exist. The estimate tracks the real layout — head,
+ * indented body, related tail — within a few bytes per row, which is the right
+ * precision for a 40 KB guard.
+ */
+function rowCost(row: FindCandidate, body: string): number {
+  const head = row.kind === "file"
+    ? row.title.length
+    : row.source.length + row.title.length + 3;
+  const related = row.relatedFiles?.length
+    ? row.relatedFiles.join(", ").length + 16
+    : 0;
+  // Numbering, the `[signal+signal]` marks, indentation and newlines.
+  return head + body.length + related + row.signals.join("+").length + 24;
+}
+
+export interface BudgetedFindRows {
+  /** Rows to render, each with `content` already reduced to its final body. */
+  rows: FindCandidate[];
+  /** Lower-ranked rows the byte cap kept out. */
+  dropped: number;
+  /** The deduper that judged these rows — ask it for the response footer. */
+  deduper: CrossQueryDeduper;
+}
+
+/**
+ * Apply the response budget and the cross-row dedup before anything is printed.
+ *
+ * Two distinct savings, both of which `ctx_find` was missing:
+ *
+ *  - **Dedup.** One file legitimately arrives twice — once as `file:<rel>` from
+ *    the fff arms, once as a `code:<rel>` chunk from FTS5 — and the fusion keeps
+ *    both because their identities differ. The second copy's body is then the
+ *    same bytes the reader just read. {@link CrossQueryDeduper} replaces only
+ *    text that is byte-identical to something already shown above, and only
+ *    with a pointer to where it was shown; a different window over the same
+ *    chunk is new information and is marked, not suppressed.
+ *  - **Budget.** Rows are admitted in rank order until the next one would cross
+ *    `maxTotal`. The first row is always admitted: a single oversized row must
+ *    truncate the tail, never produce an empty answer.
+ *
+ * Bodies are resolved here rather than inside the formatter so that what is
+ * measured is exactly what is printed — the formatter is handed finished text
+ * and an identity snippet function.
+ */
+export function budgetFindRows(
+  rows: FindCandidate[],
+  opts: {
+    query: string;
+    snippet: (content: string, query: string) => string;
+    maxTotal?: number;
+    deduper?: CrossQueryDeduper;
+  },
+): BudgetedFindRows {
+  const maxTotal = opts.maxTotal ?? FIND_MAX_TOTAL;
+  const deduper = opts.deduper ?? new CrossQueryDeduper();
+  const kept: FindCandidate[] = [];
+  let total = 0;
+
+  for (const row of rows) {
+    let body = row.content ? opts.snippet(row.content, opts.query) : "";
+    // An empty body has nothing to repeat: running it through the deduper
+    // would replace "no body at all" with a pointer line, i.e. spend bytes to
+    // save none.
+    if (body) {
+      const decision = deduper.consider(row, body, opts.query);
+      if (decision.kind === "suppress") {
+        body = CrossQueryDeduper.pointerLine(decision.firstQuery);
+      } else if (decision.kind === "further") {
+        body = `(further match) ${body}`;
+      }
+    }
+    const cost = rowCost(row, body);
+    if (kept.length > 0 && total + cost > maxTotal) break;
+    total += cost;
+    kept.push({ ...row, content: body });
+  }
+
+  return { rows: kept, dropped: rows.length - kept.length, deduper };
 }
 
 /**
@@ -178,18 +277,49 @@ EXAMPLE: ctx_find(query: "what did we decide about caching", type: "memory", lim
         let store: FindStore | null = null;
         try { store = getStore() as unknown as FindStore; } catch { store = null; }
 
-        // One finder for the whole call: the selection drain and both fff
-        // signals share it, and acquiring twice would open two native indexes.
-        let finder: FindFinder | null = null;
+        // One finder for the whole call, acquired LAZILY — on first use inside
+        // `runFind`, not here.
+        //
+        // Acquiring unconditionally charged every call for a native index build
+        // and up to the fff scan timeout of tree walking, including the calls
+        // that cannot use a finder at all: `type: "memory"` admits only the
+        // lexical and semantic signals, and the per-signal env switches can cut
+        // the fff arms out of any other type. `runFind` already computes that
+        // admitted set (TYPE_SIGNALS × `signalEnabled`) and calls this seam only
+        // when a signal fff actually serves survives it, so deferring keeps ONE
+        // source of truth for "does this call need a finder" instead of a copy
+        // of the type table that would drift.
+        //
+        // The promise — not the result — is memoised, so two arms asking at
+        // once share one acquisition rather than opening two native indexes.
+        let acquisition: Promise<FffResult<FindFinder>> | null = null;
         let learned = 0;
-        try {
-          const acquired = await acquireFinder(projectDir);
-          if (acquired.ok) finder = acquired.value as unknown as FindFinder;
-        } catch { /* fff unavailable — degrade */ }
-
-        if (finder && findTrackingEnabled()) {
-          learned = await drainSelections(finder, getSessionDbPath());
-        }
+        const acquireOnce = (): Promise<FffResult<FindFinder>> => {
+          acquisition ??= (async () => {
+            let acquired: FffResult<FindFinder>;
+            try {
+              acquired = await acquireFinder(projectDir) as unknown as FffResult<FindFinder>;
+            } catch (err) {
+              // `acquireFinder` does not throw by contract; belt and braces.
+              // `unavailable` keeps a degraded machine from being reported as
+              // an operational error in the coverage line.
+              acquired = {
+                ok: false,
+                unavailable: true,
+                error: err instanceof Error ? err.message : String(err),
+              };
+            }
+            // Step 3 of the ranking loop still has to run BEFORE the filename
+            // search, so the current query is ranked with everything learned so
+            // far. `runFind` calls this seam before it runs either fff arm, so
+            // "on first use" is still early enough.
+            if (acquired.ok && findTrackingEnabled()) {
+              learned = await drainSelections(acquired.value, getSessionDbPath());
+            }
+            return acquired;
+          })();
+          return acquisition;
+        };
 
         const outcome = await runFind({
           query,
@@ -199,9 +329,7 @@ EXAMPLE: ctx_find(query: "what did we decide about caching", type: "memory", lim
           type: p.type,
           source: p.source,
           store,
-          acquireFinder: finder
-            ? async () => ({ ok: true as const, value: finder as FindFinder })
-            : undefined,
+          acquireFinder: acquireOnce,
           openGraph: dir => openGraphDb(dir),
           semantic: store
             ? (q, limit, sourceFilter) => semanticProvider(store as FindStore, q, limit, sourceFilter)
@@ -227,14 +355,28 @@ EXAMPLE: ctx_find(query: "what did we decide about caching", type: "memory", lim
           } catch { /* best-effort */ }
         }
 
-        const body = formatFindRows(outcome.rows, {
+        // Bodies are resolved, deduped and capped before rendering; the
+        // formatter is then handed finished text, so what was measured is
+        // exactly what is printed.
+        const budgeted = budgetFindRows(outcome.rows, {
           query,
           snippet: (content, q) => extractSnippet(content, q, 300),
+        });
+        const body = formatFindRows(budgeted.rows, {
+          query,
+          snippet: content => content,
         });
 
         const tails = [
           formatSignalCoverageLine(outcome.coverage),
           formatFindCompletenessLine(query, outcome.completeness),
+          // Truncation is stated, never silent: a ranked list that stops early
+          // must not read like a list that ended.
+          budgeted.dropped > 0
+            ? `> Output cap reached (${Math.round(FIND_MAX_TOTAL / 1024)} KB): ` +
+              `${budgeted.dropped} lower-ranked row(s) not shown. Narrow with scope/type or lower limit.`
+            : null,
+          budgeted.deduper.footer(),
           learned > 0
             ? `> Ranking feedback: ${learned} prior selection(s) fed back into filename ranking.`
             : null,

@@ -136,14 +136,39 @@ export type GraphOpenResult =
  * Never throws for a caller-fixable condition: a missing index, an incomplete
  * index and a drifted schema all come back as `{ ok: false }` with a message
  * the tool layer can print verbatim.
+ *
+ * The connection underneath is pooled per database file — see the pool section
+ * below for what that costs and what invalidates it. The contract callers see
+ * is unchanged: `handle.close()` is still the right thing to call in a
+ * `finally`, it just releases a lease instead of tearing down the connection.
+ * Pass `{ pool: false }` when the caller genuinely needs a private connection
+ * it alone owns (a test asserting close semantics, a one-shot probe).
  */
 export function openGraphDb(
   projectDir: string,
-  opts: { env?: NodeJS.ProcessEnv } = {},
+  opts: { env?: NodeJS.ProcessEnv; pool?: boolean } = {},
 ): GraphOpenResult {
   const env = opts.env ?? process.env;
   const dbPath = codegraphDbPath(projectDir);
 
+  if (opts.pool === false || graphPoolMax(env) <= 0) {
+    const opened = connectGraphDb(dbPath, projectDir, env);
+    if (!opened.ok) return opened;
+    return { ok: true, handle: privateHandle(opened, dbPath, projectDir) };
+  }
+  return acquirePooled(projectDir, dbPath, env);
+}
+
+/** Open + validate, with no pool involvement. The old `openGraphDb` body. */
+type Connected =
+  | { ok: true; db: DatabaseInstance; schemaVersion: number; indexState: string }
+  | { ok: false; reason: GraphOpenReason; message: string; schemaVersion?: number };
+
+function connectGraphDb(
+  dbPath: string,
+  projectDir: string,
+  env: NodeJS.ProcessEnv,
+): Connected {
   if (!existsSync(dbPath)) {
     return {
       ok: false,
@@ -176,19 +201,45 @@ export function openGraphDb(
     };
   }
 
-  let schemaVersion = 0;
-  let indexState = "";
+  const meta = readIndexIdentity(db, dbPath);
+  if (!meta.ok) {
+    closeQuietly(db);
+    return meta;
+  }
+
+  const refusal = validateIndex(meta.schemaVersion, meta.indexState, projectDir, env);
+  if (refusal) {
+    closeQuietly(db);
+    return refusal;
+  }
+
+  return { ok: true, db, schemaVersion: meta.schemaVersion, indexState: meta.indexState };
+}
+
+/**
+ * The two rows every caller is gated on: the schema version and the index
+ * state. Split out because a pooled connection has to re-read them whenever the
+ * file has been written to — the connection stays valid across a rebuild, but
+ * the numbers it was admitted on do not.
+ */
+function readIndexIdentity(
+  db: DatabaseInstance,
+  dbPath: string,
+): { ok: true; schemaVersion: number; indexState: string }
+  | { ok: false; reason: GraphOpenReason; message: string } {
   try {
     const row = db
       .prepare("SELECT MAX(version) AS v FROM schema_versions")
       .get() as { v?: number } | undefined;
-    schemaVersion = Number(row?.v ?? 0);
+    const schemaVersion = Number(row?.v ?? 0);
     const meta = db
       .prepare("SELECT value FROM project_metadata WHERE key = 'index_state'")
       .get() as { value?: string } | undefined;
-    indexState = String(meta?.value ?? "");
+    return { ok: true, schemaVersion, indexState: String(meta?.value ?? "") };
   } catch (err) {
-    closeQuietly(db);
+    // Reached both for a file that was never a codegraph index and for one that
+    // was truncated/corrupted under us — SQLite reports both as a malformed or
+    // missing table, and both mean the same thing here: do not guess, degrade.
     return {
       ok: false,
       reason: "schema-drift",
@@ -197,10 +248,17 @@ export function openGraphDb(
         "Falling back to the codegraph CLI.",
     };
   }
+}
 
+/** The pinned-schema and index-state gates. `null` when the index is usable. */
+function validateIndex(
+  schemaVersion: number,
+  indexState: string,
+  projectDir: string,
+  env: NodeJS.ProcessEnv,
+): { ok: false; reason: GraphOpenReason; message: string; schemaVersion?: number } | null {
   const max = schemaMax(env);
   if (schemaVersion < SCHEMA_MIN || schemaVersion > max) {
-    closeQuietly(db);
     return {
       ok: false,
       reason: "schema-drift",
@@ -214,7 +272,6 @@ export function openGraphDb(
   }
 
   if (indexState && indexState !== "complete") {
-    closeQuietly(db);
     return {
       ok: false,
       reason: "incomplete",
@@ -224,25 +281,290 @@ export function openGraphDb(
         "Indexing is probably still running — retry in a moment, or run `codegraph status` to check.",
     };
   }
+  return null;
+}
 
+function privateHandle(
+  c: { db: DatabaseInstance; schemaVersion: number; indexState: string },
+  dbPath: string,
+  projectDir: string,
+): GraphDbHandle {
   let closed = false;
-  const handle: GraphDbHandle = {
-    db,
+  return {
+    db: c.db,
     dbPath,
     projectDir,
-    schemaVersion,
-    indexState: indexState || "complete",
+    schemaVersion: c.schemaVersion,
+    indexState: c.indexState || "complete",
     close() {
       if (closed) return;
       closed = true;
-      closeQuietly(db);
+      closeQuietly(c.db);
     },
   };
-  return { ok: true, handle };
 }
 
 function closeQuietly(db: DatabaseInstance): void {
   try { db.close(); } catch { /* already closed */ }
+}
+
+// ─────────────────────────────────────────────────────────
+// Handle pool
+// ─────────────────────────────────────────────────────────
+
+/**
+ * One long-lived read-only connection per index file.
+ *
+ * Before this, every graph question opened its own connection: `ctx_find`'s
+ * graph signal did it once per call and every SQL `ctx_graph` action did it
+ * again. That is a file open, a WAL/-shm map, a `query_only` pragma and two
+ * schema SELECTs paid on the hot retrieval path, for a database that does not
+ * change between two calls a second apart.
+ *
+ * The connection is not the fragile part — SQLite readers see the writer's
+ * commits through an open connection without reopening. The fragile parts are
+ * (a) the file being *replaced* underneath the fd, and (b) the two numbers the
+ * connection was admitted on going stale. Both are checked per acquire, and
+ * both checks are `stat()`, never a re-open and never the 5 000-file freshness
+ * sweep (that has its own cache; see {@link checkFreshness}).
+ */
+interface PoolEntry {
+  db: DatabaseInstance;
+  /** Resolved db path — also the pool key. */
+  key: string;
+  schemaVersion: number;
+  indexState: string;
+  /** `dev:ino` at open time. A change means our fd points at a dead file. */
+  identity: string;
+  /** mtime+size of the db and its `-wal`. A change means the metadata may lie. */
+  content: string;
+  /** Outstanding leases. The connection must not be closed while this is > 0. */
+  leases: number;
+  /** Evicted or invalidated; close as soon as the last lease is released. */
+  doomed: boolean;
+}
+
+/** Insertion order is LRU order: {@link touch} moves a hit to the end. */
+const graphDbPool = new Map<string, PoolEntry>();
+
+/** Default ceiling on simultaneously-open index connections. */
+export const GRAPH_POOL_MAX = 4;
+
+/**
+ * How many index connections may be held open at once. `0` disables pooling.
+ *
+ * The bound exists for file descriptors, not memory: each entry holds the db,
+ * its `-wal` and its `-shm` open, so an unbounded pool in a long session that
+ * wanders across repositories is an fd leak that ends in EMFILE. Four covers
+ * the realistic case (a project plus a couple of sibling checkouts) and evicts
+ * anything beyond it.
+ */
+export function graphPoolMax(env: NodeJS.ProcessEnv = process.env): number {
+  const raw = env.CONTEXT_MODE_GRAPH_POOL_MAX;
+  if (raw === undefined || raw === "") return GRAPH_POOL_MAX;
+  const n = Number.parseInt(raw, 10);
+  return Number.isFinite(n) && n >= 0 ? n : GRAPH_POOL_MAX;
+}
+
+/**
+ * The two cheap facts that decide whether a cached connection is still the
+ * right one. `null` when the file is gone.
+ *
+ * `dev:ino` is the part that matters most. codegraph rebuilds an index by
+ * writing a new database and renaming it over the path; on POSIX the rename
+ * leaves our fd attached to the *unlinked* old inode, which keeps answering
+ * queries — correctly, about a version of the code that no longer exists, with
+ * no error anywhere. A path-only check cannot see that; an inode check can.
+ *
+ * On Windows `ino` may be 0 for every file, which collapses `identity` to a
+ * constant. The `content` half still catches an atomic replace there, because a
+ * replacement that happens to preserve both mtime and size does not occur in
+ * practice.
+ */
+function poolStamp(dbPath: string): { identity: string; content: string } | null {
+  let st: ReturnType<typeof statSync>;
+  try {
+    st = statSync(dbPath);
+  } catch {
+    return null;
+  }
+  let wal = "-";
+  try {
+    const w = statSync(`${dbPath}-wal`);
+    wal = `${w.mtimeMs}:${w.size}`;
+  } catch { /* no sidecar: not in WAL mode, or checkpointed away */ }
+  return { identity: `${st.dev}:${st.ino}`, content: `${st.mtimeMs}:${st.size}|${wal}` };
+}
+
+function acquirePooled(
+  projectDir: string,
+  dbPath: string,
+  env: NodeJS.ProcessEnv,
+): GraphOpenResult {
+  const key = resolve(dbPath);
+  // Stamped BEFORE any open, deliberately. If the file is replaced between the
+  // stamp and the open we record the OLD stamp while holding the NEW inode: the
+  // next acquire sees a mismatch and reopens — one wasted open, no wrong
+  // answers. Stamping after the open inverts the error into the unrecoverable
+  // one: the NEW stamp recorded against the OLD inode, pinning a dead file for
+  // the rest of the process.
+  const stamp = poolStamp(dbPath);
+  const cached = graphDbPool.get(key);
+
+  if (cached) {
+    if (!stamp) {
+      // The index was deleted while we held it open. The fd survives the unlink
+      // on POSIX and would go on serving the last indexed state indefinitely —
+      // strictly worse than reopening, because nothing looks wrong.
+      retire(cached);
+    } else if (cached.identity !== stamp.identity) {
+      retire(cached); // atomic rebuild: same path, new inode.
+    } else {
+      // Same file. The connection is fine; only the admission numbers can have
+      // moved, and only if somebody wrote.
+      if (cached.content !== stamp.content) {
+        const meta = readIndexIdentity(cached.db, dbPath);
+        if (!meta.ok) {
+          // Corrupted or truncated under us. Do not keep a connection that can
+          // no longer answer what it was admitted on.
+          retire(cached);
+          return meta;
+        }
+        cached.schemaVersion = meta.schemaVersion;
+        cached.indexState = meta.indexState;
+        cached.content = stamp.content;
+      }
+      // Re-run the gates on every hit, not just after a write: `schemaMax` also
+      // moves when the operator changes CONTEXT_MODE_GRAPH_SCHEMA_MAX, and a
+      // cached handle must never outlive the range it was admitted under.
+      const refusal = validateIndex(cached.schemaVersion, cached.indexState, projectDir, env);
+      if (refusal) {
+        retire(cached);
+        return refusal;
+      }
+      touch(cached);
+      return { ok: true, handle: leaseOf(cached, dbPath, projectDir) };
+    }
+  }
+
+  const opened = connectGraphDb(dbPath, projectDir, env);
+  if (!opened.ok) return opened;
+
+  if (!stamp) {
+    // `existsSync` inside `connectGraphDb` said yes after our stat said no — a
+    // race with the rebuild. The connection is usable but unstampable, so it is
+    // handed out privately rather than cached under a stamp we would have to
+    // invent.
+    return { ok: true, handle: privateHandle(opened, dbPath, projectDir) };
+  }
+
+  const entry: PoolEntry = {
+    db: opened.db,
+    key,
+    schemaVersion: opened.schemaVersion,
+    indexState: opened.indexState,
+    identity: stamp.identity,
+    content: stamp.content,
+    leases: 0,
+    doomed: false,
+  };
+  evictTo(graphPoolMax(env) - 1);
+  graphDbPool.set(key, entry);
+  return { ok: true, handle: leaseOf(entry, dbPath, projectDir) };
+}
+
+/**
+ * A handle over a pooled entry. `close()` releases the lease; the connection
+ * outlives it.
+ *
+ * `dbPath`/`projectDir` are per-lease rather than per-entry on purpose: two
+ * spellings of the same project (a symlinked checkout, a relative path) share
+ * one connection, but `checkFreshness` resolves the index's relative file rows
+ * against `projectDir`, so each caller must get back the root it asked about.
+ */
+function leaseOf(entry: PoolEntry, dbPath: string, projectDir: string): GraphDbHandle {
+  entry.leases++;
+  let released = false;
+  return {
+    db: entry.db,
+    dbPath,
+    projectDir,
+    schemaVersion: entry.schemaVersion,
+    indexState: entry.indexState || "complete",
+    close() {
+      if (released) return;
+      released = true;
+      entry.leases = Math.max(0, entry.leases - 1);
+      if (entry.doomed && entry.leases === 0) closeQuietly(entry.db);
+    },
+  };
+}
+
+/**
+ * Take an entry out of the pool and close it — but not while it is leased.
+ *
+ * Every current caller is synchronous between acquire and `close()`, so leases
+ * do not in fact overlap today. The refcount is here so that the day one does
+ * (an async action, two projects interleaved in one handler), an eviction
+ * cannot pull the connection out from under a query in flight and turn a
+ * pooling optimisation into a `SQLITE_MISUSE` crash.
+ */
+function retire(entry: PoolEntry): void {
+  if (graphDbPool.get(entry.key) === entry) graphDbPool.delete(entry.key);
+  entry.doomed = true;
+  if (entry.leases <= 0) closeQuietly(entry.db);
+}
+
+function touch(entry: PoolEntry): void {
+  graphDbPool.delete(entry.key);
+  graphDbPool.set(entry.key, entry);
+}
+
+/** Evict least-recently-used entries until at most `max` remain. */
+function evictTo(max: number): void {
+  if (max < 0) max = 0;
+  while (graphDbPool.size > max) {
+    const oldest = graphDbPool.keys().next();
+    if (oldest.done) return;
+    const entry = graphDbPool.get(oldest.value);
+    graphDbPool.delete(oldest.value);
+    if (entry) {
+      entry.doomed = true;
+      if (entry.leases <= 0) closeQuietly(entry.db);
+    }
+  }
+}
+
+/**
+ * Close pooled connections. Whole pool, or one database.
+ *
+ * `dbPath` may be given in any spelling that `resolve` normalises to the key.
+ * Used by tests and by `ctx purge`; a leased entry is closed when its last
+ * lease is released, never underneath it.
+ */
+export function closeGraphDbPool(dbPath?: string): void {
+  if (dbPath) {
+    const entry = graphDbPool.get(resolve(dbPath));
+    if (entry) retire(entry);
+    return;
+  }
+  for (const entry of [...graphDbPool.values()]) retire(entry);
+  graphDbPool.clear();
+}
+
+/** Pool contents, for tests and diagnostics. Never the connections themselves. */
+export function graphPoolStats(): Array<{
+  dbPath: string;
+  schemaVersion: number;
+  indexState: string;
+  leases: number;
+}> {
+  return [...graphDbPool.values()].map(e => ({
+    dbPath: e.key,
+    schemaVersion: e.schemaVersion,
+    indexState: e.indexState,
+    leases: e.leases,
+  }));
 }
 
 /** Read all of `project_metadata` as a plain map. */
@@ -281,6 +603,88 @@ export interface FreshnessReport {
 }
 
 /**
+ * One completed sweep, kept so the next `ctx_graph` call inside the same breath
+ * does not repeat 5 000 `stat()` syscalls to learn the same number.
+ */
+interface FreshnessCacheEntry {
+  report: FreshnessReport;
+  /** When the sweep ran, epoch ms. */
+  at: number;
+  /** Caller-supplied change token (see `revision`); `null` when none was given. */
+  revision: string | null;
+  /** mtime+size of the db and its `-wal` sidecar at sweep time. */
+  stamp: string;
+}
+
+/**
+ * Keyed by `dbPath|cap|tolerance` — the three inputs that change the answer.
+ * Process-lifetime, bounded below; a session touches one or two projects.
+ */
+const freshnessCache = new Map<string, FreshnessCacheEntry>();
+
+/** More projects than this in one process means something is wrong; drop the oldest. */
+const FRESHNESS_CACHE_MAX = 32;
+
+/**
+ * Ceiling on how long a matching change token may hold a report open.
+ *
+ * A token that never moves is evidence only as long as the thing producing it
+ * is really watching. Filesystem watchers do drop events — an editor that
+ * writes through a rename on a network mount, a container bind mount, an
+ * inotify table that filled up — and a silently dead watcher would otherwise
+ * pin one answer for the rest of the process. Five minutes bounds the damage
+ * without giving up the win.
+ */
+const REVISION_MAX_AGE_MS = 5 * 60_000;
+
+/**
+ * How long a sweep result may be reused. `0` disables the cache entirely.
+ *
+ * Ten seconds is chosen against what the number is FOR: it decorates an answer
+ * with "the index lags N files". A ten-second-old lag count is the same advice
+ * as a fresh one, and the sweep it replaces is the single most expensive thing
+ * on the `ctx_graph` hot path.
+ */
+export function freshnessTtlMs(env: NodeJS.ProcessEnv = process.env): number {
+  const raw = env.CONTEXT_MODE_GRAPH_FRESHNESS_TTL_MS;
+  if (raw === undefined || raw === "") return 10_000;
+  const n = Number.parseInt(raw, 10);
+  return Number.isFinite(n) && n >= 0 ? n : 10_000;
+}
+
+/**
+ * Cheap proof that the index itself has not moved: two `stat()` calls instead
+ * of five thousand.
+ *
+ * The `-wal` sidecar matters more than the main file here — under WAL the
+ * daemon's commits land in the sidecar and the main db's mtime only moves at
+ * checkpoint, so a db-only stamp would happily serve a cached report across a
+ * whole re-index.
+ */
+function dbStamp(dbPath: string): string {
+  const one = (p: string): string => {
+    try {
+      const st = statSync(p);
+      return `${st.mtimeMs}:${st.size}`;
+    } catch {
+      return "-";
+    }
+  };
+  return `${one(dbPath)}|${one(`${dbPath}-wal`)}`;
+}
+
+/** Drop cached sweeps. Whole cache, or one database. Tests, and `ctx purge`. */
+export function clearFreshnessCache(dbPath?: string): void {
+  if (!dbPath) {
+    freshnessCache.clear();
+    return;
+  }
+  for (const key of [...freshnessCache.keys()]) {
+    if (key.startsWith(`${dbPath}|`)) freshnessCache.delete(key);
+  }
+}
+
+/**
  * How far the index has fallen behind the working tree.
  *
  * Freshness is part of the answer's contract: a graph query that silently
@@ -291,12 +695,38 @@ export interface FreshnessReport {
  * asymmetry is deliberate: a stale row is a wrong answer, an unindexed file is
  * merely a missing one, and the daemon closes the second gap on its own.
  *
+ * "A few ms" was measured once, per call, in isolation. In a real session every
+ * SQL-backed `ctx_graph` action pays it again, so the sweep is memoised:
+ *
+ * - **`revision`** — a change token the caller derives from something that
+ *   already knows whether the tree moved (the fs-bus counters; see
+ *   `src/tools/graph.ts`). While the token is unchanged, no file under the root
+ *   has changed, so the previous answer is not merely recent, it is still true,
+ *   and the TTL does not apply.
+ * - **TTL** — the fallback when no such token exists
+ *   ({@link freshnessTtlMs}, `CONTEXT_MODE_GRAPH_FRESHNESS_TTL_MS`).
+ *
+ * Both are additionally gated on {@link dbStamp}: a cached report is never
+ * served across a write to the index, whichever path claimed it was valid.
+ *
  * `CONTEXT_MODE_GRAPH_FRESHNESS=0` turns the sweep off for anyone on a
  * filesystem where `stat` is expensive (network mounts, WSL2 `/mnt`).
  */
 export function checkFreshness(
   handle: GraphDbHandle,
-  opts: { env?: NodeJS.ProcessEnv; maxFiles?: number; toleranceMs?: number } = {},
+  opts: {
+    env?: NodeJS.ProcessEnv;
+    maxFiles?: number;
+    toleranceMs?: number;
+    /**
+     * Opaque token that changes exactly when the working tree might have. Equal
+     * tokens keep a cached report valid past the TTL; `null`/absent falls back
+     * to the TTL alone.
+     */
+    revision?: string | null;
+    /** Override {@link freshnessTtlMs}. `0` forces a fresh sweep. */
+    ttlMs?: number;
+  } = {},
 ): FreshnessReport | null {
   const env = opts.env ?? process.env;
   if (env.CONTEXT_MODE_GRAPH_FRESHNESS === "0") return null;
@@ -305,6 +735,31 @@ export function checkFreshness(
   // The daemon writes `indexed_at` after reading the file, so an equal-second
   // mtime is not evidence of staleness. One second of slack removes the noise.
   const tolerance = opts.toleranceMs ?? 1_000;
+
+  const ttl = opts.ttlMs ?? freshnessTtlMs(env);
+  const revision = opts.revision ?? null;
+  const key = `${handle.dbPath}|${cap}|${tolerance}`;
+  const now = Date.now();
+  const stamp = ttl > 0 ? dbStamp(handle.dbPath) : "";
+
+  if (ttl > 0) {
+    const hit = freshnessCache.get(key);
+    // When both sides carry a change token, the token IS the answer — a
+    // matching one keeps the report valid past the TTL, and a differing one
+    // invalidates it immediately, which a TTL alone would not. The TTL is the
+    // fallback for calls that arrive without a token (`ctx_doctor`, tests, a
+    // session with no fs-bus).
+    const bothTokens = hit !== undefined && revision !== null && hit.revision !== null;
+    const stillTrue = hit !== undefined
+      && hit.stamp === stamp
+      && (bothTokens
+        ? hit.revision === revision && now - hit.at < REVISION_MAX_AGE_MS
+        : now - hit.at < ttl);
+    // Copied out: the report is handed to formatters and to `ctx_doctor`, and a
+    // shared mutable object would let one of them corrupt the next reader's
+    // answer for the rest of the TTL.
+    if (stillTrue) return { ...hit.report };
+  }
 
   const meta = readProjectMetadata(handle);
   const lastIndexedAt = Object.values(meta).reduce((n, m) => Math.max(n, m.updatedAt), 0);
@@ -337,7 +792,7 @@ export function checkFreshness(
     }
   }
 
-  return {
+  const report: FreshnessReport = {
     staleFiles,
     missingFiles,
     checked,
@@ -345,6 +800,16 @@ export function checkFreshness(
     capped: total > checked,
     lastIndexedAt,
   };
+
+  if (ttl > 0) {
+    // Insertion order is age order, so the first key is the oldest entry.
+    if (freshnessCache.size >= FRESHNESS_CACHE_MAX) {
+      const oldest = freshnessCache.keys().next();
+      if (!oldest.done) freshnessCache.delete(oldest.value);
+    }
+    freshnessCache.set(key, { report, at: now, revision, stamp });
+  }
+  return { ...report };
 }
 
 /** One line for the response header, or `null` when the index is current. */
@@ -484,4 +949,40 @@ export function notIndexedMessage(projectDir: string): string {
     `Run \`codegraph init ${projectDir}\` to build one (a few seconds to a few minutes, ` +
     "depending on repository size). ctx_graph reads that index directly and cannot answer without it."
   );
+}
+
+/**
+ * What ELSE stops working without the index — printed once per project.
+ *
+ * `ctx_graph` fails loudly when there is no index, but it is not the only
+ * consumer: `ctx_find` carries a graph list among its five signals and simply
+ * drops it when the index is absent, so retrieval quietly loses a signal and
+ * the session never learns why. Saying it out loud at the one moment the user
+ * is already looking at the missing index is the cheapest place to close that
+ * gap.
+ */
+export const MISSING_INDEX_CONSEQUENCE =
+  "Until then the graph signal of ctx_find is blind too (it contributes nothing to ranking, " +
+  "silently), and `ctx_graph` actions other than `explore` cannot answer at all.";
+
+/** Projects already told about their missing index, so the notice is not repeated. */
+const missingIndexNoticed = new Set<string>();
+
+/**
+ * True the first time this process is asked about a given index-less project.
+ *
+ * Per process rather than per call: repeating the same paragraph on every
+ * `ctx_graph` invocation would be the plugin flooding the context it exists to
+ * protect, and repeating it never would leave the first call as silent as the
+ * degradation it is warning about.
+ */
+export function firstMissingIndexNotice(projectDir: string): boolean {
+  if (missingIndexNoticed.has(projectDir)) return false;
+  missingIndexNoticed.add(projectDir);
+  return true;
+}
+
+/** Reset the once-per-project notice. Tests only. */
+export function __resetMissingIndexNoticesForTests(): void {
+  missingIndexNoticed.clear();
 }

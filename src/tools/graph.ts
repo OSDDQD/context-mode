@@ -7,17 +7,24 @@
  * `<project>/.codegraph/codegraph.db` directly (read-only — see
  * `src/graph/db.ts`) and returns the few lines that answer the question.
  *
- * Seven actions, six of them pure SQL:
+ * Nine actions, eight of them served from the tables:
  *
  * | action    | question                                       |
  * |-----------|------------------------------------------------|
  * | `symbols` | where is X defined?                            |
  * | `outline` | what is in this file? (map / signatures only)  |
+ * | `body`    | show me the source of X, and nothing else      |
  * | `callers` | who calls X?                                   |
  * | `callees` | what does X call?                              |
  * | `impact`  | what breaks if X changes?                      |
  * | `related` | what is adjacent to this file?                 |
+ * | `map`     | what is this repository, in N tokens?          |
  * | `explore` | show me the source and call paths for an area  |
+ *
+ * `body` is the one action that touches the filesystem: the tables hold the
+ * line RANGE, the file holds the lines. The slicing lives in `src/graph/body.ts`
+ * so `src/graph/queries.ts` can keep its promise of no I/O beyond the read-only
+ * connection. `map` is pure SQL plus arithmetic — see `src/graph/map.ts`.
  *
  * `explore` is the exception because it is the one thing the tables cannot
  * reproduce: it returns symbol SOURCE stitched to call paths, and its value is
@@ -36,6 +43,12 @@
  * optimisation that can be skipped when the budget is generous: an unscreened
  * passthrough is a credential leak into the transcript.
  *
+ * `body` returns source code read straight off disk and `map` returns
+ * signatures read straight out of the index — neither passes through
+ * `ContentStore.index()` either, so both are screened by the same call for the
+ * same reason. A secret in the body of the function someone asked to see is the
+ * likeliest secret in this whole tool.
+ *
  * ## Registration
  *
  * `registerCtxGraph(deps)` follows `src/tools/search.ts`: everything owned by
@@ -49,8 +62,10 @@
 import { z } from "zod";
 
 import {
+  MISSING_INDEX_CONSEQUENCE,
   checkFreshness,
   cliFallbackEnabled,
+  firstMissingIndexNotice,
   formatFreshnessLine,
   hasCodegraphIndex,
   normalizeProjectDir,
@@ -77,7 +92,16 @@ import {
   type SymbolRow,
   type WalkRow,
 } from "../graph/queries.js";
+import { bodyBudgetBytes, readSymbolBody, type SymbolBody } from "../graph/body.js";
+import {
+  DEFAULT_BUDGET_TOKENS,
+  FOCUS_BOOST,
+  renderRepoMap,
+  repoMap,
+  type RepoMapResult,
+} from "../graph/map.js";
 import { ensureDaemon } from "../graph/daemon.js";
+import { activeFsWiring } from "../fs-bus/index.js";
 import { redactSecrets, redactOptionsFromEnv } from "../session/redact.js";
 import type { ToolDeps, ToolResult } from "./shared/deps.js";
 
@@ -92,10 +116,12 @@ export type GraphToolDeps = ToolDeps;
 export const GRAPH_ACTIONS = [
   "symbols",
   "outline",
+  "body",
   "callers",
   "callees",
   "impact",
   "related",
+  "map",
   "explore",
 ] as const;
 
@@ -197,9 +223,10 @@ export function registerCtxGraph(deps: GraphToolDeps): void {
       },
       description: `Answer structural questions about this codebase from the codegraph index instead of reading files into context.
 
-  The index is a SQLite graph of declarations and the edges between them (calls, imports, extends, implements, references), built by codegraph and read here directly. Seven actions share one contract: \`symbols\` finds where a name is defined, \`outline\` lists every declaration in one file in source order with signatures, \`callers\` and \`callees\` walk the call graph transitively with a depth limit, \`impact\` reports what breaks if a symbol changes (calls plus references plus subclasses), \`related\` names the symbols and files the graph places next to a file, and \`explore\` returns source bodies together with the call paths that reach them. Answers are a few lines each; the graph itself stays in SQLite. Every response states whether the index lags behind the working tree.
+  The index is a SQLite graph of declarations and the edges between them (calls, imports, extends, implements, references), built by codegraph and read here directly. Nine actions share one contract: \`symbols\` finds where a name is defined, \`outline\` lists every declaration in one file in source order with signatures, \`body\` returns the source of one named symbol and nothing else, \`callers\` and \`callees\` walk the call graph transitively with a depth limit, \`impact\` reports what breaks if a symbol changes (calls plus references plus subclasses), \`related\` names the symbols and files the graph places next to a file, \`map\` ranks the whole repository by personalized PageRank and packs files plus signatures into a token \`budget\`, and \`explore\` returns source bodies together with the call paths that reach them. Answers are a few lines each; the graph itself stays in SQLite. Every response states whether the index lags behind the working tree.
 
   WHEN:
+    - Instead of Read on a whole file when you want ONE function: \`action: "body"\` slices exactly its lines
     - Instead of Grep on a symbol name, when you want who calls it, what it calls, or what breaks if you change it — a grep returns matching lines, this returns the edges
     - Instead of Read on a whole file, when you want its shape: every declaration and signature in source order, a few lines instead of the file
     - Instead of Grep on a name you have only seen used: this returns the definition site with kind, signature and file:line
@@ -213,16 +240,17 @@ export function registerCtxGraph(deps: GraphToolDeps): void {
     - The project has no codegraph index yet — run \`codegraph init\` once in the project first
 
   RETURNS:
-    Ranked plain-text rows carrying qualified name, kind, file:line and signature, with traversal depth for the walking actions. \`related\` additionally emits a machine-readable JSON block (nodes and files scored by edge weight and hop distance). A stale index is reported inline as "index lags N files" rather than silently answering from old data. Tune via CONTEXT_MODE_GRAPH, CONTEXT_MODE_GRAPH_DAEMON, CONTEXT_MODE_GRAPH_EXPLORE_PASSTHROUGH, CONTEXT_MODE_GRAPH_FRESHNESS.
+    Ranked plain-text rows carrying qualified name, kind, file:line and signature, with traversal depth for the walking actions. \`related\` additionally emits a machine-readable JSON block (nodes and files scored by edge weight and hop distance), trimmed to the rows shown unless \`fullJson: true\`. A stale index is reported inline as "index lags N files" rather than silently answering from old data. Tune via CONTEXT_MODE_GRAPH, CONTEXT_MODE_GRAPH_DAEMON, CONTEXT_MODE_GRAPH_EXPLORE_PASSTHROUGH, CONTEXT_MODE_GRAPH_FRESHNESS.
 
   EXAMPLE: ctx_graph(action: "callers", symbol: "ContentStore.index")
   EXAMPLE: ctx_graph(action: "outline", file: "src/store.ts", signaturesOnly: true)
   EXAMPLE: ctx_graph(action: "impact", symbol: "redactSecrets", depth: 3)
-  EXAMPLE: ctx_graph(action: "explore", query: "session attribution")`,
+  EXAMPLE: ctx_graph(action: "explore", query: "session attribution")
+  EXAMPLE: ctx_graph(action: "map", budget: 1024, focus: "retry handling")`,
       inputSchema: z.object({
         action: z
           .enum(GRAPH_ACTIONS)
-          .describe("Which question to ask: symbols | outline | callers | callees | impact | related | explore"),
+          .describe("Which question to ask: symbols | outline | body | callers | callees | impact | related | map | explore"),
         query: z
           .string()
           .optional()
@@ -230,7 +258,18 @@ export function registerCtxGraph(deps: GraphToolDeps): void {
         symbol: z
           .string()
           .optional()
-          .describe("Symbol name or qualified name. Required for `callers`, `callees`, `impact`."),
+          .describe("Symbol name or qualified name. Required for `callers`, `callees`, `impact`, `body`."),
+        budget: z
+          .number()
+          .int()
+          .min(64)
+          .max(32_000)
+          .optional()
+          .describe(`\`map\`: token budget for the packed map (default ${DEFAULT_BUDGET_TOKENS}).`),
+        focus: z
+          .string()
+          .optional()
+          .describe("`map`: weight files matching these terms, and let rank flow outward from them."),
         file: z
           .string()
           .optional()
@@ -257,6 +296,13 @@ export function registerCtxGraph(deps: GraphToolDeps): void {
           .boolean()
           .optional()
           .describe("`outline`: one line per declaration, no docstrings."),
+        fullJson: z
+          .boolean()
+          .optional()
+          .describe(
+            "`related`: emit the complete RelatedResult JSON. Off by default — the JSON " +
+            "is trimmed to the rows the prose shows, so the block cannot outgrow the answer.",
+          ),
         project: z
           .string()
           .optional()
@@ -274,12 +320,21 @@ export function registerCtxGraph(deps: GraphToolDeps): void {
           limit?: number;
           kind?: string;
           signaturesOnly?: boolean;
+          fullJson?: boolean;
+          budget?: number;
+          focus?: string;
           project?: string;
         };
         const projectDir = normalizeProjectDir(p.project || getProjectDir());
 
         if (!hasCodegraphIndex(projectDir)) {
-          return trackResponse("ctx_graph", textResult(notIndexedMessage(projectDir), true));
+          // The refusal itself is loud, but what the missing index costs the
+          // REST of the session is not, so the first time a project is found
+          // unindexed the answer also names the signals that go blind.
+          const body = firstMissingIndexNotice(projectDir)
+            ? `${notIndexedMessage(projectDir)}\n\n${MISSING_INDEX_CONSEQUENCE}`
+            : notIndexedMessage(projectDir);
+          return trackResponse("ctx_graph", textResult(body, true));
         }
 
         // Best-effort, idempotent, and cheap on the hot path (one readFile plus
@@ -307,6 +362,10 @@ export function registerCtxGraph(deps: GraphToolDeps): void {
         try {
           return trackResponse("ctx_graph", runSqlAction(handle, projectDir, p));
         } finally {
+          // Releases the pooled lease, not the connection: `openGraphDb` hands
+          // out leases over one long-lived read-only handle per index file, so
+          // the next action pays a stat() instead of an open + pragma + two
+          // schema SELECTs. Unbalanced leases would pin the entry forever.
           handle.close();
         }
       } catch (err) {
@@ -323,7 +382,7 @@ export function registerCtxGraph(deps: GraphToolDeps): void {
 // SQL actions
 // ─────────────────────────────────────────────────────────
 
-interface ActionParams {
+export interface ActionParams {
   action: GraphAction;
   query?: string;
   symbol?: string;
@@ -332,11 +391,41 @@ interface ActionParams {
   limit?: number;
   kind?: string;
   signaturesOnly?: boolean;
+  fullJson?: boolean;
+  budget?: number;
+  focus?: string;
 }
 
-function runSqlAction(handle: GraphDbHandle, projectDir: string, p: ActionParams): ToolResult {
+/**
+ * A token that changes exactly when the working tree under `projectDir` might
+ * have — or `null` when nothing is watching it.
+ *
+ * This is the cheap half of the freshness fix. The expensive half is the
+ * `stat()` sweep in `checkFreshness`; the fs-bus is already subscribed to fff's
+ * watcher for this root and already counts every batch and event it delivers,
+ * so while those counters stand still there is nothing on disk that could have
+ * changed the previous sweep's answer. Handing the counters over as an opaque
+ * revision lets the cache stay valid past its TTL without `src/graph/db.ts`
+ * having to import the bus (fs-bus → graph/daemon → graph/db is already an
+ * edge; the reverse edge would close a cycle).
+ */
+function fsBusRevision(projectDir: string): string | null {
+  try {
+    const status = activeFsWiring(projectDir);
+    if (!status || !status.active) return null;
+    return `${status.batches}:${status.events}:${status.rescans}`;
+  } catch {
+    // Diagnostics must never decide whether a query runs.
+    return null;
+  }
+}
+
+/** Exported for tests: the action dispatch, without the MCP registration around it. */
+export function runSqlAction(handle: GraphDbHandle, projectDir: string, p: ActionParams): ToolResult {
   const header: string[] = [];
-  const freshness = formatFreshnessLine(checkFreshness(handle));
+  const freshness = formatFreshnessLine(
+    checkFreshness(handle, { revision: fsBusRevision(projectDir) }),
+  );
   if (freshness) header.push(freshness);
 
   switch (p.action) {
@@ -375,6 +464,52 @@ function runSqlAction(handle: GraphDbHandle, projectDir: string, p: ActionParams
         `${normalized} — ${rows.length} declaration${rows.length === 1 ? "" : "s"}:`,
         formatOutlineRows(rows, p.signaturesOnly === true),
       ]));
+    }
+
+    case "body": {
+      const symbol = String(p.symbol ?? "").trim();
+      if (!symbol) return textResult("`body` needs a `symbol`.", true);
+      const resolved = resolveSymbol(handle, symbol, { kind: p.kind });
+      if (resolved.matches.length === 0) {
+        return textResult(join(header, [
+          `No symbol named "${symbol}" in the index.`,
+          "Use action \"symbols\" to find the exact qualified name first.",
+        ]));
+      }
+      // Ambiguity is answered with a LIST, never with a pick.
+      //
+      // Concatenating every match would return four function bodies to a caller
+      // who asked for one — exactly the flood this action exists to stop — and
+      // silently taking `matches[0]` would return the wrong function with no
+      // sign that a choice was made. Naming the candidates costs one line each
+      // and lets the next call be exact.
+      if (resolved.matches.length > 1) {
+        const shown = resolved.matches.slice(0, BODY_DISAMBIGUATION_LINES);
+        return textResult(join(header, [
+          `"${symbol}" matches ${resolved.matches.length} symbols (${resolved.via}) — ` +
+          "ask again with one of these qualified names:",
+          formatSymbolRows(shown),
+          resolved.matches.length > shown.length
+            ? `(${resolved.matches.length - shown.length} more not listed)`
+            : "",
+        ]));
+      }
+      const row = resolved.matches[0]!;
+      return textResult(join(header, [formatBody(row, readSymbolBody(handle, row))]));
+    }
+
+    case "map": {
+      const result = repoMap(handle, { focus: p.focus });
+      if (result.totalFiles === 0) {
+        // The database exists and opened cleanly, but holds no declarations —
+        // an interrupted or empty `codegraph init`. Saying "no files match" here
+        // would send the caller looking for a query bug that is not there.
+        return textResult(join(header, [
+          `The codegraph index for ${projectDir} holds no declarations, so there is nothing to map.`,
+          `Run \`codegraph init ${projectDir}\` to build it.`,
+        ]), true);
+      }
+      return textResult(join(header, [formatRepoMap(result, p.budget)]));
     }
 
     case "callers":
@@ -432,13 +567,114 @@ function runSqlAction(handle: GraphDbHandle, projectDir: string, p: ActionParams
           `${result.seedFile} contributes no nodes to the index — nothing to relate.`,
         ]));
       }
-      return textResult(join(header, [formatRelated(result)]));
+      return textResult(join(header, [formatRelated(result, { full: p.fullJson === true })]));
     }
 
     default:
       return textResult(`Unknown action "${String(p.action)}".`, true);
   }
 }
+
+/** Candidate symbols listed when a name resolves to more than one node. */
+export const BODY_DISAMBIGUATION_LINES = 10;
+
+/**
+ * One symbol's source, with every caveat the slice carries stated above it.
+ *
+ * The staleness line is the important one. `start_line`/`end_line` were true at
+ * index time; if the file has moved on, the same range now names whatever code
+ * slid into those line numbers, and it will look perfectly plausible. A caller
+ * who is told may re-index or open the file; a caller who is not told edits the
+ * wrong function.
+ */
+export function formatBody(row: SymbolRow, body: SymbolBody): string {
+  const where = `${body.filePath}:${body.startLine}-${body.endLine}`;
+  const lines: string[] = [`${row.kind} ${row.qualifiedName}  ${where}`];
+
+  if (body.error) {
+    lines.push(
+      "",
+      `The index points at ${where}, but the file could not be read: ${body.error}`,
+      "The index is describing a file that is no longer there — re-run `codegraph index`.",
+    );
+    return lines.join("\n");
+  }
+
+  if (body.stale === true) {
+    lines.push(
+      "",
+      `⚠ ${body.filePath} has been modified since it was indexed, so lines ` +
+      `${body.startLine}-${body.endLine} may no longer be this symbol. ` +
+      "Re-run `codegraph index` before trusting the range.",
+    );
+  } else if (body.stale === null) {
+    lines.push(
+      "",
+      `(no \`files\` row for ${body.filePath}, so the index cannot confirm these ` +
+      "line numbers are current)",
+    );
+  }
+
+  if (body.text.length === 0) {
+    lines.push("", `The file has no line ${body.startLine} — it is shorter than the index thinks.`);
+    return lines.join("\n");
+  }
+
+  // A fence longer than any backtick run in the body, so source that itself
+  // contains a markdown fence cannot break out of the block.
+  const longest = Math.max(0, ...[...body.text.matchAll(/`+/g)].map(m => m[0].length));
+  const fence = "`".repeat(Math.max(3, longest + 1));
+  lines.push("", fence, screen(body.text), fence);
+
+  if (body.truncated) {
+    lines.push(
+      `(showing lines ${body.startLine}-${body.lastLine} of ${body.startLine}-${body.endLine} — ` +
+      `cut at the ${bodyBudgetBytes()}-byte budget; raise CONTEXT_MODE_GRAPH_BODY_BUDGET, ` +
+      "or read the rest with ctx_read)",
+    );
+  } else if (body.lastLine < body.endLine) {
+    lines.push(
+      `(the file ended at line ${body.lastLine}; the index expected the symbol to run to ` +
+      `${body.endLine} — the index is ahead of the file, so re-run \`codegraph index\`)`,
+    );
+  }
+  return lines.join("\n");
+}
+
+/**
+ * The repo map: one header stating what was ranked and what it cost, then the
+ * packed body.
+ *
+ * The header is deliberately outside the packing budget. It is three lines that
+ * tell the caller whether the answer they are reading is the whole ranking or
+ * the top of it, and paying for it out of `budget` would mean a small budget
+ * spends most of itself explaining that it is small.
+ */
+export function formatRepoMap(result: RepoMapResult, budget?: number): string {
+  const rendered = renderRepoMap(result, { budget });
+  const head =
+    `Repo map — ${result.totalFiles} files / ${result.totalSymbols} symbols ranked; ` +
+    `showing ${rendered.filesShown} files, ${rendered.symbolsShown} symbols in ` +
+    `${rendered.tokens} tokens (budget ${budget ?? DEFAULT_BUDGET_TOKENS}).`;
+  const lines = [head];
+  if (result.focusTerms.length > 0) {
+    lines.push(
+      result.focusMatches > 0
+        ? `Focus ${JSON.stringify(result.focusTerms.join(" "))} — ${result.focusMatches} file(s) ` +
+          `weighted x${FOCUS_BOOST}; rank flows outward from them.`
+        // A focus that matched nothing must be said out loud: the ranking that
+        // came back is the unpersonalized one, and it looks identical to a
+        // personalized ranking that simply disagreed with the caller.
+        : `Focus ${JSON.stringify(result.focusTerms.join(" "))} matched no file path or symbol ` +
+          "name — the ranking below is unpersonalized.",
+    );
+  }
+  return [...lines, "", screen(rendered.text)].join("\n");
+}
+
+/** Rows of each list the prose shows — and, by default, the JSON block too. */
+export const RELATED_FILE_LINES = 15;
+export const RELATED_NODE_LINES = 20;
 
 /**
  * `related` renders twice: prose for the reader, JSON for the ranker.
@@ -448,24 +684,59 @@ function runSqlAction(handle: GraphDbHandle, projectDir: string, p: ActionParams
  * "src/x.ts (weight 3.2)" out of prose is a consumer that breaks the first
  * time the prose is reworded. Fenced as ```json and keyed exactly as
  * `RelatedResult`.
+ *
+ * ## Why the JSON is trimmed to the same rows as the prose
+ *
+ * It was not, and that made this function the one place where the plugin flooded
+ * the context it exists to protect: the prose was carefully cut to 15 files and
+ * 20 symbols while the JSON directly below it serialised all 400 of each — the
+ * same answer, an order of magnitude more bytes, in the same response. The
+ * emitted object stays a valid `RelatedResult`, so `truncated` is set whenever
+ * the payload is a cut of a longer list, whichever cut did it. `full: true`
+ * (tool parameter `fullJson`) is the escape hatch for a caller that really is
+ * machine-reading the whole neighbourhood.
  */
-export function formatRelated(result: RelatedResult): string {
+export function formatRelated(
+  result: RelatedResult,
+  opts: { full?: boolean } = {},
+): string {
   const lines: string[] = [
     `Neighbourhood of ${result.seedFile} (${result.seedNodes} symbols in the file):`,
   ];
-  if (result.files.length > 0) {
+  const files = opts.full ? result.files : result.files.slice(0, RELATED_FILE_LINES);
+  const nodes = opts.full ? result.nodes : result.nodes.slice(0, RELATED_NODE_LINES);
+
+  if (files.length > 0) {
     lines.push("", "Files, by graph weight:");
-    for (const f of result.files.slice(0, 15)) {
+    for (const f of files) {
       lines.push(`  ${f.weight.toFixed(2)}  ${f.filePath}  (${f.nodes} symbol${f.nodes === 1 ? "" : "s"}, d${f.minDistance})`);
     }
   }
-  if (result.nodes.length > 0) {
+  if (nodes.length > 0) {
     lines.push("", "Symbols, by graph weight:");
-    for (const n of result.nodes.slice(0, 20)) {
+    for (const n of nodes) {
       lines.push(`  ${n.weight.toFixed(2)}  ${n.direction} ${n.via.join("+")}  ${n.qualifiedName}  ${loc(n.filePath, n.startLine)}`);
     }
   }
+
+  // Three different cuts, three different remedies — a caller told only
+  // "truncated" cannot tell which knob to turn.
+  const rendered = nodes.length < result.nodes.length || files.length < result.files.length;
+  if (rendered) {
+    lines.push(
+      "",
+      `(showing ${nodes.length}/${result.nodes.length} symbols and ${files.length}/${result.files.length} files — ` +
+      "pass `fullJson: true` for the complete machine-readable block)",
+    );
+  }
   if (result.truncated) lines.push("", "(list truncated — raise `limit` for more)");
+  if (result.edgesTruncated) {
+    lines.push(
+      "",
+      "(the edge scan hit its cap before the walk finished — some neighbours are missing " +
+      "entirely, not just unlisted; lower `depth` or seed with a smaller file for a complete answer)",
+    );
+  }
 
   lines.push(
     "",
@@ -475,9 +746,10 @@ export function formatRelated(result: RelatedResult): string {
       {
         seedFile: result.seedFile,
         seedNodes: result.seedNodes,
-        truncated: result.truncated,
-        nodes: result.nodes,
-        files: result.files,
+        truncated: result.truncated || rendered,
+        ...(result.edgesTruncated ? { edgesTruncated: true } : {}),
+        nodes,
+        files,
       },
       null,
       0,

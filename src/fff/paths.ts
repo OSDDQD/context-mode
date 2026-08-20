@@ -62,15 +62,66 @@ export function resolveFffStorageDir(env: NodeJS.ProcessEnv = process.env): stri
  */
 export function canonicalProjectRoot(projectDir: string): string {
   const abs = resolve(projectDir);
+  const memoised = canonicalRootCache.get(abs);
+  if (memoised !== undefined) return memoised;
+
   let real = abs;
+  let resolved = false;
   try {
     real = realpathSync.native(abs);
+    resolved = true;
   } catch {
     // Path may not exist yet (fresh worktree, test fixture) — keep the
     // resolved form. `acquireFinder` reports the failure from the native
     // create() call, which has a better error message than we could invent.
   }
-  return normalizeWorktreePath(real);
+  const canonical = normalizeWorktreePath(real);
+
+  // Only SUCCESSFUL resolutions are memoised. A path that did not exist yet is
+  // the one case where the answer legitimately changes during a process — a
+  // worktree gets created, a fixture directory is made — and pinning the
+  // fallback would keep every later lookup on a non-canonical spelling.
+  if (resolved) {
+    if (canonicalRootCache.size >= CANONICAL_ROOT_CACHE_MAX) canonicalRootCache.clear();
+    canonicalRootCache.set(abs, canonical);
+  }
+  return canonical;
+}
+
+/**
+ * Memo for {@link canonicalProjectRoot}: resolved input → canonical root.
+ *
+ * `realpathSync.native` is a syscall per path component and this function runs
+ * on EVERY finder-registry lookup, every fs-bus installation lookup and every
+ * `fffDbPathsFor` — i.e. several times per tool call, always with the same one
+ * or two project roots, always for an answer that already came back.
+ *
+ * Invalidation semantics, deliberately none-within-a-process: an entry lives
+ * until the process exits. The mapping can only change if a symlink on the path
+ * is retargeted or the directory is swapped underneath a running server, and in
+ * that case re-resolving would not repair anything — the finder registry, the
+ * fs-bus installations and the FTS5 project hash are all already keyed on the
+ * value handed out earlier, so a late change of answer would split one
+ * project's state across two keys instead of moving it. {@link
+ * clearCanonicalProjectRootCache} exists for tests, and for a host that knows
+ * it moved the tree.
+ *
+ * Keyed on `resolve(projectDir)` rather than the raw argument: `resolve` reads
+ * `process.cwd()`, so caching a relative spelling would answer from the wrong
+ * working directory after a `chdir`. The string work is free next to the
+ * syscalls it guards.
+ */
+const canonicalRootCache = new Map<string, string>();
+
+/** Bound on the memo. A server sees one or two roots; a test harness can churn
+ *  through hundreds of temp dirs, and an unbounded map would retain them all.
+ *  Clearing wholesale rather than evicting is right for a map whose steady
+ *  state is two entries — the next few lookups just pay the syscall again. */
+const CANONICAL_ROOT_CACHE_MAX = 512;
+
+/** Drop the memo. For tests, and for a host that moved the tree under itself. */
+export function clearCanonicalProjectRootCache(): void {
+  canonicalRootCache.clear();
 }
 
 /** Per-project database paths under the shared storage directory. */

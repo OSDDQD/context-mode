@@ -14,11 +14,12 @@
  */
 import { describe, test, beforeEach, afterEach } from "vitest";
 import { strict as assert } from "node:assert";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { ContentStore } from "../src/store.js";
+import { makeGraphFixture, type FixtureNode } from "./graph/fixture.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -27,6 +28,8 @@ const MAX_CHUNK_BYTES = 4096;
 
 let workDir: string;
 const stores: ContentStore[] = [];
+/** Fixture projects carrying a `.codegraph/`; makeGraphFixture picks its own dir. */
+const graphDirs: string[] = [];
 
 beforeEach(() => {
   workDir = mkdtempSync(join(tmpdir(), "context-mode-codechunk-"));
@@ -37,7 +40,11 @@ afterEach(() => {
     try { store.close(); } catch { /* already closed */ }
   }
   rmSync(workDir, { recursive: true, force: true });
+  // After the stores: closing one releases the read-only handle it holds on
+  // that project's codegraph.db, and Windows refuses to unlink an open file.
+  for (const dir of graphDirs.splice(0)) rmSync(dir, { recursive: true, force: true });
   delete process.env.CONTEXT_MODE_CODE_CHUNKING;
+  delete process.env.CONTEXT_MODE_GRAPH_CHUNKING;
 });
 
 function newStore(): ContentStore {
@@ -375,6 +382,349 @@ describe("CONTEXT_MODE_CODE_CHUNKING=0", () => {
       asCode.map((c) => c.content),
       asMarkdown.map((c) => c.content),
       "code chunking made no difference — the gate is not wired up",
+    );
+  });
+});
+
+// ─────────────────────────────────────────────────────────
+// Symbol boundaries from the codegraph index (§3.3)
+// ─────────────────────────────────────────────────────────
+
+/**
+ * The line heuristic above guesses where declarations start. When the project
+ * carries a codegraph index it does not have to guess: `nodes` holds every
+ * symbol's start_line/end_line, written by a real parser.
+ *
+ * These tests pin the difference with a file the heuristic is provably wrong
+ * about — a template literal whose text contains a line reading
+ * `export function ...` at column zero. The heuristic cuts there, mid-string;
+ * the graph knows the whole literal is one `const`. Every other test below
+ * pins the conditions under which the graph is refused and the heuristic path
+ * comes back unchanged, because indexing must never depend on the graph.
+ */
+
+/** A line long enough that a few dozen of them clear CODE_CHUNK_MIN_BYTES. */
+function filler(tag: string, i: number): string {
+  return `  const ${tag}${i} = compute(${i}, "${tag}-step-${i}", options, fallback);`;
+}
+
+/**
+ * A source file plus the symbol spans a parser would report for it.
+ *
+ * Built line by line rather than written out, because the node rows have to
+ * carry the real 1-based line numbers and a hand-counted fixture goes wrong
+ * the first time somebody inserts a line.
+ */
+function graphSource(): { text: string; nodes: FixtureNode[] } {
+  const lines: string[] = [];
+  const push = (...ls: string[]) => { lines.push(...ls); return lines.length; };
+
+  // Leading gap: header, import, a top-level const with no node of its own.
+  // None of it belongs to a symbol, and all of it has to survive chunking.
+  push("/**", " * Module header. Belongs to the file, not to the first export.", " */", "");
+  push('import { readFileSync } from "node:fs";', "");
+  push('const LICENSE_MARKER = "gap-line-must-survive";', "");
+
+  const templateStart = lines.length + 1;
+  push("const TEMPLATE = `");
+  for (let i = 0; i < 30; i++) push(filler("pre", i));
+  // The trap. At column zero, opening with `export function`, and pure data.
+  push("export function generatedInsideATemplate(): void {", "  return;", "}");
+  for (let i = 0; i < 30; i++) push(filler("post", i));
+  const templateEnd = push("`;");
+  push("");
+
+  push("/** Load the config off disk. */");
+  const loadStart = lines.length + 1;
+  push("export function loadConfig(path: string): string {");
+  for (let i = 0; i < 20; i++) push(filler("load", i));
+  const loadEnd = push('  return readFileSync(path, "utf-8");', "}") - 0;
+
+  return {
+    text: lines.join("\n"),
+    nodes: [
+      {
+        id: "variable:TEMPLATE", kind: "variable", name: "TEMPLATE",
+        qualifiedName: "src/config.ts::TEMPLATE", filePath: "src/config.ts",
+        startLine: templateStart, endLine: templateEnd,
+      },
+      {
+        id: "function:loadConfig", kind: "function", name: "loadConfig",
+        qualifiedName: "src/config.ts::loadConfig", filePath: "src/config.ts",
+        startLine: loadStart, endLine: loadEnd, isExported: true,
+      },
+    ],
+  };
+}
+
+/**
+ * Index one file inside a throwaway project that does (or does not) carry a
+ * codegraph index, and return its chunks.
+ *
+ * `indexedAt` defaults to a minute in the future: the file is written after
+ * the fixture db, so a `Date.now()` stamp would race the staleness gate on a
+ * slow filesystem and make the suite flaky for the wrong reason.
+ */
+function chunkInProject(opts: {
+  rel: string;
+  text: string;
+  nodes?: FixtureNode[];
+  /** Omit to leave the file out of the graph's `files` table entirely. */
+  indexedAt?: number | null;
+}): Array<{ title: string; content: string }> {
+  const { projectDir } = makeGraphFixture({
+    nodes: opts.nodes ?? [],
+    files: opts.indexedAt === null ? {} : { [opts.rel]: opts.indexedAt ?? Date.now() + 60_000 },
+  });
+  graphDirs.push(projectDir);
+  const abs = join(projectDir, opts.rel);
+  mkdirSync(dirname(abs), { recursive: true });
+  writeFileSync(abs, opts.text, "utf-8");
+
+  const store = newStore();
+  const { sourceId } = store.index({ path: abs, source: `code:${opts.rel}` });
+  return store.getChunksBySource(sourceId).map((c) => ({ title: c.title, content: c.content }));
+}
+
+/** The same file indexed where no ancestor directory holds a `.codegraph/`. */
+function chunkWithoutGraph(rel: string, text: string): Array<{ title: string; content: string }> {
+  const abs = join(workDir, rel);
+  mkdirSync(dirname(abs), { recursive: true });
+  writeFileSync(abs, text, "utf-8");
+  const store = newStore();
+  const { sourceId } = store.index({ path: abs, source: `code:${rel}` });
+  return store.getChunksBySource(sourceId).map((c) => ({ title: c.title, content: c.content }));
+}
+
+/** True when some chunk is titled after the declaration hiding in the string. */
+function cutInsideTemplate(chunks: Array<{ title: string }>): boolean {
+  return chunks.some((c) => c.title.startsWith("export function generatedInsideATemplate"));
+}
+
+describe("#chunkCodeBySymbols: boundaries come from the graph", () => {
+  test("a declaration that only looks like one does not open a chunk", () => {
+    const { text, nodes } = graphSource();
+
+    const withoutGraph = chunkWithoutGraph("src/config.ts", text);
+    assert.ok(
+      cutInsideTemplate(withoutGraph),
+      "the line heuristic no longer cuts inside the template — the fixture stopped proving anything",
+    );
+
+    const withGraph = chunkInProject({ rel: "src/config.ts", text, nodes });
+    assert.ok(
+      !cutInsideTemplate(withGraph),
+      "the graph's symbol spans were ignored: a chunk still starts inside a string literal",
+    );
+    const template = withGraph.find((c) => c.title.startsWith("const TEMPLATE"));
+    assert.ok(template, "the const holding the literal did not become a chunk of its own");
+    assert.ok(
+      template!.content.includes("export function generatedInsideATemplate"),
+      "the literal was split anyway — the span was not honoured end to end",
+    );
+  });
+
+  test("code between symbols is indexed, not dropped", () => {
+    const { text, nodes } = graphSource();
+    const chunks = chunkInProject({ rel: "src/config.ts", text, nodes });
+    const all = chunks.map((c) => c.content).join("\n");
+
+    // Imports, the file header and a top-level const belong to no symbol. They
+    // are also exactly what someone searching for `readFileSync` will look for.
+    assert.ok(all.includes('import { readFileSync } from "node:fs";'), "the import gap was dropped");
+    assert.ok(all.includes("gap-line-must-survive"), "a top-level statement between symbols was dropped");
+    assert.ok(all.includes("Module header."), "the file header was dropped");
+  });
+
+  test("no line of the file is lost or reordered", () => {
+    const { text, nodes } = graphSource();
+    const chunks = chunkInProject({ rel: "src/config.ts", text, nodes });
+    assert.deepEqual(
+      chunks.flatMap((c) => significantLines(c.content)),
+      significantLines(text),
+      "symbol-boundary chunking dropped, duplicated or reordered lines",
+    );
+  });
+
+  test("the doc comment above a symbol travels with it", () => {
+    const { text, nodes } = graphSource();
+    const chunks = chunkInProject({ rel: "src/config.ts", text, nodes });
+    const owner = chunks.find((c) => c.content.includes("export function loadConfig"));
+    assert.ok(owner, "loadConfig went missing");
+    assert.ok(
+      owner!.content.includes("/** Load the config off disk. */"),
+      "the docblock stayed behind in the gap instead of moving to what it documents",
+    );
+  });
+});
+
+describe("#chunkCodeBySymbols: size caps are still the packer's", () => {
+  test("a single symbol larger than the cap is still split", () => {
+    const lines = ["export function huge(): void {"];
+    for (let i = 0; i < 220; i++) lines.push(filler("huge", i));
+    lines.push("}");
+    const text = lines.join("\n");
+    assert.ok(Buffer.byteLength(text) > MAX_CHUNK_BYTES * 2, "fixture is not actually oversized");
+
+    const chunks = chunkInProject({
+      rel: "src/huge.ts",
+      text,
+      nodes: [{
+        id: "function:huge", kind: "function", name: "huge",
+        qualifiedName: "src/huge.ts::huge", filePath: "src/huge.ts",
+        startLine: 1, endLine: lines.length,
+      }],
+    });
+
+    assert.ok(chunks.length > 1, "one symbol became one oversized chunk");
+    for (const chunk of chunks) {
+      assert.ok(
+        Buffer.byteLength(chunk.content) <= MAX_CHUNK_BYTES,
+        `chunk ${JSON.stringify(chunk.title)} is ${Buffer.byteLength(chunk.content)}B`,
+      );
+    }
+  });
+
+  test("a run of tiny symbols is packed, not filed one chunk each", () => {
+    const names = ["Alpha", "Beta", "Gamma", "Delta", "Epsilon", "Zeta", "Eta", "Theta"];
+    const text = names.map((n) => `export type ${n} = string;`).join("\n");
+    const nodes: FixtureNode[] = names.map((n, i) => ({
+      id: `type:${n}`, kind: "type_alias", name: n,
+      qualifiedName: `src/types.ts::${n}`, filePath: "src/types.ts",
+      startLine: i + 1, endLine: i + 1, isExported: true,
+    }));
+
+    const chunks = chunkInProject({ rel: "src/types.ts", text, nodes });
+    assert.ok(
+      chunks.length < names.length,
+      `each one-line type became its own chunk (${chunks.length} chunks for ${names.length} symbols)`,
+    );
+  });
+});
+
+describe("#chunkCodeBySymbols: when the graph is refused", () => {
+  test("no codegraph index — the text strategy is unchanged", () => {
+    const { text } = graphSource();
+    const withoutGraph = chunkWithoutGraph("src/config.ts", text);
+    // Same file, same absence of an index, via the fixture's own project dir
+    // (which has a `.codegraph/` but no row for this file, see next test) is a
+    // different case. Here the point is that the pre-existing path is intact.
+    assert.ok(cutInsideTemplate(withoutGraph), "the heuristic path changed shape");
+    assert.ok(withoutGraph.length > 1, "the heuristic stopped splitting the file at all");
+  });
+
+  test("a file the index does not know falls back", () => {
+    const { text, nodes } = graphSource();
+    const chunks = chunkInProject({ rel: "src/config.ts", text, nodes, indexedAt: null });
+    assert.deepEqual(
+      chunks.map((c) => c.content),
+      chunkWithoutGraph("src/config.ts", text).map((c) => c.content),
+      "a file absent from the graph's `files` table was chunked from its symbols anyway",
+    );
+  });
+
+  test("an index older than the file falls back", () => {
+    const { text, nodes } = graphSource();
+    const chunks = chunkInProject({
+      rel: "src/config.ts", text, nodes, indexedAt: Date.now() - 3_600_000,
+    });
+    assert.deepEqual(
+      chunks.map((c) => c.content),
+      chunkWithoutGraph("src/config.ts", text).map((c) => c.content),
+      "boundaries from a stale index were used — they describe the previous revision",
+    );
+  });
+
+  test("an empty symbol table falls back", () => {
+    const { text } = graphSource();
+    const chunks = chunkInProject({ rel: "src/config.ts", text, nodes: [] });
+    assert.deepEqual(
+      chunks.map((c) => c.content),
+      chunkWithoutGraph("src/config.ts", text).map((c) => c.content),
+      "a file with no symbols produced something other than the text chunking",
+    );
+  });
+
+  test("inline content is never chunked from a path's symbols", () => {
+    const { text, nodes } = graphSource();
+    const { projectDir } = makeGraphFixture({
+      nodes, files: { "src/config.ts": Date.now() + 60_000 },
+    });
+    graphDirs.push(projectDir);
+    const abs = join(projectDir, "src/config.ts");
+    mkdirSync(dirname(abs), { recursive: true });
+    writeFileSync(abs, text, "utf-8");
+
+    // Caller-supplied content is not the file on disk, whatever the path says.
+    const store = newStore();
+    const { sourceId } = store.index({ content: text, path: abs, source: "code:src/config.ts" });
+    const chunks = store.getChunksBySource(sourceId);
+    assert.ok(
+      cutInsideTemplate(chunks),
+      "line numbers from the graph were applied to content that never came from that file",
+    );
+  });
+});
+
+describe("CONTEXT_MODE_GRAPH_CHUNKING=0", () => {
+  test("restores the line heuristic on a file the graph covers", () => {
+    const { text, nodes } = graphSource();
+    process.env.CONTEXT_MODE_GRAPH_CHUNKING = "0";
+    const off = chunkInProject({ rel: "src/config.ts", text, nodes });
+    assert.deepEqual(
+      off.map((c) => c.content),
+      chunkWithoutGraph("src/config.ts", text).map((c) => c.content),
+      "the flag did not restore the previous chunking",
+    );
+  });
+
+  test("without the flag the same file chunks differently", () => {
+    const { text, nodes } = graphSource();
+    assert.notDeepEqual(
+      chunkInProject({ rel: "src/config.ts", text, nodes }).map((c) => c.content),
+      chunkWithoutGraph("src/config.ts", text).map((c) => c.content),
+      "symbol boundaries made no difference — the graph path is not wired up",
+    );
+  });
+});
+
+describe("#chunkCodeBySymbols: one graph handle per project", () => {
+  test("a second file in the same project still gets symbol boundaries", () => {
+    // The handle is opened once and held for the store's lifetime. If it were
+    // opened and closed per file, or memoised as a failure after the first
+    // use, the second file would silently drop to the text path — and the only
+    // symptom would be worse retrieval, months later.
+    const { text, nodes } = graphSource();
+    const second = ["export type Marker = string;", "", "export function only(): void {}"].join("\n");
+
+    const { projectDir } = makeGraphFixture({
+      nodes: [
+        ...nodes,
+        {
+          id: "function:only", kind: "function", name: "only",
+          qualifiedName: "src/second.ts::only", filePath: "src/second.ts",
+          startLine: 3, endLine: 3, isExported: true,
+        },
+      ],
+      files: { "src/config.ts": Date.now() + 60_000, "src/second.ts": Date.now() + 60_000 },
+    });
+    graphDirs.push(projectDir);
+    for (const [rel, body] of [["src/config.ts", text], ["src/second.ts", second]] as const) {
+      const abs = join(projectDir, rel);
+      mkdirSync(dirname(abs), { recursive: true });
+      writeFileSync(abs, body, "utf-8");
+    }
+
+    const store = newStore();
+    const first = store.index({ path: join(projectDir, "src/config.ts"), source: "code:src/config.ts" });
+    assert.ok(!cutInsideTemplate(store.getChunksBySource(first.sourceId)), "first file did not use the graph");
+
+    const next = store.index({ path: join(projectDir, "src/second.ts"), source: "code:src/second.ts" });
+    const chunks = store.getChunksBySource(next.sourceId);
+    assert.ok(chunks.length > 0, "the second file produced no chunks at all");
+    assert.ok(
+      chunks.some((c) => c.content.includes("export type Marker")),
+      "the second file lost the gap line above its only symbol",
     );
   });
 });

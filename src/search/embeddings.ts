@@ -25,7 +25,34 @@ export interface EmbeddingConfig {
   url: string;
   model: string;
   apiKey?: string;
-  /** Budget for the query embedding — the caller is waiting on this one. */
+  /**
+   * Budget for the query embedding — the caller is waiting on this one.
+   *
+   * Was 5 000 ms. Measured against the reference local setup (Ollama, bge-m3,
+   * 566M params F16, 1024 dims): a warm query is ~180 ms, but the first query
+   * against an unloaded model costs **3 281 ms** while Ollama pages the
+   * weights in (measured by forcing the unload with `keep_alive: 0`, so it is
+   * a real load, not an estimate).
+   *
+   * That load happens at least once per runtime lifetime — the first embedding
+   * query after Ollama or the machine restarts — and again on any host that
+   * has not raised `OLLAMA_KEEP_ALIVE` past its five-minute default. It is not
+   * frequent. It does not need to be: 5 000 ms left 1.5x headroom over a
+   * 3 281 ms load measured on a fast local model with warm page cache, so a
+   * larger model, a slower disk, a cold cache or a busy GPU crosses it and
+   * then fails 100% of the time, not intermittently.
+   *
+   * And the failure is silent. `embedTexts` returns null, the semantic arm
+   * drops out of the fusion, and the answer still looks like an answer — there
+   * is no error for the operator to notice and no degradation they can see.
+   * A default that quietly turns retrieval lexical on the first query after a
+   * reboot is the wrong default however rarely it fires.
+   *
+   * 10 000 ms is 3x the measured load. A generous budget is CHEAP precisely
+   * because the event is rare: the budget is only ever consumed when something
+   * is already wrong, and the common dead-endpoint case does not reach it at
+   * all — a refused connection fails in ~1 ms, not at the budget.
+   */
   timeoutMs: number;
   /**
    * Budget for background backfill batches, which are an order of magnitude
@@ -36,7 +63,24 @@ export interface EmbeddingConfig {
    * lexical — the failure mode is invisible, which is what makes it bad.
    */
   backfillTimeoutMs: number;
-  /** Chunks embedded per background pass. */
+  /**
+   * Chunks embedded per background pass.
+   *
+   * Was 16. Measured throughput per vector on the reference local setup, by
+   * batch size: 8 → 49.6 ms, 16 → 17.2 ms, 32 → 13.2 ms, 64 → 10.7 ms,
+   * 128 → 9.4 ms. The knee is 64 — a 1.6x throughput gain over 16, where 128
+   * buys a further 12% for twice the request. In wall-clock terms one batch of
+   * 64 is ~687 ms, which sits far inside {@link backfillTimeoutMs} (120 s), and
+   * the session-end drain (`backfillVectorsUntil`, 2 000 chunks in a 60 s
+   * budget) goes from ~34 s of embedding to ~21 s — the difference between a
+   * drain that finishes and one that runs out of clock.
+   *
+   * A failed batch loses nothing: `backfillVectors` writes only on success and
+   * the rows keep their missing vector, so the next pass picks them up again.
+   * The one regression a bigger batch could introduce is an endpoint with a
+   * lower per-request input cap than 64, which would fail *permanently* and
+   * silently; `backfillVectors` guards that with one shrink-and-retry.
+   */
   backfillBatch: number;
   /**
    * Store vectors as int8 rather than float32. Cosine similarity is invariant
@@ -80,9 +124,12 @@ function buildConfig(url: string, model: string, env: NodeJS.ProcessEnv): Embedd
     url,
     model,
     apiKey: env.CONTEXT_MODE_EMBEDDINGS_API_KEY?.trim() || undefined,
-    timeoutMs: num(env.CONTEXT_MODE_EMBEDDINGS_TIMEOUT_MS, 5_000),
+    // 5_000 → 10_000 and 16 → 64: see the field docs on EmbeddingConfig for
+    // the measurements. Both were sized before the local-runtime numbers
+    // existed, and both were costing the semantic layer silently.
+    timeoutMs: num(env.CONTEXT_MODE_EMBEDDINGS_TIMEOUT_MS, 10_000),
     backfillTimeoutMs: num(env.CONTEXT_MODE_EMBEDDINGS_BACKFILL_TIMEOUT_MS, 120_000),
-    backfillBatch: num(env.CONTEXT_MODE_EMBEDDINGS_BACKFILL, 16),
+    backfillBatch: num(env.CONTEXT_MODE_EMBEDDINGS_BACKFILL, 64),
     quantize: env.CONTEXT_MODE_EMBEDDINGS_QUANT?.trim().toLowerCase() !== "f32",
   };
 }
@@ -303,6 +350,85 @@ function cacheSet(key: string, vec: number[]): void {
   }
 }
 
+// ─────────────────────────────────────────────────────────
+// Cold-start retry
+// ─────────────────────────────────────────────────────────
+
+/**
+ * How long a stalled endpoint is denied the cold-start retry.
+ *
+ * The retry exists for one shape of failure: the model is not resident, the
+ * runtime is loading it, and the request outlives
+ * {@link EmbeddingConfig.timeoutMs}. That is worth one more attempt because
+ * aborting the request does NOT abort the load — Ollama keeps paging the
+ * weights in, so the second attempt lands on a model that is warm or nearly
+ * warm and costs ~180 ms rather than another full 3 281 ms cold start.
+ *
+ * It pays off rarely — at most once per runtime lifetime, and only on a host
+ * where the load outlasts a budget already sized at 3x the measured one. That
+ * is affordable only because it costs NOTHING in the steady state: the retry
+ * is reachable solely from a foreground timeout, and a warm query answers in
+ * ~180 ms against a 10 000 ms budget, so on a healthy endpoint this branch is
+ * never entered — no extra request, no extra latency, not even the clock read.
+ *
+ * An endpoint that accepts the connection and then never answers looks
+ * identical on the first attempt, and there the retry is pure loss: it doubles
+ * the stall on the latency path. So a retry that ALSO times out is treated as
+ * proof of the second shape and switches the retry off for five minutes — long
+ * enough that a hung endpoint costs the doubled stall once, not once per query.
+ * The common dead-endpoint case never reaches any of this: a refused
+ * connection rejects in about a millisecond, which is not a timeout.
+ */
+const COLD_START_RETRY_COOLDOWN_MS = 5 * 60_000;
+
+/** Epoch ms before which no cold-start retry may fire. */
+let coldStartRetryBlockedUntil = 0;
+
+/** Test seam: forget that an endpoint was last seen stalling. */
+export function resetColdStartRetry(): void {
+  coldStartRetryBlockedUntil = 0;
+}
+
+/**
+ * One request.
+ *
+ * `timedOut` is what separates "the budget expired" from every other failure,
+ * and it is tracked on the timer rather than sniffed off the rejection: an
+ * abort surfaces as a `DOMException`, a `TypeError` or a plain `Error`
+ * depending on the runtime, and a retry policy must not hinge on which.
+ */
+async function embedOnce(
+  texts: string[],
+  config: EmbeddingConfig,
+  budgetMs: number,
+): Promise<{ vectors: number[][] | null; timedOut: boolean }> {
+  const controller = new AbortController();
+  let timedOut = false;
+  const timer = setTimeout(() => {
+    timedOut = true;
+    controller.abort();
+  }, budgetMs);
+  try {
+    const res = await fetch(config.url, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        ...(config.apiKey ? { authorization: `Bearer ${config.apiKey}` } : {}),
+      },
+      body: JSON.stringify({ model: config.model, input: texts }),
+      signal: controller.signal,
+    });
+    if (!res.ok) return { vectors: null, timedOut: false };
+    const parsed = parseEmbeddingResponse(await res.json());
+    if (!parsed || parsed.length !== texts.length) return { vectors: null, timedOut: false };
+    return { vectors: parsed, timedOut: false };
+  } catch {
+    return { vectors: null, timedOut };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 /**
  * Embed a batch of texts.
  *
@@ -317,36 +443,32 @@ export async function embedTexts(
 ): Promise<number[][] | null> {
   if (!config || texts.length === 0) return null;
 
-  const cacheable = !opts.background && texts.length === 1;
-  const cacheKey = cacheable ? `${config.model} ${texts[0]}` : null;
+  const background = opts.background === true;
+  const cacheable = !background && texts.length === 1;
+  const cacheKey = cacheable ? `${config.model}\u0000${texts[0]}` : null;
   if (cacheKey) {
     const hit = cacheGet(cacheKey);
     if (hit) return [hit];
   }
 
-  const budget = opts.background ? config.backfillTimeoutMs : config.timeoutMs;
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), budget);
-  try {
-    const res = await fetch(config.url, {
-      method: "POST",
-      headers: {
-        "content-type": "application/json",
-        ...(config.apiKey ? { authorization: `Bearer ${config.apiKey}` } : {}),
-      },
-      body: JSON.stringify({ model: config.model, input: texts }),
-      signal: controller.signal,
-    });
-    if (!res.ok) return null;
-    const parsed = parseEmbeddingResponse(await res.json());
-    if (!parsed || parsed.length !== texts.length) return null;
-    if (cacheKey && parsed[0]?.length) cacheSet(cacheKey, parsed[0]);
-    return parsed;
-  } catch {
-    return null;
-  } finally {
-    clearTimeout(timer);
+  const budget = background ? config.backfillTimeoutMs : config.timeoutMs;
+  let attempt = await embedOnce(texts, config, budget);
+
+  // Background batches already carry a two-minute budget, so a cold start
+  // hides inside it — only the latency path has anything left to retry.
+  if (!attempt.vectors && attempt.timedOut && !background) {
+    const now = Date.now();
+    if (now >= coldStartRetryBlockedUntil) {
+      attempt = await embedOnce(texts, config, budget);
+      coldStartRetryBlockedUntil = !attempt.vectors && attempt.timedOut
+        ? now + COLD_START_RETRY_COOLDOWN_MS
+        : 0;
+    }
   }
+
+  if (!attempt.vectors) return null;
+  if (cacheKey && attempt.vectors[0]?.length) cacheSet(cacheKey, attempt.vectors[0]);
+  return attempt.vectors;
 }
 
 // ─────────────────────────────────────────────────────────
