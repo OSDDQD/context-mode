@@ -175,12 +175,22 @@ describe("schema byte ceilings", () => {
     // 15,284 characters at f74f5b0. Per-tool budgets alone would let every
     // tool creep to its own ceiling at once — they sum to 13,434 — so this
     // pins the number that actually reaches the model on every request, and is
-    // set below that sum so it genuinely binds. The measured total once every
-    // tool in this pass was finished is 12,359 — reproduce it with `npm run
-    // bundle` then a handshake, per the preamble. An earlier draft of this
-    // comment said 12,201, taken mid-pass while two retrieval tools were still
-    // being cut; it was never reproducible and is the same mistake the
-    // preamble already documents.
+    // set below that sum so it genuinely binds.
+    //
+    // There are two correct totals, and which one you measure depends on the
+    // mode: 12,359 in shared-DB mode, 12,174 outside it. The whole difference
+    // is `ctx_search.project` (185 characters), which
+    // `buildCtxSearchInputSchema` registers only when `CONTEXT_MODE_PROJECT_DIR`
+    // is set — deliberately, so that in the default per-project mode the model
+    // physically cannot pass a field that does not exist (#737). A handshake
+    // from the repository sets that variable from cwd and sees the field; one
+    // from a plugin install directory hits `isPluginInstallPath` in start.mjs
+    // and does not. This assertion runs against the larger of the two.
+    //
+    // An earlier draft said 12,201, taken mid-pass while two retrieval tools
+    // were still being cut. It was never reproducible — the same mistake the
+    // preamble documents, made a second time, which is why both numbers here
+    // carry the condition that produces them.
     //
     // No companion ratio assertion (schema bytes vs description bytes),
     // tempting as it is: it would fail whenever the tool prose is legitimately
