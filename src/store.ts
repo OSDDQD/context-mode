@@ -259,7 +259,7 @@ const CODE_CHUNK_MAX_DEPTH = 2;
 // as its own document and let BM25 length normalisation reward it for being
 // short. A kilobyte is roughly one documented function, and on this
 // repository it lands the median chunk at ~1.4 KB — see
-// docs/research/code-chunking-2026-08-18.md for the sweep.
+// the 2026-08-18 code-chunking sweep for the numbers.
 const CODE_CHUNK_MIN_BYTES = 1024;
 
 // ─────────────────────────────────────────────────────────

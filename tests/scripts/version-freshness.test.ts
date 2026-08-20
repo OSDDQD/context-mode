@@ -13,8 +13,7 @@
  * That is not hypothetical. d028f02 and c50eb66 both changed the tool surface
  * at a frozen 1.0.169, and the measured result was a live session serving 12
  * tools with `ctx_find` and `ctx_graph` missing entirely — the same class of
- * silent-invisibility failure as FORK-CHANGES entries 33 and 35, one layer
- * lower. `npm version patch` exists and works; it was simply not called. This
+ * silent-invisibility failure the tracked bundles produce, one layer lower. `npm version patch` exists and works; it was simply not called. This
  * test replaces that act of memory with a check.
  *
  * Comparison baseline is the last git tag, and the version at that tag is read

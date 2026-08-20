@@ -1,7 +1,7 @@
 /**
  * Latency benchmark — routed tool call vs. the native tool it replaces.
  *
- * BENCHMARK.md measures bytes saved. It never measured the price paid for them.
+ * The byte-savings numbers never measured the price paid for them.
  * That gap matters: a model routed onto a tool that answers slower pays twice
  * (the wait, and the temptation to go back to Grep), and no amount of blocking
  * fixes a path that is simply worse to walk. This script produces the missing

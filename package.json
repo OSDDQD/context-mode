@@ -11,7 +11,7 @@
   "description": "MCP plugin that saves 98% of your context window. Works with Claude Code and Codex CLI. Out-of-context code execution, FTS5 knowledge base, and intent-driven search.",
   "author": "OSDDQD",
   "contributors": [
-    "Mert Koseoğlu (https://github.com/mksglu)"
+    "Mert Koseo\u011flu (https://github.com/mksglu)"
   ],
   "license": "Elastic-2.0",
   "keywords": [
@@ -58,6 +58,7 @@
   ],
   "scripts": {
     "build": "tsc && node -e \"if(process.platform!=='win32'){require('fs').chmodSync('build/cli.js',0o755)}\" && npm run bundle && npm run assert-bundle && npm run assert-asymmetric-drift",
+    "prepare": "git rev-parse --git-dir > /dev/null 2>&1 && git config core.hooksPath .githooks || exit 0",
     "assert-bundle": "node scripts/assert-bundle.mjs server.bundle.mjs cli.bundle.mjs hooks/session-extract.bundle.mjs hooks/session-snapshot.bundle.mjs hooks/session-db.bundle.mjs hooks/session-attribution.bundle.mjs hooks/security.bundle.mjs",
     "assert-asymmetric-drift": "node scripts/assert-asymmetric-drift.mjs",
     "bundle": "esbuild src/server.ts --bundle --platform=node --target=node18 --format=esm --outfile=server.bundle.mjs --external:better-sqlite3 --external:@ff-labs/fff-node --external:turndown --external:turndown-plugin-gfm --external:@mixmark-io/domino --minify && esbuild src/cli.ts --bundle --platform=node --target=node18 --format=esm --outfile=cli.bundle.mjs --external:better-sqlite3 --external:@ff-labs/fff-node --minify && esbuild src/session/extract.ts --bundle --platform=node --target=node18 --format=esm --outfile=hooks/session-extract.bundle.mjs --minify && esbuild src/session/snapshot.ts --bundle --platform=node --target=node18 --format=esm --outfile=hooks/session-snapshot.bundle.mjs --minify && esbuild src/session/db.ts --bundle --platform=node --target=node18 --format=esm --outfile=hooks/session-db.bundle.mjs --external:better-sqlite3 --minify && esbuild src/session/project-attribution.ts --bundle --platform=node --target=node18 --format=esm --outfile=hooks/session-attribution.bundle.mjs --minify && esbuild src/security.ts --bundle --platform=node --target=node18 --format=esm --outfile=hooks/security.bundle.mjs --minify",

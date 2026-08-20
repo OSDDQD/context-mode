@@ -16,7 +16,7 @@ body:
 
         1. **Reproduce the bug** with a specific prompt (paste it below)
         2. **Ask your agent to debug it**: _"Read the context-mode hooks source and find why this error occurs"_
-        3. **Write a failing test** (RED) and fix it (GREEN) — see [CONTRIBUTING.md](https://github.com/OSDDQD/context-mode/blob/main/CONTRIBUTING.md)
+        3. **Write a failing test** (RED) and fix it (GREEN)
         4. **Open a PR** against `main` — CI verifies on Ubuntu, macOS, and Windows
 
         **Opening an issue does NOT guarantee a fix.** I welcome issues for discussion and triage, but the fastest path to resolution is a PR. If you can describe the bug, your AI agent can fix it.

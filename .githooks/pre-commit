@@ -1,0 +1,51 @@
+#!/bin/sh
+# Rebuild the tracked bundles from staged src/ and stage them with the commit.
+#
+# The host does not run this repository. It runs an unpacked copy under
+# ~/.claude/plugins/cache/context-mode/context-mode/<version>/, and what it
+# loads there is server.bundle.mjs / cli.bundle.mjs / hooks/*.bundle.mjs — never
+# src/. A commit that changes src/ without regenerating those bundles ships
+# source nobody executes: everything builds, every test passes, and the
+# installed plugin keeps running the previous code.
+#
+# This used to be a post-push CI job (.github/workflows/bundle.yml) that
+# rebuilt and committed the bundles behind you. Doing it here instead means the
+# commit is correct when it is made rather than repaired afterwards, and it
+# costs esbuild's ~100 ms rather than a CI round trip.
+#
+# Enable with: git config core.hooksPath .githooks
+# (`npm install` in a clone does it for you via the `prepare` script.)
+
+set -e
+
+# A rebase or merge replays commits that were already correct when authored.
+# Rebuilding mid-replay would inject the working tree's bundles into someone
+# else's commit, so stay out of the way.
+git_dir=$(git rev-parse --git-dir)
+if [ -d "$git_dir/rebase-merge" ] || [ -d "$git_dir/rebase-apply" ] || [ -f "$git_dir/MERGE_HEAD" ]; then
+  exit 0
+fi
+
+# Only src/ reaches a host through the bundles. Changes under hooks/ that are
+# not *.bundle.mjs ship as plain files and need no build.
+staged=$(git diff --cached --name-only --diff-filter=ACMR)
+case "$staged" in
+  *src/*) ;;
+  *) exit 0 ;;
+esac
+
+echo "pre-commit: src/ changed — regenerating the tracked bundles"
+npm run --silent bundle
+npm run --silent assert-bundle
+
+# The bundles are .gitignore'd and force-added, so a plain `git add` is a no-op.
+git add -f \
+  server.bundle.mjs \
+  cli.bundle.mjs \
+  hooks/session-extract.bundle.mjs \
+  hooks/session-snapshot.bundle.mjs \
+  hooks/session-db.bundle.mjs \
+  hooks/session-attribution.bundle.mjs \
+  hooks/security.bundle.mjs
+
+echo "pre-commit: bundles staged"

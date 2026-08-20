@@ -118,7 +118,7 @@ function getBashNudgeMinCommandBytes() {
 //
 // Read is the clean case: statSync gives the size BEFORE the call, so the loss
 // is not a guess, and ctx_execute_file answers the same question in 529 B where
-// Read spends 34 KB (BENCHMARK.md Part 4). Named heavy Bash commands are the
+// Read spends 34 KB (measured). Named heavy Bash commands are the
 // same shape.
 //
 // Grep and Glob are NOT that case, and the same measurements say so: ctx_find
@@ -405,7 +405,7 @@ function bashDenyReason(t, command, opening) {
 // same edit escape hatch) rather than opening a second, parallel ladder.
 //
 // Grep tops out at `ask` on purpose. ctx_find ranks where Grep enumerates
-// (BENCHMARK.md Part 4), so no amount of accumulated leakage makes refusing an
+// (measured), so no amount of accumulated leakage makes refusing an
 // exhaustive sweep the right answer — escalation raises the price of a call,
 // it does not invent a capability the replacement lacks.
 // ─────────────────────────────────────────────────────────────────────────

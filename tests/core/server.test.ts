@@ -3517,7 +3517,7 @@ describe("runBatchCommands P0 hardening", () => {
   });
 
   test("finding D: timing-regression — 5 cmds × 100ms at concurrency=5 finishes in <200ms", async () => {
-    // Replaces the deleted bench (CONTRIBUTING.md L275 forbids new test files).
+    // Replaces the deleted bench (no new test files for this domain).
     // Asserts ≥3× speedup over serial. CI-checked.
     const exec = mkMockExecutor(async () => {
       await new Promise((r) => setTimeout(r, 100));
@@ -6242,7 +6242,7 @@ describe("exec timeout policy — none unless the caller asks", () => {
 });
 
 // ─── ctx_* MCP tool annotations (#846) ───────────────────
-// "Server & tools" domain → this file owns tool registration per CONTRIBUTING.md.
+// "Server & tools" domain → this file owns tool registration.
 // Inspects the actual registered descriptors via the exported registry, not just
 // descriptions, so a missing/incorrect annotation fails CI.
 describe("ctx_* MCP tool annotations (#846)", () => {

@@ -8,7 +8,6 @@ tests/
 tsconfig.json
 !insight/tsconfig.json
 bun.lock
-BENCHMARK.md
 PRD*.md
 tasks/
 .github/

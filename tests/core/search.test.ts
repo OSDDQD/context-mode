@@ -22,9 +22,9 @@ import { SessionDB, hashProjectDirCanonical } from "../../src/session/db.js";
 import { searchAllSources, type UnifiedSearchResult } from "../../src/search/unified.js";
 import { searchAutoMemory } from "../../src/search/auto-memory.js";
 import { extractSnippet, formatBatchQueryResults, positionsFromHighlight } from "../../src/server.js";
-// Same scorer the measurement harness records the baseline with — see
-// scripts/lib/retrieval-metrics.mjs for why there is only one copy of it.
-import { byClass, misses, score } from "../../scripts/lib/retrieval-metrics.mjs";
+// Same scorer the recorded baseline was measured with — see
+// tests/lib/retrieval-metrics.mjs for why there is only one copy of it.
+import { byClass, misses, score } from "../lib/retrieval-metrics.mjs";
 
 // ─────────────────────────────────────────────────────────
 // Shared helpers
@@ -2698,9 +2698,8 @@ describe("Phrase-frequency reward in reranking", () => {
 // catches a change that trades wins for losses without touching any of them.
 //
 // Corpus and expectations live in tests/fixtures/relevance-corpus.json; the
-// baseline in tests/fixtures/retrieval-baseline.json is produced by
-// `node scripts/measure-retrieval.mjs --write-baseline`. Only the lexical arm
-// is gated here: the semantic arm needs a live embedding endpoint, and a gate
+// baseline in tests/fixtures/retrieval-baseline.json is a recorded snapshot
+// of the lexical arm. Only the lexical arm is gated here: the semantic arm needs a live embedding endpoint, and a gate
 // that fails when a model is unreachable is worse than no gate.
 // ═══════════════════════════════════════════════════════════════════════════
 
@@ -2823,8 +2822,8 @@ describe("Search relevance eval — competitive corpus", () => {
         measured[name],
         `lexical ${name} is ${measured[name].toFixed(3)}, baseline ${RETRIEVAL_BASELINE.lexical[name]} ` +
         `(floor ${floor.toFixed(3)}, tolerance ${tol}). ` +
-        `Re-measure with \`node scripts/measure-retrieval.mjs\` and, if the drop is intended, ` +
-        `record it with \`--write-baseline\`.`,
+        `If the drop is intended, record the new number in ` +
+        `tests/fixtures/retrieval-baseline.json.`,
       ).toBeGreaterThanOrEqual(floor);
     };
 

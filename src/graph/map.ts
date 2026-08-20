@@ -32,7 +32,7 @@
  * varies by a factor of three between a signature-dense TypeScript map and a
  * path-dense one. {@link countTokens} is the same estimator `ctx_stats` reports
  * with, so a map that claims 1 024 tokens and a stats line that claims 1 024
- * tokens mean the same thing (see docs/adr/0004).
+ * tokens mean the same thing (see ADR-0004).
  */
 
 import { countTokens } from "../session/tokenizer.js";

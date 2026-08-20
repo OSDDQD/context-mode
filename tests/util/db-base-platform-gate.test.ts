@@ -92,7 +92,7 @@ describe("db-base platform gate (#551)", () => {
 // the future re-adds a lockfile or EXCLUSIVE pragma to SQLiteBase, this
 // test will fail loudly in CI before merge. DO NOT delete or weaken it.
 //
-// See: docs/adr/0001-sessiondb-multi-writer.md
+// See: ADR-0001 (SessionDB multi-writer).
 // ─────────────────────────────────────────────────────────
 describe("v1.0.130 INVARIANT — SQLiteBase multi-writer default", () => {
   // Source-pin invariant. The behavioural test above proves the contract
@@ -196,7 +196,7 @@ describe("v1.0.130 INVARIANT — SQLiteBase multi-writer default", () => {
 // project SessionDB while the long-running MCP server is mid-WAL-write
 // (reporter: Aleksandr Yeganov, 1.0.141, repro ~20% of fresh sessions).
 //
-// ADR alignment: docs/adr/0001-sessiondb-multi-writer.md says
+// ADR alignment: ADR-0001 (SessionDB multi-writer) says
 // "WAL + busy_timeout + withRetry handle the actual concurrency safely."
 // That contract holds only if busy_timeout is actually set. This test
 // pins the contract on the public factory.

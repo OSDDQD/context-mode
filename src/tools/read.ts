@@ -1,7 +1,7 @@
 /**
  * ctx_read — the argument-free read path.
  *
- * Measured, not assumed (BENCHMARK.md Part 4): `ctx_execute_file` costs 26 ms
+ * Measured, not assumed: `ctx_execute_file` costs 26 ms
  * warm against `Read`'s 0.2 ms and returns 529 B where `Read` returns 34 KB.
  * Twenty-six milliseconds is invisible inside a model turn, so latency is not
  * why a model reaches for `Read` instead. What it reaches past is the `code`

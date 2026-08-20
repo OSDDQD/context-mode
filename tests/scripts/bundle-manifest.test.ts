@@ -2,6 +2,7 @@ import "../setup-home";
 import { describe, it, expect } from "vitest";
 import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { join, resolve } from "node:path";
+import { execFileSync } from "node:child_process";
 
 // @ts-expect-error — plain .mjs build script, no type declarations.
 import { extractBundleOutfiles } from "../../scripts/plugin-cache-integrity.mjs";
@@ -83,14 +84,20 @@ describe("bundle manifest", () => {
     ).toEqual([]);
   });
 
-  it("every produced bundle is committed by the CI bundle workflow", () => {
-    const workflow = readFileSync(join(ROOT, ".github/workflows/bundle.yml"), "utf-8");
-    const addLine = workflow.split("\n").find((l) => l.includes("git add -f"));
-    expect(addLine, "no `git add -f` step found in .github/workflows/bundle.yml").toBeDefined();
-    const uncommitted = producedBundles().filter((b) => !addLine!.includes(b));
+  it("every produced bundle is tracked by git", () => {
+    // The bundles are .gitignore'd and force-added, so a new one is invisible
+    // to `git status` — it has to be listed here or the stale copy in git wins
+    // on every install.
+    const tracked = new Set(
+      execFileSync("git", ["ls-files", "--", "*.bundle.mjs"], { cwd: ROOT, encoding: "utf-8" })
+        .split("\n")
+        .map((l) => l.trim())
+        .filter(Boolean),
+    );
+    const untracked = producedBundles().filter((b) => !tracked.has(b));
     expect(
-      uncommitted,
-      `rebuilt by CI but never committed — the stale copy in git wins on every install: ${uncommitted.join(", ")}`,
+      untracked,
+      `built but not tracked by git — the stale copy in git wins on every install: ${untracked.join(", ")}`,
     ).toEqual([]);
   });
 });

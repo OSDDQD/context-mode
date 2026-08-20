@@ -1,7 +1,7 @@
 /**
  * `ctx_pack` — one context package, assembled to a token budget.
  *
- * §3.7 of docs/plans/improvement-roadmap.md. The pieces already existed and
+ * §3.7 of the improvement roadmap. The pieces already existed and
  * were already cheap; what was missing was the thing that composes them and
  * hands the result to somebody else:
  *
@@ -27,7 +27,7 @@
  * `budget` counts TOKENS, measured with {@link countTokens} — the same
  * estimator `ctx_stats` and the repo map report with, so a package that claims
  * 4 096 tokens and a stats line that claims 4 096 tokens mean the same thing
- * (docs/adr/0004).
+ * (ADR-0004).
  *
  * The frame (title, legend, section headings, closing notes) is reserved off
  * the top, because a frame discovered afterwards is a budget that fails at the

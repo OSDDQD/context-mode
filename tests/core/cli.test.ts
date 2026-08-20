@@ -3471,8 +3471,7 @@ describe("better-sqlite3 binding self-heal (#408)", () => {
 });
 
 // ── Issue #564 — docs sync to hasModernSqlite() source of truth ────────
-// README and docs/platform-support.md historically promised "Node 18+"
-// (9 spots in README) and "Node >= 22.13" (platform-support), while the
+// README historically promised "Node 18+" (9 spots), while the
 // runtime gate (`hasModernSqlite()` in src/db-base.ts:226-244) uses 22.5.
 // Three numbers, three contracts. v1.0.132 collapses them to one — the
 // runtime gate is the canonical source.
@@ -3480,9 +3479,9 @@ describe("Issue #564 — docs match hasModernSqlite() source of truth", () => {
   const DB_BASE_SRC = readFileSync(resolve(ROOT, "src", "db-base.ts"), "utf-8");
 
   it("src/db-base.ts hasModernSqlite() uses the 22.5 floor (sanity / source of truth)", () => {
-    // If this fails, the floor moved — the README + docs assertions
-    // below need their threshold updated in lockstep. This test pins the
-    // contract so the docs assertions can not silently drift.
+    // If this fails, the floor moved — the README assertion below needs
+    // its threshold updated in lockstep. This test pins the contract so the
+    // README assertion can not silently drift.
     expect(DB_BASE_SRC).toContain("export function hasModernSqlite");
     // Inline major/minor compare must reference 22 and 5.
     expect(DB_BASE_SRC).toMatch(/major\s*===\s*22\s*&&\s*minor\s*>=\s*5/);
@@ -3500,13 +3499,6 @@ describe("Issue #564 — docs match hasModernSqlite() source of truth", () => {
     expect(readme).toMatch(/22\.5/);
   });
 
-  it("docs/platform-support.md SQLite Backend Selection table uses 22.5, not 22.13", () => {
-    const doc = readFileSync(resolve(ROOT, "docs", "platform-support.md"), "utf-8");
-    // The literal "22.13" must be gone — it disagrees with hasModernSqlite().
-    expect(doc).not.toMatch(/22\.13/);
-    // The 22.5 floor must be present.
-    expect(doc).toMatch(/22\.5/);
-  });
 });
 
 // ── Issue #564 — doctor RED FAIL on Linux + Node < 22.5 + no Bun ──────

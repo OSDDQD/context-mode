@@ -12,7 +12,7 @@
  *      expensive ones. A happy-path fetch that quietly makes three requests
  *      would pass every content assertion and still be the wrong product.
  *
- * The shapes below are the measured ones (scripts/measure-fetch-ladder.cjs,
+ * The shapes below are the measured ones (36 documentation pages,
  * 2026-08-12): developer.apple.com serves its `.md` with an EMPTY Content-Type
  * and an HTML comment as its first bytes, and angular.dev answers a missing
  * `.md` with HTTP 200 carrying the SPA shell.

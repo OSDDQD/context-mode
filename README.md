@@ -8,7 +8,7 @@
 > `ctx_fetch_and_index`, a WebFetch passthrough so claude.ai Artifact URLs reach the tool that can actually read
 > them (upstream #938/#984/#1006), a fix that finally makes Claude Code's own memory files searchable from
 > `ctx_search`, a `ctx upgrade` that pulls from *this* repo instead of silently reinstalling upstream over it,
-> a one-command upstream merge that survives the tracked bundles, and a contract test for ADR-0003.
+> a one-command upstream merge that survives the tracked bundles, and a contract test for the deny-reason routing contract.
 > New in fork rev 4: deferred-tool awareness for Claude Code's tool search (a ToolSearch bootstrap in the
 > SessionStart block, plus descriptions that upgrade to the full text once the handshake shows schemas are
 > deferred and free), SubagentStop transcript capture (`ctx_search` can answer from what a finished subagent
@@ -19,8 +19,6 @@
 > JavaScript-rendered shell is no longer reported as a successful fetch, the article is extracted instead of
 > the whole page transliterated, and SPA pages are recovered browser-free via their `.md` sibling or the host's
 > `llms.txt`.
-> See **[docs/FORK-CHANGES.md](docs/FORK-CHANGES.md)** for the full rationale, env vars, and trade-offs.
-
 **The other half of the context problem.**
 
 [![GitHub stars](https://img.shields.io/github/stars/OSDDQD/context-mode?style=flat&color=yellow)](https://github.com/OSDDQD/context-mode/stargazers) [![GitHub forks](https://img.shields.io/github/forks/OSDDQD/context-mode?style=flat&color=blue)](https://github.com/OSDDQD/context-mode/network/members) [![Last commit](https://img.shields.io/github/last-commit/OSDDQD/context-mode?color=green)](https://github.com/OSDDQD/context-mode/commits) [![License: ELv2](https://img.shields.io/badge/License-ELv2-blue.svg)](LICENSE)
@@ -35,7 +33,7 @@ Every MCP tool call dumps raw data into your context window. A Playwright snapsh
 
 Context Mode is an MCP server that solves all four sides of this problem:
 
-1. **Context Saving** — Sandbox tools keep raw data out of the context window. Across the 14 `ctx_execute_file` scenarios in [BENCHMARK.md](BENCHMARK.md), 315 KB of raw output comes back as 5.4 KB — a 98% reduction. That is a measured byte ratio over a named corpus, not a projection; `ctx stats` reports what your own sessions actually kept out.
+1. **Context Saving** — Sandbox tools keep raw data out of the context window. Across the 14 `ctx_execute_file` scenarios below, 315 KB of raw output comes back as 5.4 KB — a 98% reduction. That is a measured byte ratio over a named corpus, not a projection; `ctx stats` reports what your own sessions actually kept out.
 2. **Session Continuity** — Every file edit, git operation, task, error, and user decision is tracked in SQLite. When the conversation compacts, context-mode doesn't dump this data back into context — it indexes events into FTS5 and retrieves only what's relevant via BM25 search. The model picks up exactly where you left off. If you don't `--continue`, previous session data is deleted immediately — a fresh session means a clean slate.
 3. **Think in Code** — The LLM should program the analysis, not compute it. Instead of reading 50 files into context to count functions, the agent writes a script that does the counting and `console.log()`s only the result. One script replaces ten tool calls and saves 100x context. This is a mandatory paradigm on both supported clients: stop treating the LLM as a data processor, treat it as a code generator.
 
@@ -186,7 +184,7 @@ npm install -g context-mode
 
 Each `ctx_execute` call spawns a separate subprocess with its own process boundary. Scripts can't access each other's memory or state. The subprocess runs your code, captures stdout, and only that stdout enters the conversation context. The raw data — log files, API responses, snapshots — never enters your conversation.
 
-That boundary is about **context**, not security: the subprocess runs with the project root as its working directory and inherits the parent's filesystem permissions and (by default) its environment. It is not an OS sandbox. See [ADR-0006](docs/adr/0006-execution-isolation-posture.md) for what is and is not promised, and `CONTEXT_MODE_EXEC_ENV_MODE=allowlist` for tightening the environment half.
+That boundary is about **context**, not security: the subprocess runs with the project root as its working directory and inherits the parent's filesystem permissions and (by default) its environment. It is not an OS sandbox. Use `CONTEXT_MODE_EXEC_ENV_MODE=allowlist` to tighten the environment half.
 
 Twelve language runtimes are available: JavaScript, TypeScript, Python, Shell, Ruby, Go, Rust, PHP, Perl, R, Elixir, and C#. Bun is auto-detected for 3-5x faster JS/TS execution.
 
@@ -365,8 +363,7 @@ Detailed event data is also indexed into FTS5 for on-demand retrieval via `ctx_s
 | Plugin Marketplace | Yes |
 
 > One supported host since v1.2.0. Codex CLI was the second and was removed in
-> full — see [ADR-0026](docs/adr/0026-one-supported-host.md) for why, and
-> `git revert` of the deletion commit for how to bring it back.
+> full — `git revert` of the deletion commit brings it back.
 
 ### Routing Enforcement
 
@@ -379,8 +376,6 @@ Hooks intercept tool calls programmatically — they can block dangerous command
 | Claude Code | Yes (auto) | [`CLAUDE.md`](configs/claude-code/CLAUDE.md) | **~98% saved** | ~60% saved |
 
 Without hooks, one unrouted `curl` or Playwright snapshot can dump 56 KB into context — wiping out an entire session's worth of savings.
-
-See [`docs/platform-support.md`](docs/platform-support.md) for the full capability comparison.
 
 ## Utility Commands
 
@@ -425,8 +420,6 @@ Works on **all platforms**. On Claude Code, slash commands (`/ctx-stats`, `/ctx-
 | Repo research (subagent) | 986 KB | 62 KB | 94% |
 
 Summed over the 14 `ctx_execute_file` scenarios: 315 KB of raw output becomes 5.4 KB — 98% kept out. Session time extends from ~30 minutes to ~3 hours.
-
-[Full benchmark data with 21 scenarios →](BENCHMARK.md)
 
 ## Try It
 
@@ -548,7 +541,7 @@ That blocks loopback + RFC1918 + ULA in addition to the always-blocked ranges. U
 
 `tool_input` for any `mcp__*` tool call is also redacted before persistence — the regex matcher in `hooks/posttooluse.mjs` masks `authorization`, `auth_token`, `access_token`, `refresh_token`, `bearer`, `token`, `secret`, `password`, `passwd`, `pwd`, `api_key` / `apikey` / `x_api_key`, `cookie` / `set-cookie`, `signature`, `private_key`, and `client_secret` (case-insensitive, hyphen/underscore-insensitive) to `[REDACTED]` so credentials in MCP arguments don't end up in the session DB.
 
-> The two tables below cover the flags most people touch. **[docs/env-flags.md](docs/env-flags.md)** is the complete reference — every `CONTEXT_MODE_*` flag with its default, its layer, and whether you should set it.
+> The two tables below cover the flags most people touch. `ctx_doctor` reports every `CONTEXT_MODE_*` flag the running build actually reads.
 
 ### Storage environment variables
 
@@ -565,7 +558,7 @@ That blocks loopback + RFC1918 + ULA in addition to the always-blocked ranges. U
 | `CONTEXT_MODE_BASH_DENY_COMMANDS` | `npm test,docker logs,git log -p,find /(\s\|$)` | Comma-separated regexes for Bash commands whose output floods context; a match is refused with a ready `ctx_batch_execute`. An entry that is not valid regex falls back to a case-insensitive substring test. An empty value turns the list off. |
 | `CONTEXT_MODE_GREP_ASK` | on | `0` stops `Grep`/`Glob` asking for confirmation. Only unbounded searches ask — no path, no glob, no `head_limit`, matching lines rather than names — and it is `ask`, never `deny`, because `ctx_find` ranks rather than enumerates and an exhaustive literal sweep is what `Grep` is for. |
 | `CONTEXT_MODE_NUDGE_AFTER_CALLS` | `3` | Unrouted heavy calls per step of the escalation ladder. Three buys the advisory back, six turns it into a redirect, nine into a refusal; there is no step past refusing. What each step means depends on the tool: `Bash` redirects from the second step up (the replacement runs the same command, so there is nothing to confirm), `Read` confirms at the second and refuses at the third, `Grep` never goes past a confirmation. A session that routes its heavy work sits at step zero and never hears from the plugin. |
-| `CONTEXT_MODE_BASH_ESCALATION_ASK` | off | `1` restores the confirmation prompt on Bash's escalation rung. It was the default until ADR-0025 and it was the one step whose two answers were both losses: "No" reached the model as a refusal with no replacement attached and ended the turn, "Yes" put the whole output in the window *and* booked the call as sanctioned, so the ladder stopped counting the bytes that had just arrived. |
+| `CONTEXT_MODE_BASH_ESCALATION_ASK` | off | `1` restores the confirmation prompt on Bash's escalation rung. It was the default until v1.2.0 and it was the one step whose two answers were both losses: "No" reached the model as a refusal with no replacement attached and ended the turn, "Yes" put the whole output in the window *and* booked the call as sanctioned, so the ladder stopped counting the bytes that had just arrived. |
 | `CONTEXT_MODE_NUDGE_AFTER_BYTES` | `102400` (100 KB) | The same ladder measured in leaked bytes. Whichever of the two thresholds is further along sets the step. |
 | `CONTEXT_MODE_ESCALATION_WINDOW_MS` | `900000` (15 min) | How far back the ladder counts. The step follows recent behaviour, not the session's history: a window with no heavy call returns the session to silence on its own. The session totals stay in the wording — the notice says what the session has spent, the ladder prices what it is doing now. |
 | `CONTEXT_MODE_ESCALATION_DENY_MIN_BYTES` | `16384` (16 KB) | Size below which the ladder's DENY step refuses nothing. A refusal costs about a kilobyte of reason text and usually ends with the file being read anyway, so below this it is friction bought at a loss; the value can only be raised. The `ask` step gets the same rule at half the number (8 KB), derived from this one so the two steps cannot end up in the wrong order — below it the ladder keeps only its advisory. Distinct from `CONTEXT_MODE_MISSED_REDIRECT_MIN_BYTES`, which decides what is worth *recording*. |
@@ -575,14 +568,46 @@ That blocks loopback + RFC1918 + ULA in addition to the always-blocked ranges. U
 | `CONTEXT_MODE_ADHERENCE_MIN_BYTES` | `2000` | Heaviness line for the routing-adherence ratio in `ctx_stats`. Clamped up to `CONTEXT_MODE_MISSED_REDIRECT_MIN_BYTES`: measuring below the collection floor would drop unrouted calls out of the denominator while routed ones stayed in, and the ratio would flatter exactly where it should complain. |
 | `CONTEXT_MODE_EXTERNAL_MCP_NUDGE_EVERY` | `10` | Cadence (in tool calls) at which the PreToolUse hook re-injects the "wrap large external-MCP payloads in `ctx_execute`" guidance. The original implementation ([#529](https://github.com/mksglu/context-mode/pull/529)) fired only once per session, which got lost after context compaction in MCP-heavy sessions (e.g. 50+ Jira/Slack/Notion calls — see [#567](https://github.com/mksglu/context-mode/issues/567) follow-up). The default re-fires every 10th matching call, keeping the guidance in the model's recent window. Range `[1, 100]`; invalid values fall back to `10`. Set to `1` for "every call" (most aggressive — adds ~250 tokens/call) or to a larger value for less frequent reminders. |
 
-## Contributing
-
-See [CONTRIBUTING.md](CONTRIBUTING.md) for the development workflow and TDD guidelines.
+## Development
 
 ```bash
 git clone https://github.com/OSDDQD/context-mode.git
 cd context-mode && npm install && npm test
 ```
+
+Tests are Vitest (`npm test`, which rebuilds first via `pretest`);
+`npx tsc --noEmit` typechecks `src/` and `npx tsc -p tsconfig.test.json --noEmit`
+typechecks the suites. New behaviour goes in as a failing test first.
+
+### What the host actually runs
+
+Claude Code does not run this repository. It runs an unpacked copy under
+`~/.claude/plugins/cache/context-mode/context-mode/<version>/`, **and the cache
+key is the version number.** Two consequences follow:
+
+- `src/` never reaches a host. Only `server.bundle.mjs`, `cli.bundle.mjs` and
+  `hooks/*.bundle.mjs` do. `npm run bundle` regenerates them; the `pre-commit`
+  hook in `.githooks/` does it automatically whenever a commit touches `src/`,
+  and force-adds the result (the bundles are `.gitignore`d and tracked anyway).
+  Files under `hooks/` that are not `*.bundle.mjs` ship as-is and need no build.
+- A changed delivery under an unchanged version number is invisible: the host
+  keeps the old cache directory forever. `tests/scripts/version-freshness.test.ts`
+  fails the build when the bundles or `hooks/` moved since the last git tag
+  without a version bump.
+
+### Releasing
+
+```bash
+npm version patch          # bumps package.json, syncs both .claude-plugin
+                           # manifests, commits and tags
+git push --follow-tags     # the marketplace clone pulls from GitHub main
+```
+
+Then, inside Claude Code, `/context-mode:ctx-upgrade`. It git-pulls
+`~/.claude/plugins/marketplaces/context-mode/`, unpacks a fresh cache directory
+under the new version, and the next session loads it. Nothing about this is
+automatic — until the upgrade runs, the host keeps serving the version it
+installed.
 
 ## License
 

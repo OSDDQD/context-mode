@@ -2,7 +2,7 @@
  * `ctx_search` — the tool registration and its handler.
  *
  * First region moved out of `src/server.ts` under the plan in
- * `docs/plans/`. The boundary is chosen by what the fork has already
+ * the roadmap. The boundary is chosen by what the fork has already
  * rewritten: this handler conflicts on every `sync-upstream`, so moving it
  * costs nothing extra and gives the next merge a smaller file to reconcile.
  *

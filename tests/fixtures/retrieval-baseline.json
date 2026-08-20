@@ -1,7 +1,7 @@
 {
-  "note": "Lexical retrieval baseline for the gate in tests/core/search.test.ts. Regenerate with `node scripts/measure-retrieval.mjs --write-baseline`. Only the lexical arm is recorded: it is deterministic given the corpus, while the hybrid arm needs a live embedding endpoint and is measured by the script alone.",
+  "note": "Lexical retrieval baseline for the gate in tests/core/search.test.ts. Only the lexical arm is recorded: it is deterministic given the corpus, while the hybrid arm needs a live embedding endpoint.",
   "measuredAt": "2026-08-18",
-  "harness": "node scripts/measure-retrieval.mjs --write-baseline",
+  "harness": "recorded snapshot — update by hand when a ranking change is intended",
   "corpus": {
     "path": "tests/fixtures/relevance-corpus.json",
     "documents": 40,

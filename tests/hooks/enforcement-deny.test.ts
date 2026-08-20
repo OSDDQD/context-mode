@@ -9,7 +9,7 @@
  *
  * Read is refusable: statSync knows the size BEFORE the call, so the loss is
  * measured rather than guessed, and ctx_execute_file answers the same question
- * in 529 B where Read spends 34 KB (BENCHMARK.md Part 4).
+ * in 529 B where Read spends 34 KB (measured).
  *
  * Grep is not, and the same benchmark is why: ctx_find returns 2.6 KB against
  * 0.7 KB for `rg -l`, and it ranks rather than enumerates. Refusing Grep would

@@ -13,7 +13,7 @@ import { existsSync, unlinkSync, renameSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 // v1.0.130 — `acquireDbLock` + `locking_mode = EXCLUSIVE` were REMOVED.
-// See docs/adr/0001-sessiondb-multi-writer.md for the architectural
+// See ADR-0001 (SessionDB multi-writer) for the architectural
 // rationale. The short version: SessionDB is multi-writer-safe and the
 // process-identity invariants the lockfile tried to enforce belong in
 // the process layer (sibling-mcp), not the DB layer. WAL + busy_timeout
@@ -354,7 +354,7 @@ export function applyWALPragmas(db: DatabaseInstance): void {
   // contract. WAL + busy_timeout + the withRetry() wrapper below handle
   // SQLITE_BUSY natively. EXCLUSIVE locking is opt-out, never opt-in
   // from a base class shared by multi-writer consumers.
-  // See docs/adr/0001-sessiondb-multi-writer.md for the v1.0.130 ADR.
+  // See ADR-0001 (SessionDB multi-writer) for the v1.0.130 decision.
 }
 
 // ─────────────────────────────────────────────────────────
@@ -544,7 +544,7 @@ export abstract class SQLiteBase {
    * misdetection writing to the wrong DB path), both fixed in v1.0.128
    * + v1.0.129. The single-writer guard broke legitimate multi-window
    * users; v1.0.130 rolls it out. See
-   * docs/adr/0001-sessiondb-multi-writer.md and the v1.0.130 INVARIANT
+   * ADR-0001 (SessionDB multi-writer) and the v1.0.130 INVARIANT
    * block in tests/util/db-base-platform-gate.test.ts for the
    * regression-proof anchor (source-pin + behavioural).
    */

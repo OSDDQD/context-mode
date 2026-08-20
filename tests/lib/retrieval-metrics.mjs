@@ -1,10 +1,9 @@
-// Ranking metrics for the retrieval corpus, shared by the measurement harness
-// (scripts/measure-retrieval.mjs) and the gate in tests/core/search.test.ts.
+// Ranking metrics for the retrieval corpus, shared by the gate in
+// tests/core/search.test.ts and the ranking assertions in tests/core/find.test.ts.
 //
-// One implementation on purpose: the gate compares a number the test computes
-// against a number the harness recorded, and two copies of "what precision@1
-// means" would let those drift apart silently — which is exactly the failure a
-// baseline gate exists to catch.
+// One implementation on purpose: two copies of "what precision@1 means" would
+// let those drift apart silently — which is exactly the failure a baseline gate
+// exists to catch.
 //
 // A run is scored from rows of `{ cls, relevant, sources }`, where `sources` is
 // the ranked list of source labels the search returned.

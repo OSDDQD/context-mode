@@ -38,7 +38,7 @@ import {
   appendFindSelection, consumeFindSelections, matchSelection,
   readFindCandidates, recordFindCandidates,
 } from "../../src/search/query-marker.js";
-import { score } from "../../scripts/lib/retrieval-metrics.mjs";
+import { score } from "../lib/retrieval-metrics.mjs";
 
 // ─────────────────────────────────────────────────────────
 // Fixtures

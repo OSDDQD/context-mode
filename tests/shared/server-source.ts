@@ -30,7 +30,7 @@ const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..");
  */
 export const SERVER_SOURCE_FILES: readonly string[] = [
   "src/server.ts",
-  // Extracted from src/server.ts — see docs/adr and the split commits.
+  // Extracted from src/server.ts — see the split commits.
   // ctx_execute + ctx_execute_file register first, so they lead the list.
   "src/tools/execute.ts",
   "src/tools/index-content.ts",

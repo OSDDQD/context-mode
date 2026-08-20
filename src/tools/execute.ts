@@ -535,7 +535,7 @@ export function registerCtxExecute(deps: ExecuteToolDeps): {
    * `ctx_read` (src/tools/read.ts) is exactly this function with a default
    * program supplied for `code`. Reimplementing the path would have meant two
    * routes into the executor and two sets of security checks, and would have
-   * quietly invalidated the latency numbers in BENCHMARK.md Part 4 — those
+   * quietly invalidated the recorded latency numbers — those
    * measure this path, and only stay true of `ctx_read` while `ctx_read` is
    * this path.
    *

@@ -1594,7 +1594,7 @@ async function safeText(resp) {
 //   2b  the origin's llms.txt, followed only when it names a DIFFERENT url for
 //       this page than 2a already tried
 //
-// Measured 2026-08-12 over 36 documentation pages (scripts/measure-fetch-ladder.cjs):
+// Measured 2026-08-12 over 36 documentation pages:
 // developer.apple.com/documentation/swiftui/view converts to 36 B of text from
 // a 17,486 B shell \u2014 the hardest measured SPA \u2014 and its '.md' sibling returns
 // 5,593 B of the real article. reactnative.dev/docs/view ignores the Accept

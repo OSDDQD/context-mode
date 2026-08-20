@@ -1,5 +1,5 @@
 {
-  "note": "Retrieval-quality corpus. Documents are indexed into one store, so every query is answered under competition from 39 other sources. `relevant` is the ground truth scored by scripts/measure-retrieval.mjs. `gate: true` cases are additionally asserted one by one in tests/core/search.test.ts; `legacy: true` marks the 18 that predate the move out of that file and must keep passing verbatim.",
+  "note": "Retrieval-quality corpus. Documents are indexed into one store, so every query is answered under competition from 39 other sources. `relevant` is the ground truth scored by tests/lib/retrieval-metrics.mjs. `gate: true` cases are additionally asserted one by one in tests/core/search.test.ts; `legacy: true` marks the 18 that predate the move out of that file and must keep passing verbatim.",
   "classes": {
     "keyword": "terms the document literally contains — lexical search must win",
     "title": "the query matches a document heading",

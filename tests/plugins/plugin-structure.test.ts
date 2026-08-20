@@ -97,8 +97,7 @@ describe("plugin layout", () => {
     // `skills/.ignore` is a file, not a skill directory. Pi's skill loader scans
     // with includeRootFiles=true and reads it to decide what to skip (#496), and
     // it only consults the directory it scans — so it cannot be moved out. Any
-    // walk over skills/ must expect a file here. See CONTRIBUTING.md → Plugin
-    // layout contract.
+    // walk over skills/ must expect a file here.
     const ignorePath = join(repoRoot, "skills", ".ignore");
     expect(existsSync(ignorePath), "skills/.ignore went missing — Pi will parse non-skills as skills").toBe(true);
 
@@ -428,7 +427,6 @@ describe("fork identity", () => {
     expect(plugin.description ?? "", "the fork's origin should stay stated somewhere").toMatch(
       /fork of/i,
     );
-    expect(existsSync(join(repoRoot, "docs", "FORK-CHANGES.md"))).toBe(true);
   });
 });
 
@@ -460,7 +458,6 @@ describe("savings claim", () => {
       "marketplace.json",
     ).plugins[0].description;
     const readme = readFileSync(join(repoRoot, "README.md"), "utf-8");
-    const benchmark = readFileSync(join(repoRoot, "BENCHMARK.md"), "utf-8");
 
     // Whatever the number is, it has to be the SAME number everywhere and it has
     // to be traceable to the measured corpus rather than to a marketing round-up.
@@ -470,6 +467,5 @@ describe("savings claim", () => {
       expect(text, `${name}: savings claim lost its measured basis`).toMatch(/98% reduction/);
     }
     expect(readme).toMatch(/315 KB of raw output comes back as 5\.4 KB/);
-    expect(benchmark).toMatch(/315 KB raw → 5\.4 KB context \(98% savings\)/);
   });
 });

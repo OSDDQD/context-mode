@@ -18,7 +18,7 @@
 - [ ] Tests added/updated (TDD: red → green)
 - [ ] `npm test` passes
 - [ ] `npm run typecheck` passes
-- [ ] Docs updated if needed (README, platform-support.md)
+- [ ] README updated if needed
 - [ ] No Windows path regressions (forward slashes only)
 - [ ] Targets `main`
 
