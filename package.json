@@ -1,6 +1,6 @@
 {
   "name": "context-mode",
-  "version": "1.2.0",
+  "version": "1.2.1",
   "fork": {
     "name": "OSDDQD/context-mode",
     "repo": "https://github.com/OSDDQD/context-mode.git",
@@ -11,7 +11,7 @@
   "description": "MCP plugin that saves 98% of your context window. Works with Claude Code and Codex CLI. Out-of-context code execution, FTS5 knowledge base, and intent-driven search.",
   "author": "OSDDQD",
   "contributors": [
-    "Mert Koseo\u011flu (https://github.com/mksglu)"
+    "Mert Koseoğlu (https://github.com/mksglu)"
   ],
   "license": "Elastic-2.0",
   "keywords": [

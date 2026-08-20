@@ -6,14 +6,14 @@
   },
   "metadata": {
     "description": "Claude Code plugins by OSDDQD",
-    "version": "1.2.0"
+    "version": "1.2.1"
   },
   "plugins": [
     {
       "name": "context-mode",
       "source": "./",
       "description": "Claude Code MCP plugin that keeps raw tool output out of your context window — 315 KB of benchmarked output comes back as 5.4 KB (98% reduction). Sandboxed code execution in 12 languages, FTS5 knowledge base with BM25 ranking, fused project-wide search, and codegraph-backed structural queries. Fork of mksglu/context-mode.",
-      "version": "1.2.0",
+      "version": "1.2.1",
       "author": {
         "name": "OSDDQD",
         "url": "https://github.com/OSDDQD"
