@@ -280,6 +280,15 @@ function readJsonSafe(path) {
  * Mirrors the rewrite logic in hooks/normalize-hooks.mjs for placeholder
  * and stale-cache-version drift shapes. The `command` field is left
  * alone (start.mjs's normalize call repairs it on the next clean boot).
+ *
+ * This writer cannot dirty a development checkout the way normalize-hooks
+ * once did: healPartialInstallFromMarketplace is the only caller, and it
+ * bails with skipped="not-claude-code" unless deriveMarketplaceClonePath
+ * recognises pluginRoot as a `.../plugins/cache/<owner>/<plugin>/<version>/`
+ * dir — a shape a clone never has. The `.git` refusal in normalize-hooks is
+ * the general form of the same rule; kept there rather than imported here
+ * because this module must keep working when normalize-hooks.mjs is one of
+ * the files missing from a partial install.
  */
 function rewritePluginJsonArgs(pluginRoot) {
   const pluginJsonPath = join(pluginRoot, ".claude-plugin", "plugin.json");

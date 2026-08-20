@@ -1,7 +1,12 @@
 #!/usr/bin/env node
 import { execSync, spawn } from "node:child_process";
-import { existsSync, chmodSync, readFileSync, writeFileSync, readdirSync, symlinkSync, mkdirSync, lstatSync, unlinkSync } from "node:fs";
-import { dirname, resolve, join, sep } from "node:path";
+// Symlink primitives (readdirSync/lstatSync/symlinkSync) are deliberately NOT
+// imported here: every cache-symlink decision goes through
+// hooks/cache-heal-utils.mjs so Layer 1 cannot grow a second, subtly different
+// notion of "newest version dir" — which is what produced the 1.0.171 ↔ 1.0.169
+// cycle in the first place.
+import { existsSync, chmodSync, readFileSync, writeFileSync, mkdirSync, unlinkSync } from "node:fs";
+import { basename, dirname, resolve, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { homedir } from "node:os";
 
@@ -137,6 +142,14 @@ if (typeof globalThis.Bun === "undefined" && process.platform === "linux") {
 // ── Self-heal Layer 1: Fix registry → symlink mismatches (anthropics/claude-code#46915) ──
 // Claude Code auto-update can leave installed_plugins.json pointing to a non-existent
 // directory. We detect this and create symlinks so hooks find the right path.
+//
+// The symlink rules this layer obeys (R1-R5) live in hooks/cache-heal-utils.mjs
+// and are IMPORTED here rather than re-implemented, so this layer and the
+// SessionStart hook deployed by Layer 4 — whose source text comes out of the
+// same module — can never disagree about what a valid heal target is. The
+// deployed hook restates the rules inline because it must keep working when
+// the plugin directory is exactly what is broken; see the comment on
+// CACHE_HEAL_HOOK_SOURCE. Change one, change the other.
 const cacheMatch = __dirname.match(
   /^(.*[\/\\]plugins[\/\\]cache[\/\\][^\/\\]+[\/\\][^\/\\]+[\/\\])([^\/\\]+)$/,
 );
@@ -146,23 +159,30 @@ if (cacheMatch) {
     const myVersion = cacheMatch[2];
     const claudeConfigDir = resolveClaudeConfigDir();
     const ipPath = resolve(claudeConfigDir, "plugins", "installed_plugins.json");
+    const { newestRealPluginDir, pruneBrokenPluginAliases, healCacheInstallPath } =
+      await import("./hooks/cache-heal-utils.mjs");
 
-    // Forward heal: if a newer version dir exists, update registry
-    const dirs = readdirSync(cacheParent).filter((d) =>
-      /^\d+\.\d+\.\d+/.test(d),
-    );
-    if (dirs.length > 1) {
-      dirs.sort((a, b) => {
-        const pa = a.split(".").map(Number);
-        const pb = b.split(".").map(Number);
-        for (let i = 0; i < 3; i++) {
-          if ((pa[i] ?? 0) !== (pb[i] ?? 0))
-            return (pa[i] ?? 0) - (pb[i] ?? 0);
-        }
-        return 0;
-      });
-      const newest = dirs[dirs.length - 1];
-      if (newest && newest !== myVersion) {
+    // R3, and it runs FIRST: a cycle anywhere in this directory poisons every
+    // lookup that follows, including the newest-real-dir scan below. On the
+    // machine that motivated this fix the versions dir held nothing but
+    // symlinks — `1.0.171 -> 1.0.169 -> 1.0.171` plus seven older names
+    // pointing into the loop — so every existsSync() answered ELOOP, read as
+    // "missing", and the old heal re-created the loop on each boot until the
+    // plugin stopped loading at all: a session with ZERO ctx_* tools and no
+    // error anywhere to say so.
+    pruneBrokenPluginAliases(cacheParent);
+
+    // Forward heal: if a newer version dir exists, update registry.
+    // R1 decides what counts: the old filter matched the directory NAME only,
+    // so a symlink named like a version could become "newest" and the registry
+    // would be pointed at a link — the first edge of the cycle above.
+    const newestReal = newestRealPluginDir(cacheParent);
+    if (newestReal) {
+      // Name from the resolved dir, path rebuilt lexically: the registry must
+      // keep naming the path the host itself walks, not a realpath that may
+      // have resolved a symlinked $HOME out from under it.
+      const newest = basename(newestReal);
+      if (newest !== myVersion) {
         // Issue #727: normalize hooks.json + plugin.json in the newest version
         // dir BEFORE updating the registry. CC's auto-update carries forward
         // files from the old cache dir, including hooks.json and plugin.json
@@ -198,24 +218,27 @@ if (cacheMatch) {
       }
     }
 
-    // Reverse heal: if registry points to non-existent dir, create symlink to us
+    // Reverse heal: registry names a directory that cannot serve — link it at a
+    // real tree, or leave it alone. `healCacheInstallPath` owns the whole
+    // decision (R1-R5), including the two things the old code got wrong: it
+    // classifies with lstat + realpath instead of existsSync (so a cycle reads
+    // as a cycle, not as "missing") and it only ever links at a directory that
+    // is real and actually bootable. `__dirname` is offered as the preferred
+    // target because this process is executing out of it — and is still put
+    // through R1/R2 rather than trusted, so a plugin root we ourselves reached
+    // through an alias never becomes the target of another alias.
     const cacheRoot = resolve(claudeConfigDir, "plugins", "cache");
     if (existsSync(ipPath)) {
       const ip = JSON.parse(readFileSync(ipPath, "utf-8"));
       for (const [key, entries] of Object.entries(ip.plugins || {})) {
         if (key !== "context-mode@context-mode") continue;
-        for (const entry of entries) {
-          const rp = entry.installPath;
-          if (!rp || existsSync(rp) || rp === __dirname) continue;
-          // Path traversal guard: only allow paths inside plugin cache
-          if (!resolve(rp).startsWith(cacheRoot + sep)) continue;
-          try {
-            // Remove dangling symlink before creating new one
-            try { if (lstatSync(rp).isSymbolicLink()) unlinkSync(rp); } catch {}
-            const rpParent = dirname(rp);
-            if (!existsSync(rpParent)) mkdirSync(rpParent, { recursive: true });
-            symlinkSync(__dirname, rp, process.platform === "win32" ? "junction" : undefined);
-          } catch { /* best effort */ }
+        for (const entry of entries || []) {
+          if (!entry || entry.installPath === __dirname) continue;
+          healCacheInstallPath({
+            installPath: entry.installPath,
+            cacheRoot,
+            preferredTarget: __dirname,
+          });
         }
       }
     }
@@ -302,7 +325,7 @@ try {
 //   - On every boot we self-heal stale "/opt/homebrew/Cellar/node/<ver>/..." paths
 //     left behind by older versions of this code.
 try {
-  const { buildHookCommand, selfHealCacheHealHook, ensureShebangAndExecBit } =
+  const { buildHookCommand, selfHealCacheHealHook, ensureShebangAndExecBit, CACHE_HEAL_HOOK_SOURCE } =
     await import("./hooks/cache-heal-utils.mjs");
 
   // #577: honor $CLAUDE_CONFIG_DIR — without this, Claude Code spawns hooks
@@ -318,56 +341,11 @@ try {
     try { unlinkSync(oldBashHook); } catch {}
   }
   if (!existsSync(globalHooksDir)) mkdirSync(globalHooksDir, { recursive: true });
-  const healScript = `#!/usr/bin/env node
-// context-mode plugin cache self-heal (auto-deployed)
-// Fixes anthropics/claude-code#46915: auto-update breaks CLAUDE_PLUGIN_ROOT
-// Issue #727: also normalizes stale version paths in existing installPaths
-// Honors CLAUDE_CONFIG_DIR (#577) — checked at this script's runtime so users
-// who set CLAUDE_CONFIG_DIR after install still get healed correctly.
-// Pure Node.js — no bash/shell dependency.
-import{existsSync,readdirSync,statSync,symlinkSync,lstatSync,unlinkSync,readFileSync}from"node:fs";
-import{dirname,join,resolve,sep}from"node:path";
-import{homedir}from"node:os";
-function cfgDir(){const e=process.env.CLAUDE_CONFIG_DIR;if(e&&e.trim()!==""){return e.startsWith("~")?resolve(homedir(),e.replace(/^~[/\\\\]?/,"")):resolve(e)}return resolve(homedir(),".claude")}
-try{
-  const f=resolve(cfgDir(),"plugins","installed_plugins.json");
-  if(!existsSync(f))process.exit(0);
-  const cacheRoot=resolve(cfgDir(),"plugins","cache");
-  const ip=JSON.parse(readFileSync(f,"utf-8"));
-  for(const[k,es]of Object.entries(ip.plugins||{})){
-    if(k!=="context-mode@context-mode")continue;
-    for(const e of es){
-      const p=e.installPath;
-      if(!p)continue;
-      if(!resolve(p).startsWith(cacheRoot+sep))continue;
-      if(existsSync(p)){
-        // Issue #727: normalize stale version paths in existing installPaths.
-        // CC's auto-update can carry forward hooks.json/plugin.json with paths
-        // baked to a previous version dir. Import normalize-hooks from the
-        // installPath itself and let it detect + rewrite stale segments.
-        try{
-          // #713: narrow helper only — installPath belongs to a different
-          // version's cache dir; writing plugin.json there is the #711 vector.
-          const nhPath=join(p,"hooks","normalize-hooks.mjs");
-          if(existsSync(nhPath)){
-            const mod=await import(nhPath);
-            const fn=mod.normalizeHooksJsonOnly||mod.normalizeHooksOnStartup;
-            if(fn)fn({pluginRoot:p,nodePath:process.execPath,platform:process.platform});
-          }
-        }catch{}
-        continue;
-      }
-      const parent=dirname(p);
-      if(!existsSync(parent))continue;
-      try{if(lstatSync(p).isSymbolicLink())unlinkSync(p)}catch{}
-      const dirs=readdirSync(parent).filter(d=>/^\\d+\\.\\d+/.test(d)&&statSync(join(parent,d)).isDirectory());
-      if(!dirs.length)continue;
-      dirs.sort((a,b)=>{const pa=a.split(".").map(Number),pb=b.split(".").map(Number);for(let i=0;i<3;i++){if((pa[i]||0)!==(pb[i]||0))return(pa[i]||0)-(pb[i]||0)}return 0});
-      try{symlinkSync(join(parent,dirs[dirs.length-1]),p,process.platform==="win32"?"junction":undefined)}catch{}
-    }
-  }
-}catch{}
-`;
+  // The script text is the twin of the R1-R5 helpers Layer 1 imports; both
+  // live in hooks/cache-heal-utils.mjs so they cannot drift apart. It is kept
+  // as text rather than as a file this deploy copies because the hook has to
+  // survive a plugin dir that no longer resolves — see CACHE_HEAL_HOOK_SOURCE.
+  const healScript = CACHE_HEAL_HOOK_SOURCE;
   // Deploy or update the heal hook when content changes (not just when missing).
   // Allows new heal logic (e.g. #727 path normalization) to propagate on next boot.
   let needsWrite = !existsSync(healHookPath);
@@ -438,6 +416,14 @@ try{
 // Skip under vitest: server.test.ts spawns this script from the repo root,
 // and a mutated .claude-plugin/plugin.json poisons sibling tests that read
 // the file (cli.test.ts). VITEST is inherited by spawned subprocesses.
+//
+// The VITEST check is no longer the load-bearing protection for a checkout:
+// `pluginRoot` here is `__dirname`, i.e. the contributor's own working tree
+// when the server is smoke-tested with `node start.mjs` outside vitest, and
+// that used to rewrite tracked hooks/hooks.json + .claude-plugin/plugin.json
+// with machine-local absolute paths. normalize-hooks now refuses to persist
+// any rewrite under a root carrying `.git` and says so on stderr; this env
+// check just keeps the test-suite path from even reaching it.
 if (!process.env.VITEST) {
   try {
     const { normalizeHooksOnStartup } = await import("./hooks/normalize-hooks.mjs");

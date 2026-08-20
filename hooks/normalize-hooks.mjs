@@ -18,6 +18,101 @@ import { resolve } from "node:path";
 
 const PLACEHOLDER = "${CLAUDE_PLUGIN_ROOT}";
 
+// ─────────────────────────────────────────────────────────────────────────
+// Source-checkout refusal (#523 / #711 aimed at the REPOSITORY, not the cache)
+//
+// The placeholder→absolute rewrite below is correct for an INSTALLED plugin
+// (a cache copy that only this machine ever reads) and always wrong for a
+// DEVELOPMENT CHECKOUT: running `node start.mjs` / `bun start.mjs` from a clone
+// to smoke-test the MCP server used to rewrite two TRACKED files in place —
+//   .claude-plugin/plugin.json  "command": "node" → "/home/<user>/.bun/bin/bun"
+//                               args[0] → "/home/<user>/projects/context-mode/start.mjs"
+//   hooks/hooks.json            all 14 commands → the same machine-local paths
+// — so every contributor silently dirtied their working tree, and committing
+// that ships a plugin pointing at a stranger's home directory. Same failure
+// class as #523 and #711/#713, which were about the cache copy.
+//
+// The signal: an installed copy has no `.git`, a checkout does. It is sound for
+// the two files THIS module writes because both are consumed exclusively by
+// Claude Code, and none of Claude Code's install paths carry `.git`:
+//   - the native plugin manager COPIES the package into
+//     ~/.claude/plugins/cache/<owner>/<plugin>/<version>/ (no `.git`);
+//   - the marketplace git clone lives at ~/.claude/plugins/marketplaces/<owner>/
+//     and is never itself a pluginRoot (see deriveMarketplaceClonePath);
+//   - `npm install -g` unpacks a tarball (no `.git`).
+// The one install layout that IS a git clone — Codex's marketplace clone under
+// ~/.codex/plugins/cache/ — reads `.codex-plugin/hooks.json`, not the two files
+// here, so refusing there costs nothing. And a local marketplace pointed
+// straight at a clone belongs to a developer, who wants the placeholder kept.
+//
+// `.git` is matched with existsSync, not isDirectory: a worktree or submodule
+// checkout has `.git` as a FILE holding a gitdir pointer, and that is just as
+// much a working tree as a plain clone.
+// ─────────────────────────────────────────────────────────────────────────
+
+/** Is `pluginRoot` a development checkout rather than an installed copy? */
+export function isSourceCheckout(pluginRoot) {
+  if (!pluginRoot) return false;
+  try {
+    return existsSync(resolve(pluginRoot, ".git"));
+  } catch {
+    return false;
+  }
+}
+
+// One line per plugin root per process: both manifests refuse on the same boot,
+// and two identical lines would only read as a loop. Keyed by root so a process
+// that legitimately touches several roots (start.mjs Layer 1 normalizes the NEW
+// cache dir, Layer 5 its own) still reports each one.
+const refusedCheckoutRoots = new Set();
+
+/**
+ * Report a refusal exactly once per root. stderr ONLY — start.mjs speaks the
+ * MCP protocol over stdout, so a stray stdout line here would corrupt the
+ * JSON-RPC stream and take the whole server down. A silent refusal is how the
+ * next person spends an hour on the opposite question, hence not debug-gated.
+ */
+function logCheckoutRefusal(pluginRoot) {
+  const key = String(pluginRoot);
+  if (refusedCheckoutRoots.has(key)) return;
+  refusedCheckoutRoots.add(key);
+  try {
+    process.stderr.write(
+      `[context-mode] normalize-hooks: ${key} is a git checkout, not an installed plugin — ` +
+        `not persisting the absolute-path rewrite of hooks/hooks.json + .claude-plugin/plugin.json ` +
+        `(it would dirty tracked manifests with machine-local paths). Resolution still applies in memory.\n`,
+    );
+  } catch {
+    /* stderr may be closed under a suppressed-stderr hook — never throw */
+  }
+}
+
+/**
+ * The ONE place either branch below persists a manifest.
+ *
+ * Two invariants live here so they cannot drift between the hooks.json and
+ * plugin.json branches:
+ *   1. a source checkout is never written to (see above) — the caller keeps
+ *      running, the rewrite is simply not persisted;
+ *   2. a trailing newline present in the original survives the round trip.
+ *      JSON.stringify drops it, and the committed manifests end with one — a
+ *      write that ate it showed up as a whole-file diff on top of the path
+ *      damage.
+ *
+ * Returns whether the file was actually written.
+ */
+function writeNormalizedManifest(filePath, original, next, pluginRoot) {
+  if (next === original) return false;
+  if (isSourceCheckout(pluginRoot)) {
+    logCheckoutRefusal(pluginRoot);
+    return false;
+  }
+  const out =
+    original.endsWith("\n") && !next.endsWith("\n") ? `${next}\n` : next;
+  writeFileSync(filePath, out, "utf-8");
+  return true;
+}
+
 // #604: matches a cache path segment `context-mode/context-mode/<version>`.
 // Capture group is the X.Y.Z version. Used to detect command paths frozen on a
 // previous-version dir that Claude Code's native plugin manager has since
@@ -89,7 +184,10 @@ export function needsHookNormalization(content, pluginRoot) {
  *   - `node "${CLAUDE_PLUGIN_ROOT}/x.mjs"` →
  *     `"<execPath>" "<pluginRoot>/x.mjs"`  (forward slashes, double-quoted)
  *
- * Pure function — takes content + paths, returns new content.
+ * Pure function — takes content + paths, returns new content. Deliberately NOT
+ * gated by the source-checkout refusal: the refusal is about PERSISTING the
+ * rewrite, so a caller running from a checkout still gets correct resolved
+ * values to use in memory. Only writeNormalizedManifest refuses.
  * Idempotent — leaves already-normalized content unchanged.
  */
 export function normalizeHooksJson(content, nodePath, pluginRoot) {
@@ -160,6 +258,8 @@ export function normalizeHooksJson(content, nodePath, pluginRoot) {
  *   - `args: ["${CLAUDE_PLUGIN_ROOT}/start.mjs"]` →
  *     `args: ["<pluginRoot-fwd>/start.mjs"]`
  *
+ * Pure and unguarded for the same reason as normalizeHooksJson — in-memory
+ * resolution stays available in a checkout, only the write is refused.
  * Idempotent.
  */
 export function normalizePluginJson(content, nodePath, pluginRoot) {
@@ -249,6 +349,11 @@ export function normalizePluginJson(content, nodePath, pluginRoot) {
  *                         not be gated by the historical Windows-only check;
  *                         issue was filed from macOS).
  *
+ * Refuses to persist anything when `pluginRoot` is a git checkout — see the
+ * source-checkout block at the top of this file. Logs one line to stderr and
+ * carries on; the server still boots from a checkout, it just stops dirtying
+ * the tracked manifest.
+ *
  * Best-effort — never throws.
  */
 export function normalizeHooksJsonOnly({ pluginRoot, nodePath, jsRuntimePath, platform }) {
@@ -268,9 +373,8 @@ export function normalizeHooksJsonOnly({ pluginRoot, nodePath, jsRuntimePath, pl
       const original = readFileSync(hooksPath, "utf-8");
       if (needsHookNormalization(original, pluginRoot)) {
         const next = normalizeHooksJson(original, effectiveRuntime, pluginRoot);
-        if (next !== original) {
-          writeFileSync(hooksPath, next, "utf-8");
-        }
+        // Refuses on a source checkout; keeps the trailing newline otherwise.
+        writeNormalizedManifest(hooksPath, original, next, pluginRoot);
       }
     }
   } catch {
@@ -290,6 +394,10 @@ export function normalizeHooksJsonOnly({ pluginRoot, nodePath, jsRuntimePath, pl
  *   - platform:       process.platform ("win32" and "linux" trigger plugin.json
  *                     rewrite for #378; hooks.json also rewrites on darwin when
  *                     `jsRuntimePath` !== `nodePath` for #738)
+ *
+ * Refuses to persist either manifest when `pluginRoot` is a git checkout —
+ * this is the call start.mjs makes with `pluginRoot: __dirname`, i.e. the
+ * contributor's own working tree when the server is smoke-tested from a clone.
  *
  * Best-effort — never throws.
  */
@@ -312,9 +420,9 @@ export function normalizeHooksOnStartup({ pluginRoot, nodePath, jsRuntimePath, p
       const original = readFileSync(pluginPath, "utf-8");
       if (needsHookNormalization(original, pluginRoot)) {
         const next = normalizePluginJson(original, nodePath, pluginRoot);
-        if (next !== original) {
-          writeFileSync(pluginPath, next, "utf-8");
-        }
+        // Same guard as the hooks.json branch — this is the file that shipped
+        // a contributor's $HOME to everyone else when it was written blind.
+        writeNormalizedManifest(pluginPath, original, next, pluginRoot);
       }
     }
   } catch {

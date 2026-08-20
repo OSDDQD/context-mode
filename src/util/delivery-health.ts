@@ -59,6 +59,7 @@ export const EXPECTED_CTX_TOOLS: readonly string[] = [
   "ctx_search",
   "ctx_find",
   "ctx_graph",
+  "ctx_pack",
   "ctx_read",
   "ctx_fetch_and_index",
   "ctx_batch_execute",
@@ -183,6 +184,25 @@ export interface CacheEntry {
    * links would report the same build eight times over.
    */
   aliasOf?: string;
+  /**
+   * Set when this entry is a symlink that resolves to nothing:
+   * `"cycle"` for ELOOP — two version names pointing at each other, which is
+   * what `1.0.171 -> 1.0.169 -> 1.0.171` looked like on the machine that
+   * motivated this field — and `"dangling"` for ENOENT.
+   *
+   * It has to be reported by name because it is invisible from the outside:
+   * `existsSync()` follows the link and answers "missing" for both, so the
+   * host, the doctor and the heal all used to see a version that simply was
+   * not there rather than a loop that could never resolve. The repair lives in
+   * `hooks/cache-heal-utils.mjs` (rule R3); this module only ever looks.
+   */
+  brokenAlias?: "cycle" | "dangling";
+  /**
+   * A real directory that cannot boot — `start.mjs` or a parseable
+   * `.claude-plugin/plugin.json` is missing (rule R1). Pointing a version name
+   * at one of these loads the plugin with no tools instead of failing loudly.
+   */
+  unbootable?: boolean;
   /** Version the tree's own manifest claims, when it disagrees with the name. */
   manifestVersion?: string;
   /** mtime of `server.bundle.mjs` (or the directory, if the bundle is absent). */
@@ -327,6 +347,44 @@ export function scanBundleTools(bundlePath: string): string[] | undefined {
   return [...names];
 }
 
+/**
+ * Can this directory actually boot the plugin?
+ *
+ * The read-only twin of rule R1 in `hooks/cache-heal-utils.mjs`: `start.mjs` is
+ * what the host spawns and `.claude-plugin/plugin.json` is what it keys the
+ * plugin on, so a tree missing either is an unpack that stopped halfway. The
+ * heal refuses to point a version name at one; this function is how the doctor
+ * says the same thing out loud. Never throws.
+ */
+export function isBootableTree(root: string): boolean {
+  if (!existsSync(join(root, "start.mjs"))) return false;
+  try {
+    const manifest: unknown = JSON.parse(
+      readFileSync(join(root, ".claude-plugin", "plugin.json"), "utf-8"),
+    );
+    return !!manifest && typeof manifest === "object";
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Why a symlinked version name resolves to nothing, or `undefined` when it
+ * resolves fine.
+ *
+ * `realpathSync` is the only call that tells cycle and dangling apart —
+ * `existsSync` collapses both to `false`, which is exactly the ambiguity that
+ * let a heal script re-create the same loop on every boot.
+ */
+function brokenAliasKind(path: string): CacheEntry["brokenAlias"] {
+  try {
+    realpathSync(path);
+    return undefined;
+  } catch (err) {
+    return (err as NodeJS.ErrnoException)?.code === "ELOOP" ? "cycle" : "dangling";
+  }
+}
+
 /** mtime in epoch ms of the bundle in `root`, falling back to the directory. */
 function builtAtOf(root: string): number | undefined {
   for (const candidate of [join(root, "server.bundle.mjs"), root]) {
@@ -435,6 +493,8 @@ export function collectDeliveryHealth(opts: DeliveryHealthOptions = {}): Deliver
           version: name,
           path,
           aliasOf: link,
+          brokenAlias: link ? brokenAliasKind(path) : undefined,
+          unbootable: link ? undefined : !isBootableTree(path) || undefined,
           manifestVersion: manifestVersion && manifestVersion !== name ? manifestVersion : undefined,
           builtAt: link ? undefined : builtAtOf(path),
           tools: link ? undefined : scanBundleTools(join(path, "server.bundle.mjs")),
@@ -469,8 +529,15 @@ export function collectDeliveryHealth(opts: DeliveryHealthOptions = {}): Deliver
   // because no amount of retrying makes it appear.
   let status: DeliveryHealth["status"] = "ok";
   if (cacheError) status = "warn";
+  // A symlink that resolves to nothing is not housekeeping: it is the shape
+  // that took a session down to zero tools, and `existsSync` cannot see it.
+  if (cacheEntries.some((e) => e.brokenAlias)) status = "warn";
   // Aliases are names, not builds — comparing against one would call a healthy
-  // install stale every time a heal script left a symlink behind.
+  // install stale every time a heal script left a symlink behind. `unbootable`
+  // is deliberately NOT filtered out here: it is a finding to render, and
+  // treating a half-unpacked newest dir as absent would quietly turn the
+  // "running an older build" warning off in exactly the case that most
+  // deserves it.
   const realEntries = cacheEntries.filter((e) => !e.aliasOf);
   const newest = realEntries[0];
   const runningEntry = realEntries.find((e) => e.running);
@@ -567,13 +634,15 @@ export function renderDeliveryHealth(h: DeliveryHealth): string[] {
     lines.push(`${pad("cache")}${h.cacheRoot} — no unpacked versions (host has not installed the plugin here)`);
   } else {
     const builds = h.cacheEntries.filter((e) => !e.aliasOf);
-    const aliases = h.cacheEntries.filter((e) => e.aliasOf);
+    const aliases = h.cacheEntries.filter((e) => e.aliasOf && !e.brokenAlias);
+    const broken = h.cacheEntries.filter((e) => e.brokenAlias);
     lines.push(`${pad("cache")}${h.cacheRoot} — ${builds.length} unpacked build(s), newest first`);
     for (const e of builds) {
       const marks = [
         `built ${formatBuiltAt(e.builtAt)}`,
         e.tools ? `${e.tools.length} tool(s)` : "no bundle",
         e.manifestVersion ? `manifest says v${e.manifestVersion}` : null,
+        e.unbootable ? "NOT BOOTABLE — no start.mjs or unreadable plugin.json" : null,
         e.running ? "RUNNING" : null,
       ].filter(Boolean).join(", ");
       lines.push(`${cont}  v${e.version} — ${marks}`);
@@ -582,6 +651,17 @@ export function renderDeliveryHealth(h: DeliveryHealth): string[] {
       // One line for the lot: a heal script that symlinks eight old version
       // names at the surviving tree is housekeeping, not a finding.
       lines.push(`${cont}  ${aliases.length} alias(es): ${aliases.map((a) => a.version).join(", ")}`);
+    }
+    if (broken.length > 0) {
+      // Named individually, with the kind: a cycle and a dangling link look
+      // identical to every `existsSync` in the codebase, and telling them apart
+      // is the difference between "the version was deleted" and "these two
+      // names point at each other and always will".
+      lines.push(
+        `${cont}  ${broken.length} BROKEN alias(es): `
+        + broken.map((a) => `${a.version} (${a.brokenAlias}${a.aliasOf ? ` -> ${a.aliasOf}` : ""})`).join(", "),
+      );
+      lines.push(`${cont}  Fix: they are removed on the next session start; /context-mode:ctx-upgrade forces it now`);
     }
   }
 

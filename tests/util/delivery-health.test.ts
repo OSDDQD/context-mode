@@ -33,7 +33,10 @@ import {
 import { serverSource } from "../shared/server-source.js";
 
 const CLI_SRC = readFileSync(resolve(import.meta.dirname, "../../src/cli.ts"), "utf-8");
-const SERVER_SRC = readFileSync(resolve(import.meta.dirname, "../../src/server.ts"), "utf-8");
+// The whole server, not one file: ctx_doctor now registers from
+// src/tools/doctor.ts, and an assertion pinned to src/server.ts alone would
+// pass or fail on where the handler lives rather than on what it does.
+const SERVER_SRC = serverSource();
 
 /** A cache tree shaped exactly like the host's, with a bundle we control. */
 function fakeInstall(opts: { tools: readonly string[]; version: string; builtAt?: Date }): {

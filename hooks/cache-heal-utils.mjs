@@ -32,8 +32,12 @@ import {
   readdirSync,
   renameSync,
   unlinkSync,
+  lstatSync,
+  realpathSync,
+  symlinkSync,
+  mkdirSync,
 } from "node:fs";
-import { join } from "node:path";
+import { dirname, join, resolve, sep } from "node:path";
 
 /**
  * Convert any path string to forward slashes (matches normalize-hooks style,
@@ -377,3 +381,384 @@ export function ensureShebangAndExecBit(scriptPath) {
     /* best effort */
   }
 }
+
+// ─────────────────────────────────────────────────────────
+// Plugin cache symlink heal (anthropics/claude-code#46915, follow-up)
+// ─────────────────────────────────────────────────────────
+//
+// What a real machine looked like, and how the old heal built it:
+//
+//   ~/.claude/plugins/cache/context-mode/context-mode/ contained NOTHING but
+//   symlinks — `1.0.171 -> 1.0.169` and `1.0.169 -> 1.0.171`, a two-node
+//   cycle, plus seven older version names pointing into it. Meanwhile
+//   installed_plugins.json named 1.0.173, which existed nowhere. Claude Code
+//   could not resolve the plugin at all: the session came up with ZERO ctx_*
+//   tools and nothing in the UI said so.
+//
+// Two wrong primitives produced that state, and re-produced it every boot:
+//
+//   1. The version list was filtered by NAME only (`/^\d+\.\d+/`), so a
+//      symlink named like a version counted as a version directory. "Newest"
+//      could therefore BE a symlink, and pointing a missing version at it
+//      created a symlink-to-symlink — one more edge of the eventual cycle.
+//   2. `existsSync()` FOLLOWS symlinks. A cyclic link answers ELOOP and a
+//      dangling one ENOENT, so both read as "missing" — and the heal
+//      cheerfully re-created the exact link that was the problem.
+//
+// The rules below are the fix. They are the single source of truth for BOTH
+// heal sites: this module (imported by start.mjs's Self-heal Layer 1) and
+// CACHE_HEAL_HOOK_SOURCE further down — the standalone script deployed into
+// <config>/hooks/, which cannot import from a plugin directory that may
+// itself be the broken thing, and therefore restates these rules inline.
+// Change one, change the other; tests/hooks/cache-heal-symlink-cycle.test.ts
+// exercises both against the same fixtures.
+//
+//   R1. A heal target must be a REAL directory: lstat says directory AND not
+//       a symlink, it holds `start.mjs`, and its `.claude-plugin/plugin.json`
+//       parses. A tree missing either file cannot boot, so linking at it only
+//       moves the failure one step later.
+//   R2. A symlink is never a target. Resolve to the real directory first, so
+//       no link this code writes can ever point at another link.
+//   R3. A link that will not resolve (ELOOP = cycle, ENOENT = dangling) is
+//       REMOVED, never re-created.
+//   R4. A real directory is never removed. Only symlinks are.
+//   R5. With no real version directory anywhere, the heal does nothing.
+//       Inventing a link with nothing real to point at is how the cycle above
+//       was born in the first place.
+
+/**
+ * What a name inside the versions directory actually is, judged WITHOUT
+ * following symlinks.
+ *
+ *   "missing" — nothing there
+ *   "dir"     — a real directory (never removed — R4)
+ *   "alias"   — a symlink that resolves to something
+ *   "broken"  — a symlink whose realpath fails: ELOOP (cycle) or ENOENT
+ *   "other"   — a file, socket, … — not ours to touch
+ */
+export function cacheEntryState(p) {
+  if (!p || typeof p !== "string") return "missing";
+  let st;
+  try {
+    st = lstatSync(p);
+  } catch {
+    return "missing";
+  }
+  // The symlink test comes first on purpose: a Windows junction reports BOTH
+  // isDirectory() and isSymbolicLink() true, and reading one as a real dir
+  // would let R2 write a link pointing at a link.
+  if (st.isSymbolicLink()) {
+    try {
+      realpathSync(p);
+      return "alias";
+    } catch {
+      return "broken";
+    }
+  }
+  return st.isDirectory() ? "dir" : "other";
+}
+
+/** R1 — a directory this heal is allowed to point at. */
+export function isRealPluginDir(p) {
+  if (cacheEntryState(p) !== "dir") return false;
+  // start.mjs is what the host spawns; plugin.json is what it keys the plugin
+  // on. A tree carrying up-to-date files but neither of these is a partial
+  // unpack, and pointing a version name at it is how "plugin loaded, zero
+  // tools" happens.
+  if (!existsSync(join(p, "start.mjs"))) return false;
+  try {
+    const manifest = JSON.parse(
+      readFileSync(join(p, ".claude-plugin", "plugin.json"), "utf-8"),
+    );
+    return !!manifest && typeof manifest === "object";
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * R2 — the real directory behind `p`, or null.
+ *
+ * realpathSync resolves the WHOLE chain, so a candidate reached through a
+ * symlinked ancestor still yields a path no further link has to be followed
+ * from. Null when it does not resolve or is not a usable plugin tree.
+ */
+export function realPluginDirOrNull(p) {
+  if (!p || typeof p !== "string") return null;
+  let real;
+  try {
+    real = realpathSync(p);
+  } catch {
+    return null;
+  }
+  return isRealPluginDir(real) ? real : null;
+}
+
+/** Numeric ordering of version directory names; missing segments sort as 0. */
+export function compareVersionNames(a, b) {
+  const pa = String(a).split(".").map((n) => Number.parseInt(n, 10));
+  const pb = String(b).split(".").map((n) => Number.parseInt(n, 10));
+  for (let i = 0; i < 3; i++) {
+    const va = Number.isFinite(pa[i]) ? pa[i] : 0;
+    const vb = Number.isFinite(pb[i]) ? pb[i] : 0;
+    if (va !== vb) return va - vb;
+  }
+  return 0;
+}
+
+/**
+ * Newest REAL plugin directory under `parent` (R1 + R2), or null (R5).
+ *
+ * The name filter is the cheap pre-pass; `isRealPluginDir` is the one that
+ * decides. That ordering matters — the old code stopped at the name, which is
+ * precisely how a symlink became "newest".
+ */
+export function newestRealPluginDir(parent) {
+  let names;
+  try {
+    names = readdirSync(parent);
+  } catch {
+    return null;
+  }
+  const real = names.filter(
+    (n) => /^\d+\.\d+/.test(n) && isRealPluginDir(join(parent, n)),
+  );
+  if (real.length === 0) return null;
+  real.sort(compareVersionNames);
+  return realPluginDirOrNull(join(parent, real[real.length - 1]));
+}
+
+/**
+ * R3 — remove every symlink under `parent` that cannot be resolved.
+ *
+ * This is what actually clears a `1.0.171 -> 1.0.169 -> 1.0.171` cycle: both
+ * members answer ELOOP, both go. Real directories are never candidates (R4),
+ * and `unlinkSync` on a symlink removes the link, never what it pointed at.
+ *
+ * Returns the paths removed — callers log it, tests assert on it.
+ */
+export function pruneBrokenPluginAliases(parent) {
+  const removed = [];
+  let names;
+  try {
+    names = readdirSync(parent);
+  } catch {
+    return removed;
+  }
+  for (const name of names) {
+    const p = join(parent, name);
+    if (cacheEntryState(p) !== "broken") continue;
+    try {
+      unlinkSync(p);
+      removed.push(p);
+    } catch {
+      /* best effort — a link we cannot remove is still better left reported */
+    }
+  }
+  return removed;
+}
+
+/**
+ * Point one registry `installPath` at a real tree — or leave it alone.
+ *
+ * `preferredTarget` is the caller's own tree (start.mjs passes `__dirname`:
+ * it is executing from there, so it is known-good by construction). It is
+ * still put through R1/R2 rather than trusted, because a plugin root reached
+ * through an alias must not become the target of another alias.
+ *
+ * Returns, for logging and tests:
+ *   "skipped"       — no usable installPath
+ *   "outside-cache" — refused: the path is not inside this host's plugin cache
+ *   "ok"            — already healthy; nothing written
+ *   "linked"        — a symlink was created at installPath
+ *   "no-target"     — R5: nothing real to point at, so nothing was written
+ *   "failed"        — the unlink or symlink call did not succeed
+ */
+export function healCacheInstallPath({
+  installPath,
+  cacheRoot,
+  preferredTarget,
+  platform = process.platform,
+}) {
+  if (!installPath || typeof installPath !== "string") return "skipped";
+  const p = resolve(installPath);
+  // Containment first: this function writes to disk, and the only place it may
+  // ever write is this host's own plugin cache.
+  if (!cacheRoot || typeof cacheRoot !== "string") return "outside-cache";
+  if (!p.startsWith(resolve(cacheRoot) + sep)) return "outside-cache";
+
+  const state = cacheEntryState(p);
+  // R4 — a real directory IS the install. A file we do not understand is not
+  // ours either. Both are left exactly as found.
+  if (state === "dir" || state === "other") return "ok";
+  if (state === "alias") {
+    // It resolves — but to WHAT? A link onto a tree with no start.mjs is the
+    // same dead end as a dangling one; it just fails later and less legibly.
+    if (realPluginDirOrNull(p)) return "ok";
+    try {
+      unlinkSync(p);
+    } catch {
+      return "failed";
+    }
+  } else if (state === "broken") {
+    // The cycle. Remove it — re-creating it is what kept the machine broken
+    // across every single boot.
+    try {
+      unlinkSync(p);
+    } catch {
+      return "failed";
+    }
+  }
+
+  const target =
+    realPluginDirOrNull(preferredTarget) ?? newestRealPluginDir(dirname(p));
+  // R5 — no real tree anywhere. Doing nothing leaves a diagnosable "missing
+  // directory"; inventing a link leaves an undiagnosable loop.
+  if (!target) return "no-target";
+
+  try {
+    const parent = dirname(p);
+    if (!existsSync(parent)) mkdirSync(parent, { recursive: true });
+    symlinkSync(target, p, platform === "win32" ? "junction" : undefined);
+    return "linked";
+  } catch {
+    return "failed";
+  }
+}
+
+/**
+ * The standalone cache-heal hook, as source text.
+ *
+ * start.mjs writes this into `<config>/hooks/context-mode-cache-heal.mjs` and
+ * registers it as a SessionStart hook. It lives OUTSIDE any plugin directory
+ * on purpose — its whole job is to run when the plugin cache is the broken
+ * thing, so it may not import from a version dir that might not resolve.
+ * That is why R1-R5 above are restated inline below rather than imported:
+ * this module is the source of truth, the text is its standalone twin.
+ * **Change one, change the other.**
+ *
+ * Kept here rather than inlined in start.mjs so the exact bytes users receive
+ * can be written to a temp file and executed by a test
+ * (tests/hooks/cache-heal-symlink-cycle.test.ts).
+ */
+export const CACHE_HEAL_HOOK_SOURCE = `#!/usr/bin/env node
+// context-mode plugin cache self-heal (auto-deployed by start.mjs — do not edit)
+//
+// Source of truth for this logic is hooks/cache-heal-utils.mjs (rules R1-R5).
+// This file is its standalone twin: it must keep working when the plugin cache
+// is exactly what is broken, so it imports nothing from a version directory.
+//
+// Fixes anthropics/claude-code#46915 (auto-update breaks CLAUDE_PLUGIN_ROOT)
+// and the symlink cycle the earlier heal used to build out of it:
+// \`1.0.171 -> 1.0.169 -> 1.0.171\`, where existsSync() answered ELOOP — read as
+// "missing" — so every boot re-created the loop, the plugin never loaded, and
+// the session came up with ZERO ctx_* tools.
+// Issue #727: also normalizes stale version paths in existing installPaths.
+// Honors CLAUDE_CONFIG_DIR (#577), read at this script's runtime so users who
+// set it after install still get healed.
+// Pure Node.js — no bash/shell dependency.
+import { existsSync, readdirSync, readFileSync, lstatSync, realpathSync, symlinkSync, mkdirSync, unlinkSync } from "node:fs";
+import { dirname, join, resolve, sep } from "node:path";
+import { homedir } from "node:os";
+
+function cfgDir() {
+  const e = process.env.CLAUDE_CONFIG_DIR;
+  if (e && e.trim() !== "") return e.startsWith("~") ? resolve(homedir(), e.replace(/^~[/\\\\]?/, "")) : resolve(e);
+  return resolve(homedir(), ".claude");
+}
+
+// lstat, never existsSync(): existsSync FOLLOWS links, so a cyclic link (ELOOP)
+// and a dangling one (ENOENT) both read as "missing" — which is how the old
+// heal kept re-creating the cycle it was supposed to repair.
+function state(p) {
+  let st;
+  try { st = lstatSync(p); } catch { return "missing"; }
+  // Symlink test first: a Windows junction reports BOTH link and directory.
+  if (st.isSymbolicLink()) { try { realpathSync(p); return "alias"; } catch { return "broken"; } }
+  return st.isDirectory() ? "dir" : "other";
+}
+
+// R1 — a real directory that can actually boot: start.mjs present and a
+// parseable .claude-plugin/plugin.json. Anything else just moves the failure.
+function isRealPluginDir(p) {
+  if (state(p) !== "dir") return false;
+  if (!existsSync(join(p, "start.mjs"))) return false;
+  try { return !!JSON.parse(readFileSync(join(p, ".claude-plugin", "plugin.json"), "utf-8")); } catch { return false; }
+}
+
+// R2 — resolve the whole chain, so nothing this script writes points at a link.
+function realDir(p) {
+  if (!p) return null;
+  let r;
+  try { r = realpathSync(p); } catch { return null; }
+  return isRealPluginDir(r) ? r : null;
+}
+
+// The name filter is only a pre-pass; isRealPluginDir decides. The old code
+// stopped at the name, which is precisely how a symlink became "newest".
+function newestRealDir(parent) {
+  let names;
+  try { names = readdirSync(parent); } catch { return null; }
+  const real = names.filter((n) => /^\\d+\\.\\d+/.test(n) && isRealPluginDir(join(parent, n)));
+  if (!real.length) return null;
+  real.sort((a, b) => { const pa = a.split(".").map(Number), pb = b.split(".").map(Number); for (let i = 0; i < 3; i++) { if ((pa[i] || 0) !== (pb[i] || 0)) return (pa[i] || 0) - (pb[i] || 0); } return 0; });
+  return realDir(join(parent, real[real.length - 1]));
+}
+
+// R3 + R4 — unresolvable links are removed; real directories never are.
+// unlinkSync on a symlink removes the link, never what it pointed at, so a
+// two-node cycle loses both members and nothing else.
+function pruneBroken(parent) {
+  let names;
+  try { names = readdirSync(parent); } catch { return; }
+  for (const n of names) {
+    const p = join(parent, n);
+    if (state(p) !== "broken") continue;
+    try { unlinkSync(p); } catch {}
+  }
+}
+
+// Issue #727: CC's auto-update carries hooks.json forward with paths baked to a
+// previous version dir. #713: narrow helper only — installPath belongs to a
+// different version's cache dir, and writing plugin.json there is the #711 vector.
+async function normalizeHooksAt(p) {
+  try {
+    const nhPath = join(p, "hooks", "normalize-hooks.mjs");
+    if (!existsSync(nhPath)) return;
+    const mod = await import(nhPath);
+    const fn = mod.normalizeHooksJsonOnly || mod.normalizeHooksOnStartup;
+    if (fn) fn({ pluginRoot: p, nodePath: process.execPath, platform: process.platform });
+  } catch {}
+}
+
+try {
+  const f = resolve(cfgDir(), "plugins", "installed_plugins.json");
+  if (!existsSync(f)) process.exit(0);
+  const cacheRoot = resolve(cfgDir(), "plugins", "cache");
+  const ip = JSON.parse(readFileSync(f, "utf-8"));
+  for (const [k, es] of Object.entries(ip.plugins || {})) {
+    if (k !== "context-mode@context-mode") continue;
+    for (const e of es || []) {
+      const p = e && e.installPath;
+      if (!p) continue;
+      if (!resolve(p).startsWith(cacheRoot + sep)) continue;
+      const parent = dirname(p);
+      // Sweep first: a cycle elsewhere in the versions dir poisons every later
+      // lookup here, including the newest-real-dir scan.
+      pruneBroken(parent);
+      const st = state(p);
+      if (st === "other") continue;
+      if (st === "dir" || (st === "alias" && realDir(p))) { await normalizeHooksAt(p); continue; }
+      // An alias onto a tree with no start.mjs is the same dead end as a
+      // dangling one — it just fails later and less legibly. Both go.
+      if (st === "alias" || st === "broken") { try { unlinkSync(p); } catch { continue; } }
+      const target = newestRealDir(parent);
+      // R5 — nothing real to point at. A missing directory is diagnosable;
+      // a link that loops back on itself is not.
+      if (!target) continue;
+      try { if (!existsSync(parent)) mkdirSync(parent, { recursive: true }); } catch {}
+      try { symlinkSync(target, p, process.platform === "win32" ? "junction" : undefined); } catch {}
+    }
+  }
+} catch {}
+`;

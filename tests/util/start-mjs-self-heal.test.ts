@@ -29,6 +29,12 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 const ROOT = resolve(__dirname, "..", "..");
 const startSrc = readFileSync(resolve(ROOT, "start.mjs"), "utf-8");
 
+// The deployed heal script's source text — start.mjs writes exactly this into
+// $CLAUDE_CONFIG_DIR/hooks/. It lives in the utils module rather than inline in
+// start.mjs so it can be executed against a fixture cache; the behavioural
+// suite is tests/hooks/cache-heal-symlink-cycle.test.ts.
+const { CACHE_HEAL_HOOK_SOURCE } = await import("../../hooks/cache-heal-utils.mjs");
+
 describe("start.mjs — Issue #523 Layer 5b plugin.json mcpServers heal", () => {
   test("imports healPluginJsonMcpServers from the shared module", () => {
     expect(startSrc).toContain("healPluginJsonMcpServers");
@@ -227,18 +233,20 @@ describe("start.mjs — Issue #577 CLAUDE_CONFIG_DIR honoring", () => {
   });
 
   test("auto-deployed heal script template honors CLAUDE_CONFIG_DIR at its own runtime", () => {
-    // The embedded `healScript` template literal becomes
-    // $CLAUDE_CONFIG_DIR/hooks/context-mode-cache-heal.mjs. Its OWN runtime
-    // — i.e. when Claude Code spawns it on SessionStart — must also honor
-    // CLAUDE_CONFIG_DIR. So the template literal itself has to embed the
-    // env-var read; baking the value at start.mjs render time would freeze
-    // the heal script to whatever CLAUDE_CONFIG_DIR was set to at install.
-    const startOfTpl = startSrc.indexOf("const healScript = `");
-    expect(startOfTpl).toBeGreaterThan(-1);
-    const endMarker = "writeFileSync(healHookPath, healScript";
-    const endIdx = startSrc.indexOf(endMarker, startOfTpl);
-    expect(endIdx).toBeGreaterThan(startOfTpl);
-    const tpl = startSrc.slice(startOfTpl, endIdx);
+    // The script text becomes $CLAUDE_CONFIG_DIR/hooks/context-mode-cache-heal.mjs.
+    // Its OWN runtime — i.e. when Claude Code spawns it on SessionStart — must
+    // also honor CLAUDE_CONFIG_DIR. So the text itself has to embed the env-var
+    // read; baking the value at deploy time would freeze the heal script to
+    // whatever CLAUDE_CONFIG_DIR was set to at install.
+    //
+    // The text moved out of start.mjs into hooks/cache-heal-utils.mjs
+    // (CACHE_HEAL_HOOK_SOURCE) when the symlink-cycle fix landed, so that the
+    // exact bytes a user receives could be executed by a test rather than only
+    // pattern-matched — see tests/hooks/cache-heal-symlink-cycle.test.ts.
+    // start.mjs must still be the thing that deploys them.
+    expect(startSrc).toContain("CACHE_HEAL_HOOK_SOURCE");
+    expect(startSrc).toContain("const healScript = CACHE_HEAL_HOOK_SOURCE;");
+    const tpl = CACHE_HEAL_HOOK_SOURCE;
 
     expect(tpl).toContain("CLAUDE_CONFIG_DIR");
 

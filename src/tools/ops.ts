@@ -40,14 +40,15 @@ export function registerOpsTools(deps: OpsToolDeps): void {
     VERSION, latestVersion, semanticIndexReport,
   } = deps;
 
-  // `detectedAdapter` and `rollUpStaleStatsFiles` stay on OpsToolDeps but are
-  // no longer read here. Both existed for the Pi byte-accounting patch, which
-  // replaced the events × 256 lifetime heuristic with the real bytes recorded
-  // in stats-*.json — and rolled up stale stats files on the way past. That
-  // path was gated on the Pi adapter and left with it. Whether the rollup
-  // should now run for every host is a product question, not a compile one:
-  // it never ran for Claude Code or Codex, so not calling it preserves exactly
-  // the behaviour those two have today.
+  // `rollUpStaleStatsFiles` is gone from OpsToolDeps. It arrived with the Pi
+  // byte-accounting patch — real bytes from stats-*.json in place of the
+  // events × 256 lifetime heuristic, rolling up stale stats files on the way
+  // past — and that path left with the Pi adapter, so nothing here read the
+  // injection any more. Whether the rollup should run for every host is a
+  // product question, not a compile one; `src/server.ts` still calls the
+  // function directly at boot, so Claude Code and Codex behave exactly as
+  // they did. `detectedAdapter` stays: it lives on the base `ToolDeps` and
+  // `src/tools/search.ts` reads it.
 
   // ─────────────────────────────────────────────────────────
   // Tool: stats
