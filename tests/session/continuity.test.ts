@@ -79,9 +79,11 @@ describe("SessionStart Hook", () => {
       ctx.includes("<when_not_to_use>"),
       "Expected <when_not_to_use> tag (renamed from <forbidden_actions> in ADR-0002 — affirmative framing, same semantic intent)",
     );
+    // The <output_constraints> container went with the compaction (#1042);
+    // the rule it held is one OUTPUT line now.
     assert.ok(
-      ctx.includes("<output_constraints>"),
-      "Expected <output_constraints> tag",
+      /OUTPUT: Write artifacts .* to files/.test(ctx),
+      "Expected the artifact rule (write to files, return the path)",
     );
     assert.ok(
       ctx.includes("batch_execute"),
@@ -93,9 +95,12 @@ describe("SessionStart Hook", () => {
     const result = runHook({});
     const parsed = JSON.parse(result.stdout);
     const ctx = parsed.hookSpecificOutput.additionalContext;
-    assert.ok(ctx.includes("GATHER"), "Expected GATHER step");
-    assert.ok(ctx.includes("FOLLOW-UP"), "Expected FOLLOW-UP step");
-    assert.ok(ctx.includes("PROCESSING"), "Expected PROCESSING step");
+    // The numbered GATHER / FOLLOW-UP / PROCESSING headings were prose around
+    // the routes; the compact block is the routes themselves, native tool on
+    // the left. What has to survive is each redirect, not its heading.
+    assert.ok(ctx.includes("ctx_batch_execute"), "Expected the multi-command route");
+    assert.ok(ctx.includes("ctx_search"), "Expected the follow-up search route");
+    assert.ok(ctx.includes("ctx_execute(language, code)"), "Expected the processing route");
   });
 
   test("SessionStart: routing block contains output constraints", () => {

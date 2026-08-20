@@ -18,13 +18,23 @@ import { ensureSessionEventsSchema } from "./db.js";
 import { resolveClaudeConfigDir } from "../util/claude-config.js";
 import { tokensFromBytes, bytesFromTokens } from "./tokenizer.js";
 import {
+  MENTION_EVENT_TYPES,
+  MENTION_TEXT_CAP,
+  READ_WASTE_EVENT_TYPES,
   REUSE_EVENT_TYPES,
+  detectReadWaste,
   detectReuse,
+  readWasteDetectorEnabled,
   reuseDetectorEnabled,
   reuseThreshold,
+  summarizeReadWaste,
   summarizeReuse,
 } from "./reuse-detector.js";
-import type { ReuseCandidateEvent, ReuseSummary } from "./reuse-detector.js";
+import type {
+  ReadWasteSummary,
+  ReuseCandidateEvent,
+  ReuseSummary,
+} from "./reuse-detector.js";
 
 function semverNewer(a: string, b: string): boolean {
   const pa = a.split(".").map(Number);
@@ -1398,6 +1408,21 @@ export interface RealBytesStats {
   keptOutBytesGross?: number;
   /** Bytes actually taken off `bytesAvoided` (≤ `reuse.returnedBytes`, clamped at 0). */
   reuseDeductedBytes?: number;
+  /**
+   * §3.6: the OTHER loss — files a `Read` pulled into the window whole that
+   * nothing ever referred to again.
+   *
+   * Reported, never deducted. `bytesAvoided` above counts what context-mode
+   * KEPT OUT; an unrouted `Read` was never in that number, so subtracting the
+   * waste from it would take the same bytes off twice — once for never having
+   * been claimed, once for having been wasted. The renderer prints it beside
+   * the missed-redirect block, which is the same kind of number: a leak the
+   * savings arithmetic never pretended to cover.
+   *
+   * Undefined when the pass is off (`CONTEXT_MODE_READ_WASTE=0`) or when the
+   * tier has no event stream to walk.
+   */
+  readWaste?: ReadWasteSummary;
 }
 
 /**
@@ -1505,8 +1530,26 @@ export function getContentBytesAllSessions(
  * contract as `getConversationStats` / `getLifetimeStats` so the
  * stats-render path can never crash on a bad sidecar.
  */
-/** `?` placeholders for the `type IN (…)` filter of the reuse-detector SELECT. */
+/**
+ * `?` placeholders for the `type IN (…)` filter of the reuse-detector SELECT.
+ *
+ * Two lists, one query. §3.6's read-waste pass needs the text-bearing rows
+ * (`turn_end`, `decision`, …) on top of the reuse rows; when it is switched off
+ * the narrower list is used and the extra rows never leave SQLite.
+ */
 const REUSE_TYPE_PLACEHOLDERS = REUSE_EVENT_TYPES.map(() => "?").join(", ");
+const READ_WASTE_TYPE_PLACEHOLDERS = READ_WASTE_EVENT_TYPES.map(() => "?").join(", ");
+/**
+ * `data` for the read-waste SELECT, with the mention types capped in SQLite.
+ *
+ * A `user_prompt` or `data` row runs to tens of KB and the waste pass slices it
+ * to {@link MENTION_TEXT_CAP} before tokenizing anyway — so hauling the tail
+ * across the driver buys nothing. Only the mention types are capped: the reuse
+ * pass JSON-parses `mcp_tool_call` rows and a truncated blob would not parse.
+ */
+const READ_WASTE_DATA_EXPR =
+  `CASE WHEN type IN (${MENTION_EVENT_TYPES.map((t) => `'${t}'`).join(", ")})`
+  + ` THEN substr(data, 1, ${MENTION_TEXT_CAP}) ELSE data END AS data`;
 /** Hard cap on rows pulled for the reuse join, across every DB in one call. */
 const REUSE_ROW_LIMIT = 4000;
 
@@ -1583,22 +1626,26 @@ export function getRealBytesStats(opts: {
   // the returns. Left empty when the detector is switched off.
   const reuseRows: ReuseCandidateEvent[] = [];
   const wantReuse = reuseDetectorEnabled();
+  const wantReadWaste = readWasteDetectorEnabled();
+  const eventTypes = wantReadWaste ? READ_WASTE_EVENT_TYPES : REUSE_EVENT_TYPES;
+  const typePlaceholders = wantReadWaste ? READ_WASTE_TYPE_PLACEHOLDERS : REUSE_TYPE_PLACEHOLDERS;
+  const dataExpr = wantReadWaste ? READ_WASTE_DATA_EXPR : "data";
   const collectReuseRows = (
     sdb: { prepare(sql: string): { all(...p: unknown[]): unknown } },
     where: string,
     params: unknown[],
   ): void => {
-    if (!wantReuse) return;
+    if (!wantReuse && !wantReadWaste) return;
     const room = REUSE_ROW_LIMIT - reuseRows.length;
     if (room <= 0) return;
     try {
       const rows = sdb.prepare(
-        `SELECT id, type, data, created_at, project_dir, bytes_returned
+        `SELECT id, type, ${dataExpr}, created_at, project_dir, bytes_returned
          FROM session_events
-         WHERE ${where} AND type IN (${REUSE_TYPE_PLACEHOLDERS})
+         WHERE ${where} AND type IN (${typePlaceholders})
          ORDER BY created_at, id
          LIMIT ?`,
-      ).all(...params, ...REUSE_EVENT_TYPES, room) as ReuseCandidateEvent[];
+      ).all(...params, ...eventTypes, room) as ReuseCandidateEvent[];
       for (const r of rows) reuseRows.push(r);
     } catch { /* old schema / corrupt — the deduction simply stays 0 */ }
   };
@@ -1782,6 +1829,22 @@ export function getRealBytesStats(opts: {
     bytesAvoided = Math.max(0, bytesAvoided - reuse.returnedBytes);
   }
 
+  // ── §3.6: read but never used ───────────────────────────────────────────
+  //
+  // Second walk over the SAME array — no second query, no file reopened, and
+  // `bytesAvoided` is deliberately left alone (see `readWaste` on
+  // RealBytesStats for why deducting would double-count). `truncated` is
+  // passed so a capped row set makes the pass abstain instead of calling every
+  // read at the lost tail of the stream "never used".
+  let readWaste: ReadWasteSummary | undefined;
+  if (wantReadWaste && reuseRows.length > 0) {
+    const wasteReport = detectReadWaste(reuseRows, {
+      projectDir: opts.projectDir,
+      truncated: reuseRows.length >= REUSE_ROW_LIMIT,
+    });
+    if (wasteReport.wastedReads > 0) readWaste = summarizeReadWaste(wasteReport);
+  }
+
   const totalSavedTokens = Math.floor(
     tokensFromBytes(eventDataBytes + bytesAvoided + snapshotBytes),
   );
@@ -1794,6 +1857,7 @@ export function getRealBytesStats(opts: {
     contentBytes,
     totalSavedTokens,
     ...(reuse ? { reuse, keptOutBytesGross, reuseDeductedBytes } : {}),
+    ...(readWaste ? { readWaste } : {}),
   };
 }
 
@@ -1871,6 +1935,11 @@ export function getConversationWindowStats(opts: {
           reuseDeductedBytes: mine.reuseDeductedBytes,
         }
       : {}),
+    // §3.6: the live window's own waste. Taken from `mine`, not `pool` — the
+    // pool is project-scoped and would put a sub-agent's discarded reads on
+    // this conversation's bill. The narrowest honest number wins here, the
+    // same direction ADR-0005 fixed for the kept-out rows.
+    ...(mine.readWaste ? { readWaste: mine.readWaste } : {}),
   };
 }
 
@@ -2826,6 +2895,30 @@ function renderNarrative5Section(args: {
       );
       out.push("    should hand back full text for these sources instead of summarising them.");
     }
+  }
+  // §3.6 — the sibling loss: bytes that entered the window and were never used
+  // for anything. Not deducted from the savings above, because a `Read` was
+  // never counted as a saving; this block names a leak the arithmetic above
+  // never claimed to cover, the way the unrouted block does. Printed only when
+  // there is something to report, and always with its denominator, so the
+  // reader can see what share of the reads it is.
+  //
+  // Deliberately claims NO scope name. `realBytes.conversation` is the session
+  // pool on one call path and the worktree pool (this conversation plus the
+  // agents it spawned) on another, so any of ADR-0005's three labels would be
+  // wrong half the time. The denominator is the honest frame here.
+  const waste = realBytes?.conversation?.readWaste;
+  if (waste && waste.wastedReads > 0 && waste.judgedReads > 0) {
+    out.push("");
+    out.push(
+      `  Read and never used: ${kb(waste.wastedBytes)} (${fmtNum(waste.wastedTokens)} tokens) in ${waste.wastedSources} file${waste.wastedSources === 1 ? "" : "s"} — ${waste.wastedReads} of ${waste.judgedReads} file read${waste.judgedReads === 1 ? "" : "s"}.`,
+    );
+    out.push("    Nothing referenced them afterwards: no edit, no later call, no mention in the answer.");
+    for (const t of waste.top) {
+      const shown = t.path.length > 58 ? "…" + t.path.slice(-57) : t.path;
+      out.push(`    ${shown.padEnd(58)} ${kb(t.bytes).padStart(9)}`);
+    }
+    out.push("    Nothing was deducted for this — those bytes were never counted as kept out.");
   }
   out.push("");
   out.push("");

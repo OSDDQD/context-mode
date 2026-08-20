@@ -9,7 +9,7 @@
  * is a net LOSS, and until this module existed it was booked as a WIN — the
  * kept-out bytes stayed in `bytes_avoided` and nothing ever subtracted them.
  *
- * Two products, from one pass over the session event stream:
+ * Three products, from one pass over the session event stream:
  *
  *   1. {@link detectReuse} / {@link summarizeReuse} — the returned bytes, so
  *      `analytics.ts` can deduct them from the claimed savings BEFORE any
@@ -21,6 +21,16 @@
  *      scope, so the gateway should stop compressing and hand back the full
  *      text: paying for the full read once beats paying for a summary AND the
  *      full read. This module only decides; it never touches the gateway.
+ *
+ *   3. {@link detectReadWaste} / {@link summarizeReadWaste} — the sibling
+ *      loss. A return is a file the model paid for TWICE; this is a file it
+ *      paid for once and never used at all: read whole into the window, then
+ *      never edited, never named by a later call, never mentioned in the
+ *      answer. Pure waste, and invisible until this pass existed. Reported
+ *      only — a `Read` was never booked as a saving, so there is nothing to
+ *      deduct it from. Shares this module's event stream and its path
+ *      normalization; see the "What counts as USED" block below for the rule
+ *      and for why it errs on the side of calling a read USED.
  *
  * ── Why a step window AND a time window ─────────────────────────────────────
  *
@@ -53,6 +63,14 @@
 import { statSync } from "node:fs";
 import { isAbsolute, normalize, resolve } from "node:path";
 import { tokensFromBytes } from "./tokenizer.js";
+import {
+  boolKey,
+  disableKeyOnOff,
+  isOffValue,
+  numberKey,
+  readEnvFamily,
+  type FamilySettings,
+} from "../util/env-family.js";
 
 // ─────────────────────────────────────────────────────────
 // Configuration — env switches, fork convention
@@ -67,71 +85,103 @@ export const DEFAULT_REUSE_WINDOW_MS = 15 * 60_000;
 /** Default minimum covered sources before a ratio is allowed to trip the bypass. */
 export const DEFAULT_REUSE_MIN_SAMPLES = 3;
 
-function envFlagOff(raw: string | undefined): boolean {
-  if (raw == null) return false;
-  const v = raw.trim().toLowerCase();
-  return v === "0" || v === "false" || v === "off" || v === "no";
+/**
+ * The whole detector, as one JSON flag: `CONTEXT_MODE_REUSE={"enabled":true,
+ * "threshold":0.3,"stepWindow":20,"windowMs":900000,"minSamples":3,
+ * "statFiles":true}`.
+ *
+ * Six variables for one feature was the worst offender in a ~135-flag surface,
+ * and nobody could see them as one thing. Every original scalar still works and
+ * still WINS over the JSON key it overlaps — see `src/util/env-family.ts` for
+ * why that direction, and for why malformed JSON degrades to the scalars
+ * instead of throwing. A non-JSON value on the head name
+ * (`CONTEXT_MODE_REUSE=0`) reads as an off-switch for the whole family, the
+ * same way `CONTEXT_MODE_REUSE_DETECT=0` always has.
+ */
+const REUSE_FAMILY_ENV = "CONTEXT_MODE_REUSE" as const;
+
+/**
+ * `threshold` is accepted as a percentage (`30`) or as a fraction (`0.3`);
+ * anything `> 1` is read as a percentage. This is the one knob where the two
+ * readings are both natural, so both are taken rather than making the operator
+ * guess. Out-of-range values are rejected (→ next layer, then the default).
+ */
+function normalizeReuseThreshold(n: number): number | undefined {
+  if (n <= 0) return undefined;
+  const asFraction = n > 1 ? n / 100 : n;
+  return asFraction > 0 && asFraction <= 1 ? asFraction : undefined;
+}
+
+/** Positive integer knobs: a zero window would disable the detector by accident. */
+function positiveInt(n: number): number | undefined {
+  const truncated = Math.trunc(n);
+  return truncated > 0 ? truncated : undefined;
+}
+
+/** `minSamples` alone accepts 0 — "trip on the first covered source". */
+function nonNegativeInt(n: number): number | undefined {
+  const truncated = Math.trunc(n);
+  return truncated >= 0 ? truncated : undefined;
+}
+
+const REUSE_SCHEMA = {
+  enabled: boolKey("enabled", "CONTEXT_MODE_REUSE_DETECT", true),
+  threshold: numberKey("threshold", "CONTEXT_MODE_REUSE_THRESHOLD", DEFAULT_REUSE_THRESHOLD, normalizeReuseThreshold),
+  stepWindow: numberKey("stepWindow", "CONTEXT_MODE_REUSE_STEP_WINDOW", DEFAULT_REUSE_STEP_WINDOW, positiveInt),
+  windowMs: numberKey("windowMs", "CONTEXT_MODE_REUSE_WINDOW_MS", DEFAULT_REUSE_WINDOW_MS, positiveInt),
+  minSamples: numberKey("minSamples", "CONTEXT_MODE_REUSE_MIN_SAMPLES", DEFAULT_REUSE_MIN_SAMPLES, nonNegativeInt),
+  statFiles: boolKey("statFiles", "CONTEXT_MODE_REUSE_STAT_FILES", true),
+};
+
+/** Resolved per call, never memoized — `ctx_stats` runs long after start-up,
+ *  and the test suite flips these variables between cases. */
+export function reuseSettings(): FamilySettings<typeof REUSE_SCHEMA> {
+  return readEnvFamily(REUSE_FAMILY_ENV, REUSE_SCHEMA, process.env, {
+    headScalar: disableKeyOnOff<typeof REUSE_SCHEMA>("enabled"),
+  });
 }
 
 /**
- * `CONTEXT_MODE_REUSE_DETECT=0|false|off|no` disables the detector entirely:
- * no pairs are found, nothing is deducted, and the bypass never fires. The
- * escape hatch for a user who suspects the join is mis-attributing.
+ * `CONTEXT_MODE_REUSE_DETECT=0|false|off|no` — or `{"enabled":false}` — disables
+ * the detector entirely: no pairs are found, nothing is deducted, and the
+ * bypass never fires. The escape hatch for a user who suspects the join is
+ * mis-attributing.
  */
 export function reuseDetectorEnabled(): boolean {
-  return !envFlagOff(process.env.CONTEXT_MODE_REUSE_DETECT);
+  return reuseSettings().enabled;
 }
 
 /**
- * `CONTEXT_MODE_REUSE_THRESHOLD` — accepted as a percentage (`30`) or as a
- * fraction (`0.3`); anything `> 1` is read as a percentage. Out-of-range or
- * unparseable values fall back to {@link DEFAULT_REUSE_THRESHOLD}.
+ * `CONTEXT_MODE_REUSE_THRESHOLD` / `{"threshold":…}` — percentage or fraction.
+ * Unparseable values fall back to {@link DEFAULT_REUSE_THRESHOLD}.
  */
 export function reuseThreshold(): number {
-  const raw = process.env.CONTEXT_MODE_REUSE_THRESHOLD;
-  if (!raw) return DEFAULT_REUSE_THRESHOLD;
-  const parsed = Number.parseFloat(raw);
-  if (!Number.isFinite(parsed) || parsed <= 0) return DEFAULT_REUSE_THRESHOLD;
-  const asFraction = parsed > 1 ? parsed / 100 : parsed;
-  if (asFraction <= 0 || asFraction > 1) return DEFAULT_REUSE_THRESHOLD;
-  return asFraction;
+  return reuseSettings().threshold;
 }
 
-/** `CONTEXT_MODE_REUSE_STEP_WINDOW` — tool turns. Default 20. */
+/** `CONTEXT_MODE_REUSE_STEP_WINDOW` / `{"stepWindow":…}` — tool turns. Default 20. */
 export function reuseStepWindow(): number {
-  const raw = process.env.CONTEXT_MODE_REUSE_STEP_WINDOW;
-  if (!raw) return DEFAULT_REUSE_STEP_WINDOW;
-  const parsed = Number.parseInt(raw, 10);
-  if (!Number.isFinite(parsed) || parsed <= 0) return DEFAULT_REUSE_STEP_WINDOW;
-  return parsed;
+  return reuseSettings().stepWindow;
 }
 
-/** `CONTEXT_MODE_REUSE_WINDOW_MS` — wall-clock bound. Default 900000 (15 min). */
+/** `CONTEXT_MODE_REUSE_WINDOW_MS` / `{"windowMs":…}` — wall-clock bound. Default 900000 (15 min). */
 export function reuseWindowMs(): number {
-  const raw = process.env.CONTEXT_MODE_REUSE_WINDOW_MS;
-  if (!raw) return DEFAULT_REUSE_WINDOW_MS;
-  const parsed = Number.parseInt(raw, 10);
-  if (!Number.isFinite(parsed) || parsed <= 0) return DEFAULT_REUSE_WINDOW_MS;
-  return parsed;
+  return reuseSettings().windowMs;
 }
 
-/** `CONTEXT_MODE_REUSE_MIN_SAMPLES` — covered sources needed before the bypass may fire. */
+/** `CONTEXT_MODE_REUSE_MIN_SAMPLES` / `{"minSamples":…}` — covered sources needed before the bypass may fire. */
 export function reuseMinSamples(): number {
-  const raw = process.env.CONTEXT_MODE_REUSE_MIN_SAMPLES;
-  if (!raw) return DEFAULT_REUSE_MIN_SAMPLES;
-  const parsed = Number.parseInt(raw, 10);
-  if (!Number.isFinite(parsed) || parsed < 0) return DEFAULT_REUSE_MIN_SAMPLES;
-  return parsed;
+  return reuseSettings().minSamples;
 }
 
 /**
- * `CONTEXT_MODE_REUSE_STAT_FILES=0` stops the detector from `stat`ing the
- * re-read file to price the return. With it off, a return is still DETECTED
- * (it counts toward the ratio) but prices at whatever `bytes_returned` the
- * event carried — usually 0, so nothing is deducted.
+ * `CONTEXT_MODE_REUSE_STAT_FILES=0` (or `{"statFiles":false}`) stops the
+ * detector from `stat`ing the re-read file to price the return. With it off, a
+ * return is still DETECTED (it counts toward the ratio) but prices at whatever
+ * `bytes_returned` the event carried — usually 0, so nothing is deducted.
  */
 export function reuseStatFilesEnabled(): boolean {
-  return !envFlagOff(process.env.CONTEXT_MODE_REUSE_STAT_FILES);
+  return reuseSettings().statFiles;
 }
 
 // ─────────────────────────────────────────────────────────
@@ -462,6 +512,34 @@ function parseMs(created: string | undefined): number {
   return Number.isFinite(t) ? t : 0;
 }
 
+/** One event in stream order, with its parsed timestamp and its input index. */
+interface OrderedEvent {
+  ev: ReuseCandidateEvent;
+  ms: number;
+  seq: number;
+}
+
+/**
+ * Put an event array into the only order that survives the multi-DB scan
+ * `analytics.ts` performs: `(created_at, id, input index)`.
+ *
+ * Shared by both passes so they cannot disagree about what "later" means —
+ * and `created_at` is second-resolution text in which a whole hook fire shares
+ * one value, so `id` and then the input index are what actually break the tie.
+ */
+function orderEvents(events: ReuseCandidateEvent[]): OrderedEvent[] {
+  return [...events]
+    .filter((e) => e && typeof e.type === "string")
+    .map((e, i) => ({ ev: e, ms: parseMs(e.created_at), seq: i }))
+    .sort((a, b) => {
+      if (a.ms !== b.ms) return a.ms - b.ms;
+      const ai = a.ev.id ?? a.seq;
+      const bi = b.ev.id ?? b.seq;
+      if (ai !== bi) return ai - bi;
+      return a.seq - b.seq;
+    });
+}
+
 function defaultSizeOf(absPath: string): number {
   if (!reuseStatFilesEnabled()) return 0;
   try {
@@ -496,16 +574,7 @@ export function detectReuse(
   const windowMs = opts?.windowMs ?? reuseWindowMs();
   const sizeOf = opts?.sizeOf ?? defaultSizeOf;
 
-  const ordered = [...events]
-    .filter((e) => e && typeof e.type === "string")
-    .map((e, i) => ({ ev: e, ms: parseMs(e.created_at), seq: i }))
-    .sort((a, b) => {
-      if (a.ms !== b.ms) return a.ms - b.ms;
-      const ai = a.ev.id ?? a.seq;
-      const bi = b.ev.id ?? b.seq;
-      if (ai !== bi) return ai - bi;
-      return a.seq - b.seq;
-    });
+  const ordered = orderEvents(events);
 
   // Open covers, most recent last, keyed by normalized source.
   interface Cover {
@@ -592,6 +661,387 @@ export function detectReuse(
 
 /** Drop the per-pair detail, keep the numbers the renderer and the deduction use. */
 export function summarizeReuse(report: ReuseReport): ReuseSummary {
+  const { detections: _detections, ...summary } = report;
+  return summary;
+}
+
+
+// ─────────────────────────────────────────────────────────
+// Read but never used — the other half of the loss
+// ─────────────────────────────────────────────────────────
+
+/**
+ * `CONTEXT_MODE_READ_WASTE=0|false|off|no` switches the read-but-never-used
+ * metric off: the extra event types are not selected, no text is scanned, and
+ * ctx_stats prints no waste line.
+ *
+ * Separate from `CONTEXT_MODE_REUSE_DETECT` on purpose. The reuse detector
+ * CHANGES numbers (it deducts from `bytes_avoided`); this one only REPORTS, so
+ * a user may reasonably want one without the other.
+ */
+export function readWasteDetectorEnabled(): boolean {
+  return !isOffValue(process.env.CONTEXT_MODE_READ_WASTE);
+}
+
+/**
+ * Tool turns that must have passed after a read before it may be called waste.
+ *
+ * The last few reads of a LIVE session have not had their chance yet: the model
+ * may edit the file in its very next turn. Judging them would print waste that
+ * the next tool call disproves a second later, and a metric that flip-flops is
+ * a metric nobody believes.
+ */
+export const DEFAULT_READ_WASTE_TAIL_STEPS = 3;
+
+/**
+ * Event types whose `data` carries text that can MENTION a source after it was
+ * read: the assistant's own answer (`turn_end.last_assistant_message`), a
+ * sub-agent brief, a recorded decision or goal, the user's prompt.
+ *
+ * Deliberately EXCLUDES `read-redirected`, `missed_redirect` and
+ * `file_read_metadata`. Those are emitted by the SAME hook fire as the
+ * `file_read` they describe and repeat its path verbatim — counting them would
+ * mark every read as "mentioned afterwards" and silently zero the metric.
+ */
+export const MENTION_EVENT_TYPES: readonly string[] = [
+  "turn_end",
+  "agent_finding",
+  "decision",
+  "decision_question",
+  "user_prompt",
+  "data",
+  "goal",
+  "intent",
+  "blocker",
+];
+
+/**
+ * The `type IN (…)` list a caller needs to serve BOTH passes from ONE SELECT.
+ *
+ * {@link detectReuse} ignores the extra rows — none of them is `mcp_tool_call`
+ * or `file_read`, and none is in {@link REUSE_EVENT_TYPES}, so none advances
+ * its step counter either. One query, one array, two products; that is the
+ * whole reason this pass lives in this module instead of next to it.
+ */
+export const READ_WASTE_EVENT_TYPES: readonly string[] = [
+  ...REUSE_EVENT_TYPES,
+  ...MENTION_EVENT_TYPES,
+];
+
+/**
+ * ── What counts as USED ─────────────────────────────────────────────────────
+ *
+ * A `file_read` is USED when ANY of these happens strictly after it:
+ *
+ *   1. an `file_edit` / `file_write` of the same path — the read fed a change;
+ *   2. any later tool call naming it — another read, a grep, a glob, an
+ *      `mcp_tool_call` whose params carry the path, an `error_tool` blob
+ *      quoting it;
+ *   3. a mention of the path, of its basename, or of its basename-without-
+ *      extension in later text — the assistant's answer, a sub-agent brief, a
+ *      decision, the user's next prompt.
+ *
+ * Everything else is WASTE: bytes that entered the window whole and were never
+ * referred to again.
+ *
+ * The bias is deliberate and one-directional — WHEN IN DOUBT, USED.
+ * Over-reporting waste would make the number untrustworthy the first time a
+ * user recognised a file they know they worked from, and a loss metric nobody
+ * believes is worse than no loss metric. Hence:
+ *
+ *   - the basename-without-extension needle. Matching "an identifier from the
+ *     file" properly would mean opening the file and extracting its symbols —
+ *     exactly the heavy pass this metric must not add. The module stem is the
+ *     cheap proxy, and it is a LOOSE one: it marks reads used on a bare mention
+ *     of `analytics`, which is the safe direction to be wrong in.
+ *   - the tail grace ({@link DEFAULT_READ_WASTE_TAIL_STEPS}).
+ *   - abstention on a truncated stream (see `truncated` below): a capped row
+ *     set loses the END of the session, which is exactly where the exonerating
+ *     mentions are.
+ *   - a read whose path will not normalize (a URL, a glob) is not judged at all.
+ *
+ * Nothing here is deducted from `bytes_avoided`. A `Read` was never booked as a
+ * saving in the first place — unlike the returns above, which were. This pass
+ * reports a loss the savings arithmetic never claimed, and touching the ratio
+ * with it would double-count in the other direction.
+ */
+
+/** Word-ish tokens: paths, filenames, bare identifiers. One linear scan per event. */
+const MENTION_TOKEN = /[A-Za-z0-9_@+.\-/\\]{2,}/g;
+/**
+ * Per-event text budget — `data` / `user_prompt` rows run to tens of KB.
+ *
+ * Exported so the caller can apply the SAME cap in SQL (`substr(data, 1, N)`)
+ * on the mention types and never move the discarded tail across the driver.
+ * Lossless: this pass would slice it off here anyway, and no other consumer
+ * parses those rows.
+ */
+export const MENTION_TEXT_CAP = 16_384;
+/** Per-event token budget, so one pathological blob cannot own the pass. */
+const MENTION_TOKEN_CAP = 4_000;
+
+/** Prose punctuation that clings to a path: "…in `src/db.ts`, which…". */
+const TRAILING_PUNCT = new Set([".", ",", ";", ":", "!", "?", ")", "]", "}", "'", '"', "`"]);
+
+/** The forms a read's path may be referred to by: full key, basename, stem. */
+function readNeedles(key: string): string[] {
+  const k = key.toLowerCase();
+  const out = [k];
+  const base = k.slice(k.lastIndexOf("/") + 1);
+  if (base.length >= 2 && base !== k) out.push(base);
+  const dot = base.lastIndexOf(".");
+  if (dot >= 2) out.push(base.slice(0, dot));
+  return out;
+}
+
+/**
+ * Record which of the WANTED needles one text token matches.
+ *
+ * The inversion that keeps this pass cheap. The obvious shape — tokenize every
+ * event into one big "everything mentioned" set — builds a few hundred thousand
+ * entries out of a session's prose and spends most of its time growing and
+ * rehashing that set. Nothing needs it: the only strings that can change an
+ * answer are the needles of the files that were actually read, a few hundred at
+ * most, and those are known before the walk starts. So the hot loop does
+ * lookups against a small fixed table instead of insertions into a growing one.
+ */
+function recordNeedleHits(token: string, wanted: Set<string>, seen: Set<string>): void {
+  let t = token.indexOf("\\") >= 0 ? token.replace(/\\/g, "/") : token;
+  let end = t.length;
+  while (end > 0 && TRAILING_PUNCT.has(t[end - 1])) end--;
+  if (end < 2) return;
+  if (end !== t.length) t = t.slice(0, end);
+  t = t.toLowerCase();
+
+  if (wanted.has(t)) seen.add(t);
+  const slash = t.lastIndexOf("/");
+  const base = slash >= 0 ? t.slice(slash + 1) : t;
+  if (base !== t && base.length >= 2 && wanted.has(base)) seen.add(base);
+  const dot = base.lastIndexOf(".");
+  if (dot >= 2) {
+    const stem = base.slice(0, dot);
+    if (wanted.has(stem)) seen.add(stem);
+  }
+}
+
+/** Scan one event's `data` for wanted needles. Capped; never throws. */
+function scanMentions(text: string | undefined, wanted: Set<string>, seen: Set<string>): void {
+  if (!text || typeof text !== "string") return;
+  if (wanted.size === 0 || seen.size >= wanted.size) return;
+  const slice = text.length > MENTION_TEXT_CAP ? text.slice(0, MENTION_TEXT_CAP) : text;
+  MENTION_TOKEN.lastIndex = 0;
+  let m: RegExpExecArray | null;
+  let guard = 0;
+  while ((m = MENTION_TOKEN.exec(slice)) !== null) {
+    if (++guard > MENTION_TOKEN_CAP) break;
+    recordNeedleHits(m[0], wanted, seen);
+  }
+}
+
+/** One file that entered the window through a read and was never referred to again. */
+export interface ReadWasteDetection {
+  /** Normalized key of the file that was read and dropped. */
+  source: string;
+  /** Path as the `file_read` event reported it. */
+  readPath: string;
+  /** `session_events.id` of the unused read. */
+  readEventId?: number;
+  /** What the read cost — priced from `bytes_returned`, else from disk. */
+  bytes: number;
+}
+
+/** Aggregate the ctx_stats renderer consumes. Reported, never deducted. */
+export interface ReadWasteSummary {
+  /** Reads that were judged and found unused. */
+  wastedReads: number;
+  /** Distinct files behind {@link wastedReads}. */
+  wastedSources: number;
+  /** Reads old enough to judge — the honest denominator of {@link ratio}. */
+  judgedReads: number;
+  /** Distinct files behind {@link judgedReads}. */
+  judgedSources: number;
+  /** Bytes the unused reads put into the window. */
+  wastedBytes: number;
+  /** {@link wastedBytes} on the one tokenizer basis (ADR-0004). */
+  wastedTokens: number;
+  /** `wastedReads / judgedReads`, 0 when nothing was judged. */
+  ratio: number;
+  /** Heaviest offenders, descending by bytes. At most 3. */
+  top: Array<{ path: string; bytes: number }>;
+  /** Whether the pass ran at all (false when the env switch is off). */
+  enabled: boolean;
+  /** True when the row set was capped and the pass therefore abstained. */
+  truncated: boolean;
+}
+
+/** Everything one pass produced. */
+export interface ReadWasteReport extends ReadWasteSummary {
+  detections: ReadWasteDetection[];
+}
+
+/** Options for {@link detectReadWaste}. */
+export interface DetectReadWasteOptions {
+  /** Fallback anchor for relative paths when a row has no `project_dir`. */
+  projectDir?: string;
+  /**
+   * Price a read whose event carried no `bytes_returned`. Defaults to the same
+   * `statSync` probe the reuse pass uses, so `CONTEXT_MODE_REUSE_STAT_FILES=0`
+   * silences pricing here too (a read is still DETECTED, it just prices at 0).
+   */
+  sizeOf?: (absPath: string) => number;
+  /** Force-enable/disable, bypassing the env switch. Tests and vetted callers. */
+  enabled?: boolean;
+  /**
+   * Set when the caller's row budget was exhausted. A capped SELECT drops the
+   * TAIL of the stream — precisely where the mentions that would exonerate a
+   * read live — so the pass abstains rather than inventing waste.
+   */
+  truncated?: boolean;
+  /** Tail-grace override. Defaults to {@link DEFAULT_READ_WASTE_TAIL_STEPS}. */
+  tailSteps?: number;
+}
+
+const EMPTY_WASTE_REPORT: ReadWasteReport = {
+  detections: [],
+  wastedReads: 0,
+  wastedSources: 0,
+  judgedReads: 0,
+  judgedSources: 0,
+  wastedBytes: 0,
+  wastedTokens: 0,
+  ratio: 0,
+  top: [],
+  enabled: false,
+  truncated: false,
+};
+
+/**
+ * Find every file that entered the context window through a read and was never
+ * referred to again. See the "What counts as USED" block above for the rule.
+ *
+ * One backward walk over the SAME ordered array {@link detectReuse} consumes.
+ * Walking backwards is what makes it cheap: the set of needles already
+ * mentioned is built once, in stream order, and at every read it already holds
+ * exactly that read's future — no per-read rescan, no second query, no file
+ * opened. See {@link recordNeedleHits} for the other half of the budget.
+ *
+ * The `pending` buffer holds events whose `(timestamp, step)` still ties the
+ * event being judged. `created_at` is second-resolution and a whole hook fire
+ * shares one value, so without that buffer a companion row emitted by the very
+ * same `Read` would count as a mention OF that read. Only strictly-later events
+ * are allowed into the mention set.
+ */
+export function detectReadWaste(
+  events: ReuseCandidateEvent[],
+  opts?: DetectReadWasteOptions,
+): ReadWasteReport {
+  const enabled = opts?.enabled ?? readWasteDetectorEnabled();
+  if (!enabled) return { ...EMPTY_WASTE_REPORT, detections: [], top: [] };
+  if (!Array.isArray(events) || events.length === 0) {
+    return { ...EMPTY_WASTE_REPORT, detections: [], top: [], enabled: true };
+  }
+  if (opts?.truncated) {
+    return { ...EMPTY_WASTE_REPORT, detections: [], top: [], enabled: true, truncated: true };
+  }
+
+  const tailSteps = opts?.tailSteps ?? DEFAULT_READ_WASTE_TAIL_STEPS;
+  const sizeOf = opts?.sizeOf ?? defaultSizeOf;
+  const ordered = orderEvents(events);
+
+  // Forward pass: the step index of every event, and the stream's total.
+  const stepAt = new Array<number>(ordered.length);
+  let step = 0;
+  for (let i = 0; i < ordered.length; i++) {
+    if (STEP_TYPES.has(ordered[i].ev.type)) step++;
+    stepAt[i] = step;
+  }
+  const totalSteps = step;
+
+  // Every needle any read in this stream could be exonerated by. Built before
+  // the walk so the mention scan has something small to look for.
+  const wanted = new Set<string>();
+  for (const item of ordered) {
+    if (item.ev.type !== "file_read") continue;
+    const key = normalizeSourceKey(item.ev.data, item.ev.project_dir || opts?.projectDir);
+    if (key) for (const n of readNeedles(key)) wanted.add(n);
+  }
+
+  const mentioned = new Set<string>();
+  const pending: Array<{ ms: number; step: number; text: string }> = [];
+  const detections: ReadWasteDetection[] = [];
+  const wastedKeys = new Set<string>();
+  const judgedKeys = new Set<string>();
+  let judgedReads = 0;
+
+  for (let i = ordered.length - 1; i >= 0; i--) {
+    const cur = ordered[i];
+    const curStep = stepAt[i];
+
+    // Promote everything strictly later than THIS event into the mention set.
+    // Both coordinates are non-increasing as `i` falls, so a promoted event
+    // stays strictly later for every event still to come.
+    for (let p = pending.length - 1; p >= 0; p--) {
+      const q = pending[p];
+      if (q.ms > cur.ms || q.step > curStep) {
+        scanMentions(q.text, wanted, mentioned);
+        pending.splice(p, 1);
+      }
+    }
+
+    if (cur.ev.type === "file_read") {
+      const anchor = cur.ev.project_dir || opts?.projectDir;
+      const key = normalizeSourceKey(cur.ev.data, anchor);
+      // Unnormalizable (URL, glob, empty) — not a file, not judged.
+      // Too close to the end of the stream — not judged yet, see tail grace.
+      if (key && totalSteps - curStep >= tailSteps) {
+        judgedReads++;
+        judgedKeys.add(key);
+        if (!readNeedles(key).some((n) => mentioned.has(n))) {
+          const priced = Number(cur.ev.bytes_returned ?? 0);
+          const bytes = Number.isFinite(priced) && priced > 0
+            ? priced
+            : Math.max(0, sizeOf(key));
+          detections.push({
+            source: key,
+            readPath: cur.ev.data,
+            readEventId: cur.ev.id,
+            bytes,
+          });
+          wastedKeys.add(key);
+        }
+      }
+    }
+
+    // The read's own row goes in only AFTER it was judged: a file mentioned
+    // solely by the read that pulled it in is waste, not use.
+    pending.push({ ms: cur.ms, step: curStep, text: cur.ev.data });
+  }
+
+  const wastedBytes = detections.reduce((s, d) => s + d.bytes, 0);
+  const perSource = new Map<string, number>();
+  for (const d of detections) perSource.set(d.source, (perSource.get(d.source) ?? 0) + d.bytes);
+  const top = [...perSource.entries()]
+    .map(([path, bytes]) => ({ path, bytes }))
+    .sort((a, b) => b.bytes - a.bytes)
+    .slice(0, 3);
+
+  return {
+    detections,
+    wastedReads: detections.length,
+    wastedSources: wastedKeys.size,
+    judgedReads,
+    judgedSources: judgedKeys.size,
+    wastedBytes,
+    wastedTokens: Math.round(tokensFromBytes(wastedBytes)),
+    ratio: judgedReads > 0 ? detections.length / judgedReads : 0,
+    top,
+    enabled: true,
+    truncated: false,
+  };
+}
+
+/** Drop the per-read detail, keep the numbers the renderer uses. */
+export function summarizeReadWaste(report: ReadWasteReport): ReadWasteSummary {
   const { detections: _detections, ...summary } = report;
   return summary;
 }

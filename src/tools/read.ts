@@ -28,12 +28,30 @@
  * Here `intent` selects what the default program extracts from the *input*.
  * The two never meet: this handler passes no `intent` down, so the underlying
  * call keeps its own semantics untouched and the slice is returned whole.
+ *
+ * ## Re-reading the same unchanged file
+ *
+ * The second identical call costs exactly as much conversation memory as the
+ * first and carries no new information, and in a long session that repetition
+ * is one of the largest single expenses there is. So a repeat of the same call
+ * on a file the fs-bus watcher has been covering since the first one returns a
+ * one-line "unchanged" notice instead of the slice.
+ *
+ * Two conditions, both required. The fs-bus cache must answer `unchanged` —
+ * never `unknown`, which is what it says whenever the watcher was not live or
+ * an event may have been missed, and which therefore falls through to a real
+ * read. And the *call* must be the same call: the cache key carries a hash of
+ * the generated program, so a different `intent` — or any future argument that
+ * changes what the program prints — is a different key that has never been
+ * delivered and cannot be short-circuited by the one that was.
  */
 
-import { statSync } from "node:fs";
+import { createHash } from "node:crypto";
+import { readFileSync, statSync } from "node:fs";
 import { isAbsolute, resolve } from "node:path";
 import { z } from "zod";
 
+import { checkRead, isReadCacheEnabled, recordRead } from "../fs-bus/index.js";
 import type { ToolDeps, ToolResult } from "./shared/deps.js";
 
 /** Arguments the underlying `ctx_execute_file` handler accepts. */
@@ -279,9 +297,74 @@ try {
 `.trim();
 }
 
+/**
+ * What one delivered slice was, so a repeat of it can be recognised.
+ *
+ * `hash` is the content hash handed to the fs-bus cache; carrying it back as
+ * `sinceHash` is what stops one variant's record from answering for another,
+ * and what stops a record written by some other reader of the same path from
+ * being mistaken for this tool's own delivery.
+ */
+interface DeliveredSlice {
+  hash: string;
+  lines: number;
+  bytes: number;
+}
+
+/**
+ * Delivered slices remembered per handler.
+ *
+ * Small on purpose: the fs-bus cache already bounds what it tracks, and this
+ * map only has to cover the paths a session keeps coming back to. Insertion
+ * order is the LRU order — a hit deletes and re-sets the key.
+ */
+const DELIVERED_SLICES_MAX = 256;
+
+/**
+ * Identity of one *call*, not one file.
+ *
+ * The program text is hashed into the key rather than the raw `intent`,
+ * because the program is what determines the output: any argument that ever
+ * starts changing it — a line range, a different cut, a new alias table —
+ * changes this key without anybody having to remember to add it here. Getting
+ * that wrong would answer "unchanged" to a call that asked a different
+ * question and never saw the answer.
+ */
+function sliceKey(absolute: string, program: string): string {
+  return `${absolute}\u0000${createHash("sha1").update(program).digest("hex").slice(0, 16)}`;
+}
+
+/** Short content digest. Opaque to the cache, which only compares it. */
+function contentHash(bytes: Buffer): string {
+  return createHash("sha1").update(bytes).digest("hex").slice(0, 12);
+}
+
+/**
+ * Lines the way the default program counts them: a trailing newline does not
+ * open a line. Reporting a different number in the short-circuit than the
+ * first read printed would look like the file had changed.
+ */
+function countLines(bytes: Buffer): number {
+  if (bytes.length === 0) return 0;
+  let newlines = 0;
+  for (let i = 0; i < bytes.length; i++) if (bytes[i] === 0x0a) newlines++;
+  return bytes[bytes.length - 1] === 0x0a ? newlines : newlines + 1;
+}
+
 /** Register `ctx_read` on the server carried by `deps`. */
 export function registerCtxRead(deps: ReadToolDeps): void {
   const { getProjectDir, trackResponse, runExecuteFile } = deps;
+  const delivered = new Map<string, DeliveredSlice>();
+
+  function remember(key: string, slice: DeliveredSlice): void {
+    delivered.delete(key);
+    delivered.set(key, slice);
+    while (delivered.size > DELIVERED_SLICES_MAX) {
+      const oldest = delivered.keys().next();
+      if (oldest.done) break;
+      delivered.delete(oldest.value);
+    }
+  }
 
   deps.server.registerTool(
     "ctx_read",
@@ -315,6 +398,7 @@ WHEN NOT:
   - You do not know which file yet — ctx_find takes the question and returns the path
 RETURNS:
   A header naming the file with its line and byte count, a STRUCTURE block, and a MATCHES block of intent-matching regions with line numbers. Clipped with a marker if the slice would exceed 6000 characters. Files over 16 MB and non-UTF-8 files are reported as such rather than read.
+  Repeating the same call on a file that has not changed since returns one "unchanged since your last read" line instead of the slice again; pass refresh: true for the slice itself.
 EXAMPLE: ctx_read(path: "src/adapters/detect.ts")
 EXAMPLE: ctx_read(path: "src/adapters/detect.ts", intent: "exports")
 EXAMPLE: ctx_read(path: "server.log", intent: "timeout errors")`,
@@ -334,14 +418,33 @@ EXAMPLE: ctx_read(path: "server.log", intent: "timeout errors")`,
           .coerce.number()
           .optional()
           .describe("Max execution time in ms. When omitted, the MCP host's RPC timeout governs."),
+        refresh: z
+          .boolean()
+          .optional()
+          .describe(
+            "Read again even if the same call already returned this file unchanged. " +
+            "Use it when you need the slice itself back, not the fact that it did not change.",
+          ),
       }),
     },
     async (params) => {
-      const p = params as { path?: unknown; intent?: unknown; timeout?: unknown };
+      const p = params as {
+        path?: unknown;
+        intent?: unknown;
+        timeout?: unknown;
+        refresh?: unknown;
+      };
       const rawPath = typeof p.path === "string" ? p.path.trim() : "";
       if (!rawPath) {
         return trackResponse("ctx_read", textResult("Error: `path` is required.", true));
       }
+
+      // Taken before the file is opened, by anyone: everything between this
+      // instant and the byte the subprocess got is a window in which a write
+      // could have landed. `recordRead` compares this against the watcher's
+      // invalidation stamp and marks the entry dirty when the write won, which
+      // is the only thing keeping the "hash after the read" order below safe.
+      const readAt = Date.now();
 
       // Fail on the path before spending a subprocess on it. The underlying
       // handler would surface an ENOENT from inside the sandbox as a runtime
@@ -384,6 +487,34 @@ EXAMPLE: ctx_read(path: "server.log", intent: "timeout errors")`,
 
       const intent = typeof p.intent === "string" ? p.intent : undefined;
       const timeout = typeof p.timeout === "number" ? p.timeout : undefined;
+      const refresh = p.refresh === true;
+
+      const program = buildDefaultProgram(intent);
+      const cacheOn = isReadCacheEnabled();
+      const key = sliceKey(absolute, program);
+
+      // Short-circuit only on a definite `unchanged`. `unknown` — no watcher,
+      // watcher restarted, cache switched off — means nobody can promise the
+      // bytes are still there, and handing back a stale slice on a maybe is
+      // strictly worse than paying for the read again.
+      if (cacheOn && !refresh) {
+        const prior = delivered.get(key);
+        if (prior) {
+          const answer = checkRead(absolute, { sinceHash: prior.hash });
+          if (answer.state === "unchanged") {
+            remember(key, prior);
+            return trackResponse(
+              "ctx_read",
+              textResult(
+                `${absolute}\n` +
+                  `unchanged since your last read (hash ${prior.hash}, ${prior.lines} lines, ` +
+                  `${prior.bytes} bytes)${intent ? `, intent "${intent}"` : ""} — the same slice ` +
+                  "is withheld rather than spent twice. Pass refresh: true to read it anyway.",
+              ),
+            );
+          }
+        }
+      }
 
       // The whole point: one call into the same handler ctx_execute_file
       // registers, with the program supplied instead of demanded. `intent` is
@@ -392,10 +523,31 @@ EXAMPLE: ctx_read(path: "server.log", intent: "timeout errors")`,
       const result = await runExecuteFile({
         path: rawPath,
         language: "javascript",
-        code: buildDefaultProgram(intent),
+        code: program,
         timeout,
         toolName: "ctx_read",
       });
+
+      // Hash AFTER the call, never before. That handler owns the security
+      // decisions — project boundary (#852), Read deny globs — and reading the
+      // bytes here first would pull in a file it is about to refuse. An error
+      // result is not a read: recording it would let the next call answer
+      // "unchanged" for a slice the caller never received.
+      if (cacheOn && result.isError !== true) {
+        try {
+          const bytes = readFileSync(absolute);
+          const slice: DeliveredSlice = {
+            hash: contentHash(bytes),
+            lines: countLines(bytes),
+            bytes: bytes.length,
+          };
+          recordRead({ path: absolute, hash: slice.hash, bytes: slice.bytes, readAt });
+          remember(key, slice);
+        } catch {
+          // Vanished or unreadable between the run and here. Nothing to
+          // remember, and the caller already has its slice — stay quiet.
+        }
+      }
       return result;
     },
   );

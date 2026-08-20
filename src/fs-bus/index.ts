@@ -26,13 +26,16 @@
  * 2. **The `codegraph sync` queue** — `attachFsSource` in `src/graph/daemon.ts`,
  *    which coalesces and runs one PROJECT-level sync (codegraph 1.5.0 has no
  *    per-file sync), and no-ops entirely when a live daemon is already watching.
- * 3. **Per-path caches** — a registry, see {@link registerPathCache}. It ships
- *    EMPTY: there is today no cache of file content or results for
- *    `ctx_execute_file` to invalidate. `Executor.executeFile` wraps the caller's
- *    code so the sandbox subprocess reads the file itself on every run, and
- *    `src/fetch-cache.ts` keys HTTP fetches by URL, not by path. The seam exists
- *    so the first such cache has somewhere to attach instead of growing a second
- *    watcher.
+ * 3. **Per-path caches** — a registry, see {@link registerPathCache}. Its first
+ *    and, so far, only member is the re-read cache below: a path that was read
+ *    once and has not moved since answers "unchanged, hash X" instead of the
+ *    content a second time, because repeated reads of unchanged files are one
+ *    of the largest context expenses there is. Invalidation is free — this
+ *    watcher already knows what changed. The registry itself stays public so the
+ *    next such cache attaches here instead of growing a second watcher; when
+ *    nothing is registered (nobody has read a file yet, or
+ *    `CONTEXT_MODE_READ_CACHE=0`) the consumer short-circuits on an empty set
+ *    and costs one `Set#size` per batch.
  *
  * ## Degradation is the default, not an option
  *
@@ -48,6 +51,9 @@
  * drops them again), and the index consumer checks `isInsideRoot` once more
  * before touching a store — the same guard, imported, never re-implemented.
  */
+
+import { realpathSync } from "node:fs";
+import { resolve } from "node:path";
 
 import type { AcquireFinderOptions, FffFinder, FsChangeEvent } from "../fff/index.js";
 import {
@@ -65,21 +71,28 @@ import {
   isFsBusEnabled,
   isGraphConsumerEnabled,
   isIndexConsumerEnabled,
+  isReadCacheEnabled,
   maxFilesPerBatch,
+  readCacheMaxEntries,
 } from "./env.js";
 
 export {
   DEFAULT_MAX_FILES_PER_BATCH,
+  DEFAULT_READ_CACHE_ENTRIES,
   FS_BUS_CACHE_ENV,
   FS_BUS_ENV,
   FS_BUS_GRAPH_ENV,
   FS_BUS_INDEX_ENV,
   FS_BUS_MAX_FILES_ENV,
+  READ_CACHE_ENV,
+  READ_CACHE_MAX_ENV,
   isCacheConsumerEnabled,
   isFsBusEnabled,
   isGraphConsumerEnabled,
   isIndexConsumerEnabled,
+  isReadCacheEnabled,
   maxFilesPerBatch,
+  readCacheMaxEntries,
 } from "./env.js";
 
 // ─────────────────────────────────────────────────────────
@@ -126,6 +139,351 @@ export function registeredPathCaches(): string[] {
 /** Drop every registration. Tests only. */
 export function __resetPathCachesForTests(): void {
   pathCaches.clear();
+}
+
+// ─────────────────────────────────────────────────────────
+// Re-read cache (the first member of that registry)
+// ─────────────────────────────────────────────────────────
+
+/**
+ * What a reader tells the cache after it has read a file.
+ *
+ * `readAt` should be the clock reading taken BEFORE the file was opened, not
+ * after: everything between that instant and the byte the reader got is a
+ * window in which a write could have landed and been delivered to
+ * {@link invalidate} before this record existed. Recording the earlier
+ * timestamp makes such a write win the comparison in `recordRead` and mark the
+ * entry dirty. Omitting it defaults to "now", which is only safe when the read
+ * was instantaneous.
+ */
+export interface ReadRecord {
+  /** Absolute path that was read. Resolved through `realpath` before keying. */
+  path: string;
+  /** Content hash. Opaque to the cache; only ever compared for equality. */
+  hash: string;
+  /** Bytes read, carried back verbatim in the `unchanged` answer. */
+  bytes?: number;
+  /** Clock reading from before the file was opened. Defaults to `Date.now()`. */
+  readAt?: number;
+  env?: NodeJS.ProcessEnv;
+}
+
+/**
+ * Why the cache refused to answer. Every one of these means "read the file";
+ * none of them is an error.
+ *
+ * - `disabled` — `CONTEXT_MODE_READ_CACHE=0`.
+ * - `no-record` — never read through this cache, or evicted, or dropped by a
+ *   rescan.
+ * - `no-watcher` — no live wiring covers this path, or the cache consumer is
+ *   switched off for it, so nothing would ever invalidate the entry. Also the
+ *   answer on a platform where the native watcher never came up: the wiring is
+ *   inert there and never reaches `installations`.
+ * - `watcher-restarted` — the wiring covering this path was torn down and
+ *   installed again since the read. Whatever changed in between produced no
+ *   event anyone received.
+ */
+export type ReadCacheUnknownReason =
+  | "disabled"
+  | "no-record"
+  | "no-watcher"
+  | "watcher-restarted";
+
+/**
+ * The answer to "do I have to read this file again?".
+ *
+ * A wrong `unchanged` hands the agent bytes that no longer exist on disk, which
+ * is far worse than the redundant read a wrong `unknown` costs. Every doubt
+ * therefore resolves to `unknown`.
+ */
+export type ReadCacheAnswer =
+  | { state: "unchanged"; hash: string; readAt: number; bytes?: number }
+  | { state: "changed"; previousHash?: string; changedAt: number }
+  | { state: "unknown"; reason: ReadCacheUnknownReason };
+
+interface ReadEntry {
+  /**
+   * Hash of the content the reader saw. Absent on a tombstone — an entry minted
+   * by {@link invalidate} for a path nobody had read yet, kept so that a read
+   * which STARTED before that event cannot be recorded as clean.
+   */
+  hash?: string;
+  bytes?: number;
+  /** `readAt` of the record. `0` on a tombstone. */
+  readAt: number;
+  /**
+   * Coverage epoch of the wiring that was watching this path at record time.
+   * `null` means nothing was watching, which can never become `unchanged`.
+   */
+  epoch: number | null;
+  /** A watcher event landed on this path after the recorded read. */
+  dirty: boolean;
+  /** When that event landed. `0` if none has. */
+  invalidatedAt: number;
+}
+
+export interface ReadCacheStats {
+  enabled: boolean;
+  /** Entries currently held, tombstones included. */
+  entries: number;
+  capacity: number;
+  /** Registered with the path-cache registry, i.e. receiving invalidations. */
+  attached: boolean;
+  records: number;
+  unchanged: number;
+  changed: number;
+  unknown: number;
+  invalidations: number;
+  /** Rescans, each of which dropped every entry. */
+  clears: number;
+  evictions: number;
+}
+
+/** Insertion order IS the LRU order: a touched key is deleted and re-set. */
+const readEntries = new Map<string, ReadEntry>();
+
+const readStats = {
+  records: 0,
+  unchanged: 0,
+  changed: 0,
+  unknown: 0,
+  invalidations: 0,
+  clears: 0,
+  evictions: 0,
+};
+
+const readCache: PathCache = {
+  name: "read-cache",
+  invalidate(filePath: string): void {
+    // The watcher reports canonical absolute paths, and `recordRead` keys on
+    // `realpath`, so both sides spell the same file the same way. `resolve` is
+    // the cheap half of that agreement — a removed file has no realpath left.
+    const key = resolve(filePath);
+    const now = Date.now();
+    const existing = readEntries.get(key);
+    touchEntry(key, {
+      ...(existing ?? { readAt: 0, epoch: null }),
+      dirty: true,
+      invalidatedAt: now,
+    }, envForPath(key));
+    readStats.invalidations += 1;
+  },
+  clear(): void {
+    // A rescan means the watcher lost track: it can no longer say WHICH files
+    // moved, so no surviving entry could be trusted to still describe disk.
+    readEntries.clear();
+    readStats.clears += 1;
+  },
+};
+
+/**
+ * Attach to the registry on first use, and verify the attachment on every call
+ * afterwards.
+ *
+ * The check is by identity rather than by a `registered` flag because
+ * {@link __resetPathCachesForTests} (and any future explicit detach) empties the
+ * registry behind our back. A stale flag there would leave the cache answering
+ * `unchanged` from entries no watcher event can reach any more — exactly the
+ * stale answer this module must never produce. Re-attaching also drops the
+ * entries, since anything that happened while detached went unheard.
+ *
+ * Attaching lazily leaves one window: events that land before the FIRST call of
+ * the process reach nobody. It costs nothing — a path with no entry answers
+ * `no-record` — as long as the caller asks {@link checkRead} BEFORE it reads,
+ * which is the only order in which the cache saves anything anyway. That call
+ * attaches, so the read it guards is already covered.
+ */
+function ensureAttached(): void {
+  if (pathCaches.has(readCache)) return;
+  readEntries.clear();
+  registerPathCache(readCache);
+}
+
+/** Move a key to the LRU tail, then evict from the head down to the cap. */
+function touchEntry(key: string, entry: ReadEntry, env?: NodeJS.ProcessEnv): void {
+  readEntries.delete(key);
+  readEntries.set(key, entry);
+  const cap = readCacheMaxEntries(env ?? process.env);
+  while (readEntries.size > cap) {
+    const oldest = readEntries.keys().next();
+    if (oldest.done) break;
+    readEntries.delete(oldest.value);
+    readStats.evictions += 1;
+  }
+}
+
+/**
+ * The epoch of the live wiring watching this path, or `null` when none is.
+ *
+ * Bound to the INSTALLATION, not to the root string: a wiring that was torn
+ * down and re-installed gets a new epoch, so entries recorded under the old one
+ * stop being answerable. Nothing delivers events for the gap in between, and a
+ * file edited inside it would otherwise read as unchanged forever.
+ */
+function coverageEpoch(absolutePath: string): number | null {
+  const installation = coveringInstallation(absolutePath);
+  if (installation === undefined) return null;
+  // `CONTEXT_MODE_FS_BUS_CACHE=0` keeps the bus but stops the fan-out to path
+  // caches, so entries under this root would never be invalidated again.
+  if (!isCacheConsumerEnabled(installation.env)) return null;
+  return installation.epoch;
+}
+
+function coveringInstallation(absolutePath: string): Installation | undefined {
+  for (const installation of installations.values()) {
+    if (installation.detached) continue;
+    if (isInsideRoot(absolutePath, installation.root) || absolutePath === installation.root) {
+      return installation;
+    }
+  }
+  return undefined;
+}
+
+/**
+ * Which env decides the cap for this path. `invalidate` arrives from the
+ * watcher with no caller and therefore no env of its own; the wiring that
+ * delivered the event is the one whose configuration applies. In a server both
+ * are the same object — they diverge only where a wiring was installed with an
+ * env of its own, which is how the tests reach this at all.
+ */
+function envForPath(absolutePath: string): NodeJS.ProcessEnv {
+  return coveringInstallation(absolutePath)?.env ?? process.env;
+}
+
+/** `realpath`, so a symlinked spelling cannot key a second entry for one file. */
+function readKey(filePath: string): string | null {
+  const abs = resolve(filePath);
+  try {
+    return realpathSync.native(abs);
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Remember that `path` was read and what its content hashed to.
+ *
+ * Cheap and safe to call on every read: a path no live watcher covers is still
+ * recorded, but is stamped with a `null` epoch and can only ever answer
+ * `unknown`.
+ */
+export function recordRead(record: ReadRecord): void {
+  const env = record.env ?? process.env;
+  if (!isReadCacheEnabled(env)) return;
+  ensureAttached();
+
+  // No realpath means the file is already gone; keying it would invent a path
+  // the watcher will never name.
+  const key = readKey(record.path);
+  if (key === null) return;
+
+  const readAt = record.readAt ?? Date.now();
+  const previous = readEntries.get(key);
+  // `>=`, not `>`: `Date.now()` has millisecond resolution, so an invalidation
+  // stamped in the same millisecond as the read gives no ordering at all, and
+  // the safe reading of a tie is "the write came second".
+  const missedWrite = previous !== undefined && previous.invalidatedAt >= readAt;
+
+  touchEntry(key, {
+    hash: record.hash,
+    ...(record.bytes === undefined ? {} : { bytes: record.bytes }),
+    readAt,
+    epoch: coverageEpoch(key),
+    dirty: missedWrite,
+    invalidatedAt: previous?.invalidatedAt ?? 0,
+  }, env);
+  readStats.records += 1;
+}
+
+/**
+ * Ask whether `path` still holds the content its last recorded read saw.
+ *
+ * Pass `sinceHash` when the caller knows what IT last saw: a recorded hash that
+ * differs from it belongs to somebody else's read, and the caller is owed the
+ * content, not an `unchanged`.
+ */
+export function checkRead(
+  filePath: string,
+  options: { sinceHash?: string; env?: NodeJS.ProcessEnv } = {},
+): ReadCacheAnswer {
+  const env = options.env ?? process.env;
+  if (!isReadCacheEnabled(env)) return unknown("disabled");
+  ensureAttached();
+
+  const key = readKey(filePath);
+  if (key === null) return unknown("no-record");
+  const entry = readEntries.get(key);
+  if (entry === undefined) return unknown("no-record");
+
+  const epoch = coverageEpoch(key);
+  if (epoch === null) return unknown("no-watcher");
+  if (entry.epoch === null) return unknown("no-watcher");
+  if (entry.epoch !== epoch) return unknown("watcher-restarted");
+
+  if (entry.dirty || entry.hash === undefined) {
+    readStats.changed += 1;
+    return {
+      state: "changed",
+      ...(entry.hash === undefined ? {} : { previousHash: entry.hash }),
+      changedAt: entry.invalidatedAt,
+    };
+  }
+  if (options.sinceHash !== undefined && options.sinceHash !== entry.hash) {
+    readStats.changed += 1;
+    return { state: "changed", previousHash: entry.hash, changedAt: entry.readAt };
+  }
+
+  // Touch on hit, so the paths an agent keeps coming back to are the last ones
+  // evicted.
+  touchEntry(key, entry, env);
+  readStats.unchanged += 1;
+  return {
+    state: "unchanged",
+    hash: entry.hash,
+    readAt: entry.readAt,
+    ...(entry.bytes === undefined ? {} : { bytes: entry.bytes }),
+  };
+}
+
+function unknown(reason: ReadCacheUnknownReason): ReadCacheAnswer {
+  readStats.unknown += 1;
+  return { state: "unknown", reason };
+}
+
+/**
+ * Forget one path. For writers that already know they invalidated it — an edit
+ * applied by the agent itself lands before the watcher's debounce window
+ * closes, and the reader must not be told "unchanged" in between.
+ */
+export function forgetRead(filePath: string): void {
+  const abs = resolve(filePath);
+  readEntries.delete(abs);
+  const real = readKey(filePath);
+  if (real !== null && real !== abs) readEntries.delete(real);
+}
+
+/** Diagnostics — `ctx_doctor`, `ctx_stats`, tests. */
+export function readCacheStats(env: NodeJS.ProcessEnv = process.env): ReadCacheStats {
+  return {
+    enabled: isReadCacheEnabled(env),
+    entries: readEntries.size,
+    capacity: readCacheMaxEntries(env),
+    attached: pathCaches.has(readCache),
+    ...readStats,
+  };
+}
+
+/** Drop entries, counters and the registration. Tests only. */
+export function __resetReadCacheForTests(): void {
+  readEntries.clear();
+  pathCaches.delete(readCache);
+  readStats.records = 0;
+  readStats.unchanged = 0;
+  readStats.changed = 0;
+  readStats.unknown = 0;
+  readStats.invalidations = 0;
+  readStats.clears = 0;
+  readStats.evictions = 0;
 }
 
 // ─────────────────────────────────────────────────────────
@@ -220,6 +578,8 @@ interface Counters {
 
 interface Installation {
   root: string;
+  /** Identity of THIS subscription; see {@link coverageEpoch}. */
+  epoch: number;
   env: NodeJS.ProcessEnv;
   options: FsWiringOptions;
   counters: Counters;
@@ -244,6 +604,8 @@ const installations = new Map<string, Installation>();
 const inFlight = new Map<string, Promise<CreateOutcome>>();
 /** Bumped by {@link detachAllFsWiring}, so an in-flight install can see it. */
 let resetGeneration = 0;
+/** Never reused, never reset: an epoch must not be able to come back. */
+let coverageGeneration = 0;
 
 function newCounters(): Counters {
   return {
@@ -324,6 +686,7 @@ async function create(root: string, options: FsWiringOptions): Promise<CreateOut
 
   const installation: Installation = {
     root,
+    epoch: ++coverageGeneration,
     env,
     options,
     counters: newCounters(),
