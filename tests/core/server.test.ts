@@ -3687,8 +3687,8 @@ describe("ctx_fetch_and_index batch refactor", () => {
     expect(fetchBlockMatch).not.toBeNull();
     const block = fetchBlockMatch![0];
     expect(block).toContain("ttl: z");
-    expect(block).toContain("Override the cache freshness window");
-    expect(block).toContain("`ttl: 0` bypasses the cache like `force: true`");
+    expect(block).toContain("Cache freshness window for this call");
+    expect(block).toContain("0 bypasses the cache");
     expect(block).toContain("async ({ url, source, requests, concurrency, force, ttl })");
     expect(block).toContain("fetchOneUrl(req.url, req.source, force, ttl)");
   });
@@ -6111,6 +6111,24 @@ describe("sanitizeSchemaForStrictClients", () => {
     expect(out).not.toHaveProperty("additionalProperties");
     expect(out.type).toBe("object");
     expect(out.properties).toEqual({ a: { type: "string" } });
+  });
+
+  test("strips `$schema` (a dialect marker — it constrains no argument)", () => {
+    // 51 characters the SDK stamps on every emitted inputSchema, times sixteen
+    // tools, in every session. No MCP host validates our schema against the
+    // draft-07 meta-schema, and nothing a caller could trip over lives in it.
+    const out = sanitizeSchemaForStrictClients({
+      $schema: "http://json-schema.org/draft-07/schema#",
+      type: "object",
+      properties: { a: { type: "string", description: "d" } },
+      required: ["a"],
+    }) as Record<string, unknown>;
+    expect(out).not.toHaveProperty("$schema");
+    expect(out).toEqual({
+      type: "object",
+      properties: { a: { type: "string", description: "d" } },
+      required: ["a"],
+    });
   });
 
   test("preserves every Gemini-compatible keyword unchanged", () => {

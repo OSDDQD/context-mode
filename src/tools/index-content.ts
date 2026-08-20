@@ -70,25 +70,25 @@ export function registerCtxIndex(deps: IndexToolDeps): void {
           .string()
           .optional()
           .describe(
-            "File OR directory path to read and index (content never enters context). Provide this OR content. Directory paths trigger a bounded recursive walk (#687).",
+            "File OR directory path to read and index — the bytes never enter context. Provide this OR content; a directory triggers a bounded recursive walk.",
           ),
         source: z
           .string()
           .optional()
           .describe(
-            "Label for the indexed content (e.g., 'Context7: React useEffect', 'Skill: frontend-design')",
+            "Label for the indexed content, e.g. 'Context7: React useEffect'.",
           ),
         include: z.array(z.string()).optional().describe(
           "Directory-only: glob patterns to include (default: all matching extensions).",
         ),
         exclude: z.array(z.string()).optional().describe(
-          "Directory-only: glob patterns to exclude. Merged with defaults (node_modules, .git, dist, build, .next, coverage, .venv, __pycache__, .DS_Store).",
+          "Directory-only: glob patterns to exclude, merged with the built-in defaults.",
         ),
         maxDepth: z.number().int().min(0).optional().describe(
           "Directory-only: max recursion depth from root (default: 5).",
         ),
         maxFiles: z.number().int().min(1).optional().describe(
-          "Directory-only: hard cap on files indexed (default: 200) — FTS5 blow-up guard.",
+          "Directory-only: hard cap on files indexed (default: 200).",
         ),
         extensions: z.array(z.string()).optional().describe(
           "Directory-only: allowed file extensions (default: .md .mdx .txt .json .yaml .yml .ts .tsx .js .jsx .py .rs .go .sh).",
@@ -97,7 +97,7 @@ export function registerCtxIndex(deps: IndexToolDeps): void {
           "Directory-only: apply nearest .gitignore (default: true).",
         ),
         followSymlinks: z.boolean().optional().describe(
-          "Directory-only: follow directory symlinks (default: false — cycle hazard + escape risk).",
+          "Directory-only: follow directory symlinks (default: false — cycle hazard).",
         ),
       }),
     },

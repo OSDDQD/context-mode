@@ -127,12 +127,12 @@ export function registerCtxExecute(deps: ExecuteToolDeps): {
         code: z
           .string()
           .describe(
-            "Source code to execute. Use console.log (JS/TS), print (Python/Ruby/Perl/R), echo (Shell), echo (PHP), fmt.Println (Go), IO.puts (Elixir), or Console.WriteLine (C#) to output a summary to context.",
+            "Source code to execute. Print the summary with console.log (JS/TS), print (Python/Ruby/Perl/R), echo (Shell/PHP), fmt.Println (Go), IO.puts (Elixir), Console.WriteLine (C#).",
           ),
         timeout: z
           .coerce.number()
           .optional()
-          .describe("Max execution time in ms. When omitted, no server-side timer fires — the MCP host's RPC timeout governs (which is the right layer for this policy). Pass an explicit value for long-running builds (Gradle/Maven/SBT)."),
+          .describe("Max execution time in ms. When omitted, no server-side timer fires — the MCP host's RPC timeout governs. Set an explicit value for long-running builds (Gradle/Maven/SBT)."),
         // background: wrapped in coerceBoolean preprocessor so the literal
         // strings "true"/"false" arriving from OpenCode's native plugin
         // bridge (and several LLM providers' tool-call JSON) parse as the
@@ -142,19 +142,16 @@ export function registerCtxExecute(deps: ExecuteToolDeps): {
           .preprocess(coerceBoolean, z.boolean())
           .optional()
           .default(false)
-          .describe("Keep process running after timeout (for servers/daemons). Returns partial output without killing the process. IMPORTANT: Do NOT add setTimeout/self-close timers in background scripts — the process must stay alive until the timeout detaches it. For server+fetch patterns, prefer putting both server and fetch in ONE ctx_execute call instead of using background."),
+          .describe("Keep the process alive past the timeout (servers, daemons); partial output comes back and the process survives. A background script must stay alive until the timeout detaches it, so leave setTimeout and other self-close timers out of it. For server+fetch, put both in ONE ctx_execute call."),
         cwd: z
           .string()
           .optional()
-          .describe("Optional working directory for shell commands. Non-shell languages still execute from their sandbox temp directory."),
+          .describe("Working directory for shell commands. Non-shell languages still run from their sandbox temp directory."),
         intent: z
           .string()
           .optional()
           .describe(
-            "What you're looking for in the output. When provided and output is large (>5KB), " +
-            "indexes output into knowledge base and returns section titles + previews — not full content. " +
-            "Use ctx_search(queries: [...]) to retrieve specific sections. Example: 'failing tests', 'HTTP 500 errors'." +
-            "\n\nTIP: Use specific technical terms, not just concepts. Check 'Searchable terms' in the response for available vocabulary.",
+            "What you're looking for in the output. Specific technical terms retrieve better than concepts. Example: 'failing tests', 'HTTP 500 errors'.",
           ),
       }),
     },
@@ -524,8 +521,7 @@ export function registerCtxExecute(deps: ExecuteToolDeps): {
           .string()
           .optional()
           .describe(
-            "What you're looking for in the output. When provided and output is large (>5KB), " +
-            "returns only matching sections via BM25 search instead of truncated output.",
+            "What you're looking for in the output; large output comes back as the matching sections only. Use specific technical terms.",
           ),
       }),
     },

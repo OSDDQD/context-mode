@@ -410,9 +410,8 @@ EXAMPLE: ctx_read(path: "server.log", intent: "timeout errors")`,
           .string()
           .optional()
           .describe(
-            "What you need from this file, in plain words — the slice is selected to match it. " +
-            "Terms are matched literally against the file's text. Omit it for the structural slice. " +
-            "Unlike ctx_execute_file's intent, which searches the OUTPUT, this one selects the INPUT.",
+            "What you need from this file; terms match literally against its text to select the slice. " +
+            "Omit it for structure only. Unlike ctx_execute_file's intent, which filters OUTPUT, this selects INPUT.",
           ),
         timeout: z
           .coerce.number()
@@ -422,8 +421,7 @@ EXAMPLE: ctx_read(path: "server.log", intent: "timeout errors")`,
           .boolean()
           .optional()
           .describe(
-            "Read again even if the same call already returned this file unchanged. " +
-            "Use it when you need the slice itself back, not the fact that it did not change.",
+            "Return the slice again even if the file has not changed since your last read.",
           ),
       }),
     },

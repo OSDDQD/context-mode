@@ -712,18 +712,18 @@ export function registerCtxPack(deps: ToolDeps): void {
       inputSchema: z.object({
         task: z
           .string()
-          .describe("What the receiving agent is being asked to do. Steers every section."),
+          .describe("What the receiving agent must do. Steers every section."),
         budget: z
           .number()
           .int()
           .min(MIN_PACK_BUDGET)
           .max(MAX_PACK_BUDGET)
           .optional()
-          .describe(`Token budget for the whole package (default ${DEFAULT_PACK_BUDGET}).`),
+          .describe(`Token budget for the package (default ${DEFAULT_PACK_BUDGET}).`),
         project: z
           .string()
           .optional()
-          .describe("Project root to pack. Defaults to the current project."),
+          .describe("Project root. Defaults to the current project."),
       }),
     },
     async (params) => {

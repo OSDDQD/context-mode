@@ -250,7 +250,7 @@ export function registerCtxGraph(deps: GraphToolDeps): void {
       inputSchema: z.object({
         action: z
           .enum(GRAPH_ACTIONS)
-          .describe("Which question to ask: symbols | outline | body | callers | callees | impact | related | map | explore"),
+          .describe("Which question to ask. `body` slices one symbol's source; `map` packs the repo into `budget`."),
         query: z
           .string()
           .optional()
@@ -265,11 +265,11 @@ export function registerCtxGraph(deps: GraphToolDeps): void {
           .min(64)
           .max(32_000)
           .optional()
-          .describe(`\`map\`: token budget for the packed map (default ${DEFAULT_BUDGET_TOKENS}).`),
+          .describe(`\`map\`: token budget (default ${DEFAULT_BUDGET_TOKENS}).`),
         focus: z
           .string()
           .optional()
-          .describe("`map`: weight files matching these terms, and let rank flow outward from them."),
+          .describe("`map`: bias the ranking toward files matching these terms."),
         file: z
           .string()
           .optional()
@@ -300,8 +300,7 @@ export function registerCtxGraph(deps: GraphToolDeps): void {
           .boolean()
           .optional()
           .describe(
-            "`related`: emit the complete RelatedResult JSON. Off by default — the JSON " +
-            "is trimmed to the rows the prose shows, so the block cannot outgrow the answer.",
+            "`related`: emit the complete RelatedResult JSON instead of the trimmed block.",
           ),
         project: z
           .string()

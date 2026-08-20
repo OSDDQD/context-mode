@@ -489,9 +489,18 @@ server.server.setRequestHandler(ListResourceTemplatesRequestSchema, async () => 
 //   • drop `additionalProperties`  — advisory only; every ctx_* handler parses
 //     args with Zod (which strips unknown keys server-side), so removing it
 //     changes no validation and no call behavior.
-// Both transforms are behavior-preserving for every client: `const` and a
-// one-value `enum` are equivalent, and no
-// model sends undeclared properties. Only the wire schema changes — never
+//   • drop `$schema` — the SDK stamps
+//     `"$schema":"http://json-schema.org/draft-07/schema#"` on every emitted
+//     inputSchema: 51 characters × 16 tools = 816 characters of the context
+//     window, in every session, spent naming a meta-schema no MCP host
+//     validates against. It declares which dialect the document is written in,
+//     not a constraint on any argument, so dropping it moves nothing a caller
+//     could trip over. No ctx_* tool declares a property literally named
+//     `$schema`, so the key only ever appears as the SDK's dialect marker.
+// All three transforms are behavior-preserving for every client: `const` and a
+// one-value `enum` are equivalent, no
+// model sends undeclared properties, and no model validates our schema against
+// its dialect. Only the wire schema changes — never
 // validation or how any tool is invoked.
 export function sanitizeSchemaForStrictClients(node: unknown): unknown {
   if (Array.isArray(node)) return node.map(sanitizeSchemaForStrictClients);
@@ -499,6 +508,7 @@ export function sanitizeSchemaForStrictClients(node: unknown): unknown {
   const out: Record<string, unknown> = {};
   for (const [key, value] of Object.entries(node as Record<string, unknown>)) {
     if (key === "additionalProperties") continue;
+    if (key === "$schema") continue;
     if (key === "const") {
       out.enum = [value];
       continue;

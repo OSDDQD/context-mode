@@ -66,10 +66,8 @@ export function buildCtxSearchInputSchema(isSharedMode: boolean) {
           .string()
           .optional()
           .describe(
-            "Project scope. " +
-              "Default (omit): this session's project — auto-resolved from the host adapter. " +
-              "'global': span every project in the shared store (cross-project recall). " +
-              "<absolute-path>: scope to that specific project directory.",
+            "Project scope. Omit for this session's project; 'global' spans every " +
+              "project in the shared store; an absolute path scopes to that directory.",
           ),
       }
     : ({} as Record<string, never>);
@@ -91,7 +89,7 @@ export function buildCtxSearchInputSchema(isSharedMode: boolean) {
       .coerce.number()
       .optional()
       .default(3)
-      .describe("Results per query (default: 3)"),
+      .describe("Results per query."),
     source: z
       .string()
       .optional()
@@ -99,14 +97,14 @@ export function buildCtxSearchInputSchema(isSharedMode: boolean) {
     contentType: z
       .enum(["code", "prose"])
       .optional()
-      .describe("Filter results by content type: 'code' or 'prose'."),
+      .describe("Filter results by content type."),
     sort: z
       .enum(["relevance", "timeline"])
       .optional()
       .default("relevance")
       .describe(
-        "Sort mode. 'relevance' (default): BM25 ranked, current session only. " +
-          "'timeline': chronological across current session, prior sessions, and auto-memory.",
+        "relevance ranks the current session by BM25; timeline reads chronologically " +
+          "across prior sessions and auto-memory too.",
       ),
     ...projectField,
   });

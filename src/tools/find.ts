@@ -238,7 +238,7 @@ EXAMPLE: ctx_find(query: "what did we decide about caching", type: "memory", lim
         scope: z
           .string()
           .optional()
-          .describe("Project-relative directory prefix the file signals are confined to, e.g. \"src/search\"."),
+          .describe("Directory prefix confining the file signals, e.g. \"src/search\"."),
         limit: z
           .number()
           .int()

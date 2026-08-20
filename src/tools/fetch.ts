@@ -674,7 +674,7 @@ EXAMPLE: ctx_fetch_and_index(
           .string()
           .optional()
           .describe(
-            "Label for the indexed content when using single `url` (e.g., 'React useEffect docs', 'Supabase Auth API'). For batch, put source in each requests entry.",
+            "Label for the indexed content when using single `url`; for batch, put source in each requests entry.",
           ),
         requests: z
           .preprocess(
@@ -688,8 +688,7 @@ EXAMPLE: ctx_fetch_and_index(
           )
           .optional()
           .describe(
-            "Batch shape: array of {url, source?} entries. Use with concurrency>1 for parallel fetch. " +
-            "Each request indexed under its own source label. Output preserves input order.",
+            "Batch shape: fetch every entry in one call. Output preserves input order.",
           ),
         concurrency: z
           .coerce.number()
@@ -699,10 +698,7 @@ EXAMPLE: ctx_fetch_and_index(
           .optional()
           .default(1)
           .describe(
-            "Max URLs to fetch in parallel (1-8, default: 1). " +
-            "Use 4-8 for I/O-bound multi-URL batches (library docs, changelogs, pricing pages). " +
-            "Capped by os.cpus().length on small machines (response notes when capped). " +
-            "Indexing is always serial regardless — only fetches race.",
+            "Max URLs to fetch in parallel. Use 4-8 for I/O-bound multi-URL batches.",
           ),
         force: z
           .preprocess(coerceBoolean, z.boolean())
@@ -714,8 +710,7 @@ EXAMPLE: ctx_fetch_and_index(
           .min(0)
           .optional()
           .describe(
-            "Override the cache freshness window for this call, in milliseconds. " +
-            "`ttl: 0` bypasses the cache like `force: true`; omit to use the default 24h TTL.",
+            "Cache freshness window for this call, in ms. 0 bypasses the cache; default 24h.",
           ),
       }),
     },

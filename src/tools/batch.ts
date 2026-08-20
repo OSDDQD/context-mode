@@ -101,9 +101,7 @@ EXAMPLE: ctx_batch_execute(
             z.object({
               label: z
                 .string()
-                .describe(
-                  "Section header for this command's output (e.g., 'README', 'Package.json', 'Source Tree')",
-                ),
+                .describe("Section header for this command's output"),
               command: z
                 .string()
                 .describe("Shell command to execute"),
@@ -111,21 +109,18 @@ EXAMPLE: ctx_batch_execute(
           )
           .min(1)
           .describe(
-            "Commands to execute as a batch. Output is labeled with the section header. " +
-            "Default order is sequential; pass concurrency>1 to run in parallel (output stays in input order).",
+            "Commands to execute as a batch. Output is labeled with the section header and stays in input order even under concurrency>1.",
           )),
         queries: z.preprocess(coerceJsonArray, z
           .array(z.string())
           .min(1)
           .describe(
-            "Search queries to extract information from indexed output. Use 5-8 comprehensive queries. " +
-            "Each returns top 5 matching sections with full content. " +
-            "This is your ONLY chance — put ALL your questions here. No follow-up calls needed.",
+            "Search queries run against the indexed output. Use 5-8; each returns the top 5 matching sections with full content. Batch every question here.",
           )),
         timeout: z
           .coerce.number()
           .optional()
-          .describe("Max execution time in ms. When omitted, no server-side timer fires — the MCP host's RPC timeout governs. With concurrency=1, the value (when set) is a shared budget across commands; with concurrency>1, it is applied per-command."),
+          .describe("Max execution time in ms. When omitted, the MCP host's RPC timeout governs. With concurrency=1 it is a shared budget across commands; with concurrency>1 it applies per command."),
         concurrency: z
           .coerce.number()
           .int()
@@ -134,27 +129,18 @@ EXAMPLE: ctx_batch_execute(
           .optional()
           .default(1)
           .describe(
-            "Max commands to run in parallel (1-8, default: 1). " +
-            "Use 4-8 for I/O-bound batches (network, gh, curl, multi-repo git reads). " +
-            "Keep at 1 for CPU-bound (npm test, build, lint) or stateful commands (ports, locks). " +
-            ">1 switches to per-command timeouts (no shared budget) and " +
-            "individual `(timed out)` blocks instead of cascading skip.",
+            "Max commands to run in parallel. Use 4-8 for I/O-bound batches; keep at 1 for CPU-bound or stateful commands.",
           ),
         cwd: z
           .string()
           .optional()
-          .describe("Optional working directory for all shell commands in this batch."),
+          .describe("Working directory for all shell commands in this batch."),
         query_scope: z
           .enum(["batch", "global"])
           .optional()
           .default("batch")
           .describe(
-            "Scope for `queries` (default: `batch`). " +
-            "`batch` searches ONLY the chunks produced by this batch's commands " +
-            "— useful when you want answers about the just-fetched output. " +
-            "`global` searches the entire persistent index (same scope as ctx_search) " +
-            "— useful when you want the batch commands to enrich context and " +
-            "the queries to also surface related prior knowledge in one round trip.",
+            "Scope for `queries`. `batch` searches only the chunks this call's commands produced. `global` searches the entire persistent index (same scope as ctx_search), so the queries also surface prior knowledge in the same round trip.",
           ),
       }),
     },
@@ -334,14 +320,14 @@ EXAMPLE: ctx_gather(
           .max(8)
           .optional()
           .default(1)
-          .describe("Max commands to run in parallel (1-8). Use 4-8 for network-bound reads."),
-        cwd: z.string().optional().describe("Optional working directory for all commands."),
+          .describe("Max commands to run in parallel. Use 4-8 for network-bound reads."),
+        cwd: z.string().optional().describe("Working directory for all commands."),
         timeout: z.number().optional().describe("Max execution time in ms."),
         query_scope: z
           .enum(["batch", "global"])
           .optional()
           .default("batch")
-          .describe("`batch` (default) searches only this call's output; `global` searches the whole index."),
+          .describe("`batch` searches only this call's output; `global` searches the whole index."),
       }),
     },
     async ({ commands, queries, timeout, concurrency, cwd, query_scope }) => {
