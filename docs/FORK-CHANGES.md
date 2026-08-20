@@ -2,7 +2,7 @@
 
 Fork of [mksglu/context-mode](https://github.com/mksglu/context-mode) at v1.0.169.
 
-Thirty-nine changes, each addressing a gap observed while running the plugin daily in
+Forty changes, each addressing a gap observed while running the plugin daily in
 Claude Code. Every one is backwards compatible, and every behavioural default
 carries an env switch back. Two defaults differ from upstream on purpose: the
 compact tool descriptions (what ships on every request) and the semantic layer,
@@ -2195,6 +2195,53 @@ where the output lands, so there was never anything to ask about.
 Side effect worth naming: Claude Code and Codex now agree at every rung of the
 Bash ladder, so the parity suite compares kind *and* text the whole way up
 instead of special-casing the one step where only Claude Code had a gear.
+
+## 40. One supported host
+
+`src/adapters/`, `hooks/`, `docs/adr/0026-one-supported-host.md`
+
+**[ADR-0026](adr/0026-one-supported-host.md)**
+
+[ADR-0023](adr/0023-two-supported-hosts.md) cut seventeen hosts to two on the
+grounds that the multiplier was the cost, not the code. The same arithmetic
+applies at two. This repository is developed inside Claude Code: that path is
+exercised on every commit, and the Codex path was exercised by its own tests and
+by nothing else — the regime ADR-0023 named as the one where a change looks
+right and is not.
+
+The parity suite written to cover that gap recorded, in its own docblock, that
+the drift had already happened: the Codex PreToolUse hook wrote no redirect
+marker and its PostToolUse read none, so on Codex nothing refused was ever
+counted as bytes avoided and the read-before-edit retry pushed the ladder up a
+step. A parity suite is the right answer when both halves are used; when one is
+used by nobody, it is the only thing keeping that half alive.
+
+**The removal is one commit that only deletes** — 28 files, 5,337 lines, nothing
+added: the `.codex-plugin` manifests, `configs/codex`, the seven `hooks/codex`
+entry points, the capability probe, the four-file adapter, and the eight
+Codex-only test files including `platform-parity`, a suite that would otherwise
+compare one host to itself. Restoring Codex is a revert of that commit.
+
+**The one-row registries stay.** `PLATFORM_ENV_VARS`, `CLIENT_NAME_TO_PLATFORM`,
+`getSessionDirSegments`, the formatter registry, the adapter enumeration in
+`analytics.ts`, the security reader's derived table — none was collapsed into a
+literal, because a one-row table costs a few bytes and keeps the next host an
+entry of data rather than a branch discovered somewhere.
+
+**Three properties genuinely lost coverage, and each says so where it lived**
+rather than leaving with its test: `foreignIdentificationEnv` now pins *empty*;
+the cross-adapter security-parity case is replaced by "a removed host's
+`settings.json` is not read, and the Claude global still is"; and the
+multi-adapter aggregation tests seed a `.codex` root on purpose and assert it
+contributes nothing.
+
+Two things outlive the host deliberately: `isPluginInstallPath` still recognises
+`~/.codex/plugins/...` (a path that is not a project must not become one because
+its creator is gone), and the Bash tool-name aliases stay in the canonicalisation
+table (an alias that stops resolving does not fail loudly — it quietly stops
+enforcing).
+
+Released as **v1.2.0**. 4,656 tests pass on a tree with no Codex in it.
 
 ## Merged ahead of upstream: the fetch extraction ladder
 

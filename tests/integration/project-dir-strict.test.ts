@@ -54,9 +54,10 @@ describe("server getProjectDir wiring — strictPlatform for all adapters (issue
   const platformsWithOwnVar: ReadonlyArray<PlatformId> = ["claude-code"];
 
   // Adapters with no workspace var (rely on universal escape hatch / pwd / cwd).
-  // Codex is the case that makes this branch load-bearing rather than
-  // theoretical: it passes cwd in hook stdin and declares no env var at all.
-  const platformsNoOwnVar: ReadonlyArray<PlatformId> = ["codex"];
+  // Codex was the case that made this branch load-bearing rather than
+  // theoretical; "unknown" carries the same empty row and reaches the same
+  // code, so the branch keeps its coverage after the removal.
+  const platformsNoOwnVar: ReadonlyArray<PlatformId> = ["unknown"];
 
   for (const platform of platformsWithOwnVar) {
     it(`platform=${platform}: strict mode prefers own workspace var over foreign leaks`, () => {
@@ -97,12 +98,6 @@ describe("server getProjectDir wiring — strictPlatform for all adapters (issue
   }
 
   it("every platform: with no own var set and no escape hatch, falls through to PWD", () => {
-    // Keep the pure resolver matrix independent from the developer's live
-    // Codex session logs. The production Codex branch intentionally checks
-    // session logs before PWD, so this fixture must provide an empty home.
-    const emptyCodexHome = mkdtempSync(join(tmpdir(), "ctx-empty-codex-home-"));
-    cleanup.push(emptyCodexHome);
-
     const allPlatforms: ReadonlyArray<PlatformId> = [
       ...platformsWithOwnVar,
       ...platformsNoOwnVar,
@@ -113,7 +108,6 @@ describe("server getProjectDir wiring — strictPlatform for all adapters (issue
         cwd: "/anchor/cwd",
         pwd: "/Users/x/from-shell",
         strictPlatform: platform,
-        codexHome: platform === "codex" ? emptyCodexHome : undefined,
       });
       // No own workspace var matches (we set leaks, not the platform's own
       // value). PWD is the next tier. PI / OMP have own vars set in the
@@ -137,78 +131,9 @@ describe("server getProjectDir wiring — strictPlatform for all adapters (issue
   });
 });
 
-// ─────────────────────────────────────────────────────────
-// Issue #45 — server.ts getProjectDir() must auto-detect "codex"
-// platform and pass strictPlatform: "codex" + codexHome to
-// resolveProjectDir() so the SessionMeta heuristic activates.
-//
-// Without this wiring, the Codex MCP child runs under whatever cwd
-// the host inherited (often $HOME), the env cascade yields nothing
-// (Codex has no workspace env var), and every project-aware tool
-// ends up rooted at $HOME instead of the user's project.
-//
-// This test boots server.ts in a process state that mirrors a
-// real Codex MCP child: CODEX_THREAD_ID set, no workspace env, a
-// session.jsonl with meta.cwd on disk, CODEX_HOME pointed at the
-// fixture. The assertion is `getProjectDir()` returns the
-// session-log cwd — proving the Codex branch is reachable from
-// the production callsite.
-// ─────────────────────────────────────────────────────────
-
-describe("getProjectDir() under Codex platform detection (issue #45)", () => {
-  const cleanup: string[] = [];
-  const savedEnv: Record<string, string | undefined> = {};
-
-  beforeEach(() => {
-    // Snapshot every env var that could short-circuit the resolver.
-    for (const k of [
-      "CLAUDE_PROJECT_DIR", "GEMINI_PROJECT_DIR", "VSCODE_CWD",
-      "OPENCODE_PROJECT_DIR", "PI_PROJECT_DIR", "PI_WORKSPACE_DIR",
-      "IDEA_INITIAL_DIRECTORY", "CURSOR_CWD", "QWEN_PROJECT_DIR",
-      "CONTEXT_MODE_PROJECT_DIR", "PI_CODING_AGENT_DIR",
-      "CODEX_THREAD_ID", "CODEX_CI", "CODEX_HOME",
-      "CONTEXT_MODE_PLATFORM",
-    ]) {
-      savedEnv[k] = process.env[k];
-      delete process.env[k];
-    }
-  });
-
-  afterEach(() => {
-    for (const [k, v] of Object.entries(savedEnv)) {
-      if (v === undefined) delete process.env[k];
-      else process.env[k] = v;
-    }
-    while (cleanup.length) {
-      const p = cleanup.pop();
-      if (p) try { rmSync(p, { recursive: true, force: true }); } catch {}
-    }
-  });
-
-  it("recovers cwd from Codex session log when env is empty and Codex is the detected platform", async () => {
-    // Fixture: tmp CODEX_HOME with one fresh session.jsonl carrying meta.cwd.
-    const tmpHome = mkdtempSync(join(tmpdir(), "ctx-codex-server-"));
-    cleanup.push(tmpHome);
-    const sessionsDir = join(tmpHome, "sessions");
-    mkdirSync(sessionsDir, { recursive: true });
-    const expectedCwd = "/project/from-codex-session";
-    writeFileSync(
-      join(sessionsDir, "abc-123.jsonl"),
-      JSON.stringify({ meta: { sessionId: "abc-123", cwd: expectedCwd } }) + "\n",
-    );
-
-    // Codex platform markers. CODEX_THREAD_ID is the canonical env
-    // signal per src/adapters/detect.ts PLATFORM_ENV_VARS.
-    process.env.CODEX_THREAD_ID = "thread-fixture";
-    process.env.CODEX_HOME = tmpHome;
-    // Force the detector to "codex" deterministically — clearer than
-    // relying on CODEX_THREAD_ID alone (the detector also reads
-    // ~/.claude existence which is true on dev machines).
-    process.env.CONTEXT_MODE_PLATFORM = "codex";
-
-    // server.ts captures `detectPlatform()` + env vars at call time
-    // inside getProjectDir(), so a single static import + per-test env
-    // setup is enough.
-    expect(getProjectDir()).toBe(expectedCwd);
-  });
-});
+// Issue #45's other half — a server.ts boot proving the session-log heuristic
+// was reachable from the production callsite under Codex detection — left with
+// the host. The heuristic itself left with it too (src/util/project-dir.ts):
+// the branch existed for the one platform that published no workspace env var,
+// and a platform in that position again gets its own branch rather than
+// inheriting one written for somebody else.

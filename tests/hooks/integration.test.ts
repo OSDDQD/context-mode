@@ -760,14 +760,16 @@ describe("resolveConfigDir (#289)", () => {
     // Use a subprocess to isolate env var changes
     const code = `
       ${Object.entries(env).map(([k, v]) => `process.env[${JSON.stringify(k)}] = ${JSON.stringify(v)};`).join("\n")}
-      const { resolveConfigDir, CODEX_OPTS } = await import(${JSON.stringify(pathToFileURL(HELPERS_PATH).href)});
-      // A host with no configDirEnv is still a code path worth covering, and
-      // with both remaining hosts having one it has to be constructed rather
-      // than borrowed from a platform constant.
+      const { resolveConfigDir } = await import(${JSON.stringify(pathToFileURL(HELPERS_PATH).href)});
+      // Two shapes the one shipped host does not cover on its own: a second
+      // host with its own configDirEnv, and a host with none at all. Both are
+      // constructed rather than borrowed from a platform constant, which is
+      // what they were until the Codex removal.
+      const OTHER_OPTS = { configDir: ".other-host", configDirEnv: "OTHER_HOST_HOME" };
       const NO_ENV_OPTS = { configDir: ".no-env-host", configDirEnv: undefined };
       const result = {
         claude_default: resolveConfigDir(),
-        codex_default: resolveConfigDir(CODEX_OPTS),
+        other_default: resolveConfigDir(OTHER_OPTS),
         no_env_default: resolveConfigDir(NO_ENV_OPTS),
       };
       process.stdout.write(JSON.stringify(result));
@@ -784,10 +786,10 @@ describe("resolveConfigDir (#289)", () => {
     const home = process.env.HOME || process.env.USERPROFILE || "";
     const result = await loadHelpers({
       CLAUDE_CONFIG_DIR: "",
-      CODEX_HOME: "",
+      OTHER_HOST_HOME: "",
     });
     expect(result.claude_default).toBe(join(home, ".claude"));
-    expect(result.codex_default).toBe(join(home, ".codex"));
+    expect(result.other_default).toBe(join(home, ".other-host"));
     expect(result.no_env_default).toBe(join(home, ".no-env-host"));
   });
 
@@ -797,19 +799,14 @@ describe("resolveConfigDir (#289)", () => {
     // The other host is unaffected — one override MUST NOT move everyone's
     // data root, which is how two hosts end up writing into the same store.
     const home = process.env.HOME || process.env.USERPROFILE || "";
-    expect(result.codex_default).toBe(join(home, ".codex"));
+    expect(result.other_default).toBe(join(home, ".other-host"));
   });
 
-  test("CODEX_HOME overrides Codex CLI config path, and only it", async () => {
+  test("a second host's configDirEnv moves that host's root, and only it", async () => {
     const home = process.env.HOME || process.env.USERPROFILE || "";
-    const result = await loadHelpers({ CODEX_HOME: "/custom/codex" });
-    expect(result.codex_default).toBe("/custom/codex");
+    const result = await loadHelpers({ OTHER_HOST_HOME: "/custom/other" });
+    expect(result.other_default).toBe("/custom/other");
     expect(result.claude_default).toBe(join(home, ".claude"));
-  });
-
-  test("CODEX_HOME override applies on its own", async () => {
-    const result = await loadHelpers({ CODEX_HOME: "/custom/codex" });
-    expect(result.codex_default).toBe("/custom/codex");
   });
 
   test("tilde expansion works in env var values", async () => {
@@ -820,7 +817,7 @@ describe("resolveConfigDir (#289)", () => {
 
   test("a host with no configDirEnv ignores env vars entirely", async () => {
     const home = process.env.HOME || process.env.USERPROFILE || "";
-    const result = await loadHelpers({ CLAUDE_CONFIG_DIR: "/custom/claude", CODEX_HOME: "/custom/codex" });
+    const result = await loadHelpers({ CLAUDE_CONFIG_DIR: "/custom/claude", OTHER_HOST_HOME: "/custom/other" });
     expect(result.no_env_default).toBe(join(home, ".no-env-host"));
   });
 
@@ -1139,16 +1136,12 @@ describe("empty stdin resilience (#322)", () => {
         "session-loaders.mjs", "session-directive.mjs", "routing-block.mjs", "auto-injection.mjs",
         "platform-bridge.mjs", "normalize-hooks.mjs", "heal-partial-install.mjs",
         "cache-heal-utils.mjs"].includes(f)),
-    ...readdirSync(join(HOOKS_DIR, "codex"))
-      .filter((f) => f.endsWith(".mjs") && f !== "platform.mjs")
-      .map((f) => `codex/${f}`),
   ];
 
-  test("the discovered hook list is not empty and covers both hosts", () => {
+  test("the discovered hook list is not empty and covers the host", () => {
     // A discovery walk that returns nothing turns every case below into zero
     // cases, which is the quietest way for this matrix to stop testing.
     expect(hooks.length).toBeGreaterThan(6);
-    expect(hooks.some((h) => h.startsWith("codex/"))).toBe(true);
     expect(hooks).toContain("pretooluse.mjs");
     expect(hooks).toContain("posttooluse.mjs");
   });

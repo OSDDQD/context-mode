@@ -305,7 +305,7 @@ describe("statusline.mjs — multi-adapter aggregation", () => {
   beforeEach(() => {
     home = mkdtempSync(join(tmpdir(), "ctx-statusline-multi-"));
     // Mirror real adapter layout: ~/.claude/context-mode/sessions for
-    // claude-code, ~/.codex/context-mode/sessions for codex. These are the two
+    // claude-code. This is the
     // rows `enumerateAdapterDirs` walks; the second dir used to be ~/.gemini,
     // which stopped being an adapter the walk knows about — with only one
     // known dir seeded there is no second adapter to aggregate across, and the
@@ -382,25 +382,11 @@ describe("statusline.mjs — multi-adapter aggregation", () => {
   // parity with the slice 1 test — Windows is slow at fork+exec and the
   // multi-adapter walk multiplies the cost. The previously-hardcoded 60s
   // tripped on Windows runner load (CI #401 observed 186s with retry x2).
-  test("renders 'across N tools' when 2+ real adapters detected", { timeout: STATUSLINE_SQLITE_TIMEOUT_MS }, () => {
-    seedRealAdapter(join(home, ".claude", "context-mode", "sessions"), "claude");
-    seedRealAdapter(join(home, ".codex", "context-mode", "sessions"), "codex");
-
-    const { stdout } = runStatusline({
-      // statusline must use HOME for multi-adapter walk
-      HOME: home,
-      USERPROFILE: home,
-      // active adapter dir is the claude one (matches getSessionDir() default)
-      CLAUDE_SESSION_ID: "any-session-id",
-    });
-
-    assert.match(stdout, /context-mode/);
-    assert.match(
-      stdout,
-      /across\s+\d+\s+tools?/i,
-      "shows multi-adapter aggregate when 2+ real adapters",
-    );
-  });
+  // The "2+ real adapters" case left with the Codex removal: one row in the
+  // enumeration means the branch cannot fire, and a test that seeds a second
+  // root would assert the renderer's behaviour against data nothing scans.
+  // What remains testable is the negative below, which is also the only shape
+  // a single-host install can produce.
 
   // Slice 2 cont: with only ONE real adapter, do NOT show "across N tools".
   test("single real adapter: no 'across N tools' suffix", () => {

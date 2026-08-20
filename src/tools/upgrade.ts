@@ -27,7 +27,7 @@ import type { UpgradeToolDeps } from "./shared/deps.js";
 
 /** Register `ctx_upgrade` on the server carried by `deps`. */
 export function registerCtxUpgrade(deps: UpgradeToolDeps): void {
-  const { getSessionDir, getRuntimeAwarePackageRoot, trackResponse } = deps;
+  const { getSessionDir, getPackageRoot, trackResponse } = deps;
   // The handler reads `server.server.getClientVersion()`. Aliasing the injected
   // getter to that expression keeps the body byte-identical to the version that
   // lived in src/server.ts — this is a refactor, and the diff should say so.
@@ -75,7 +75,7 @@ export function registerCtxUpgrade(deps: UpgradeToolDeps): void {
       // __pkg_dir is build/ for tsc, plugin root for bundle — resolve to plugin root.
       // Only Codex may replace it with the plugin-manager runtime root; other
       // adapters can coexist with Codex on the same machine.
-      const pluginRoot = getRuntimeAwarePackageRoot(platformId);
+      const pluginRoot = getPackageRoot();
       const bundlePath = resolve(pluginRoot, "cli.bundle.mjs");
       const fallbackPath = resolve(pluginRoot, "build", "cli.js");
 

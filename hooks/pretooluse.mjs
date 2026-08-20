@@ -209,7 +209,7 @@ await runHook(async () => {
   // module load breaks hook stdout), hence the marker indirection.
   if (decision && decision.redirectMeta) {
     // Shared with the Codex hook (hooks/core/routing.mjs): one writer, one
-    // reader, one format. The two hosts drifted here before it was shared.
+    // reader, one format. Two hosts drifted here before it was shared.
     //
     // Keyed per call now. A denied call never reaches PostToolUse, so its
     // marker is filed under the path instead and collected by a later sweep;

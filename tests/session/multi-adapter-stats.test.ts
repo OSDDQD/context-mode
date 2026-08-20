@@ -101,10 +101,10 @@ describe("Slice 2.1 — enumerateAdapterDirs()", () => {
   test("returns one entry for each supported adapter", () => {
     const dirs = enumerateAdapterDirs({ home: "/HOME" });
     const names = dirs.map((d) => d.name).sort();
-    // Two rows since the fifteen-host removal (15a02cf). Spelled out rather
-    // than derived, so that growing the enumeration without updating this
-    // list is a failure and not a silent pass.
-    expect(names).toEqual(["claude-code", "codex"]);
+    // One row since the Codex removal. Spelled out rather than derived, so
+    // that growing the enumeration without updating this list is a failure
+    // and not a silent pass.
+    expect(names).toEqual(["claude-code"]);
   });
 
   test("each entry exposes sessionsDir and contentDir under <home>/<segments>/context-mode/", () => {
@@ -160,7 +160,7 @@ describe("Slice 2.1 — enumerateAdapterDirs()", () => {
 
   test("defaults to os.homedir() when no override passed", () => {
     const dirs = enumerateAdapterDirs();
-    expect(dirs.length).toBe(2);
+    expect(dirs.length).toBe(1);
     const expectedSuffix = sep + join("context-mode", "sessions");
     expect(dirs.every((d) => d.sessionsDir.includes(expectedSuffix))).toBe(true);
   });
@@ -171,7 +171,7 @@ describe("Slice 2.1 — enumerateAdapterDirs()", () => {
 // ─────────────────────────────────────────────────────────
 
 describe("Slice 2.2 — getMultiAdapterLifetimeStats()", () => {
-  test("aggregates totals across two adapter dirs and returns per-adapter breakdown", () => {
+  test("aggregates the enumerated dirs and ignores a removed host's leftover root", () => {
     const home = tmpHome();
     const claudeSessions = ensureDir(join(home, ".claude", "context-mode", "sessions"));
     const codexSessions = ensureDir(join(home, ".codex", "context-mode", "sessions"));
@@ -186,8 +186,11 @@ describe("Slice 2.2 — getMultiAdapterLifetimeStats()", () => {
 
     const r = getMultiAdapterLifetimeStats({ home });
 
-    expect(r.totalEvents).toBe(3);
-    expect(r.totalSessions).toBe(2);
+    // The .codex root below is seeded on purpose: a machine that once ran the
+    // removed host still has one, and its events must not be counted for a
+    // host with no adapter behind it.
+    expect(r.totalEvents).toBe(2);
+    expect(r.totalSessions).toBe(1);
     expect(typeof r.totalBytes).toBe("number");
     expect(r.totalBytes).toBeGreaterThan(0);
 
@@ -196,9 +199,7 @@ describe("Slice 2.2 — getMultiAdapterLifetimeStats()", () => {
     expect(byName["claude-code"]).toBeDefined();
     expect(byName["claude-code"].eventCount).toBe(2);
     expect(byName["claude-code"].projectDirs).toContain("/p/cc");
-    expect(byName["codex"]).toBeDefined();
-    expect(byName["codex"].eventCount).toBe(1);
-    expect(byName["codex"].projectDirs).toContain("/p/cdx");
+    expect(byName["codex"]).toBeUndefined();
   });
 
   test("each perAdapter entry exposes eventCount, dataBytes, rescueBytes, contentBytes, uuidConvs, projectDirs, firstMs, isReal", () => {
@@ -290,7 +291,7 @@ describe("Slice 2.3 — isReal filter (eventCount>=100 && distinctProjects>=5 &&
 // ─────────────────────────────────────────────────────────
 
 describe("Slice 2.4 — getMultiAdapterRealBytesStats()", () => {
-  test("aggregates real bytes from all adapter dirs (lifetime tier)", () => {
+  test("aggregates real bytes from the enumerated adapter dirs (lifetime tier)", () => {
     const home = tmpHome();
     const claudeSessions = ensureDir(join(home, ".claude", "context-mode", "sessions"));
     const codexSessions = ensureDir(join(home, ".codex", "context-mode", "sessions"));
@@ -303,15 +304,16 @@ describe("Slice 2.4 — getMultiAdapterRealBytesStats()", () => {
     ]);
 
     const r = getMultiAdapterRealBytesStats({ home });
-    expect(r.bytesAvoided).toBe(5_000);
+    // The .codex root is seeded on purpose and must contribute nothing: a
+    // machine that once ran the removed host still has one on disk, and
+    // counting it would credit savings to a host with no adapter behind it.
+    expect(r.bytesAvoided).toBe(2_000);
     expect(r.bytesReturned).toBe(1_000);
     expect(r.totalSavedTokens).toBeGreaterThan(0);
-    // perAdapter shows split
-    expect(r.perAdapter.length).toBeGreaterThanOrEqual(2);
+    expect(r.perAdapter.length).toBe(1);
     const cc = r.perAdapter.find((a) => a.name === "claude-code")!;
-    const cdx = r.perAdapter.find((a) => a.name === "codex")!;
     expect(cc.bytesAvoided).toBe(2_000);
-    expect(cdx.bytesAvoided).toBe(3_000);
+    expect(r.perAdapter.find((a) => a.name === "codex")).toBeUndefined();
   });
 
   test("sessionId filter narrows to one session across all adapter dirs", () => {
@@ -331,7 +333,7 @@ describe("Slice 2.4 — getMultiAdapterRealBytesStats()", () => {
     expect(r.bytesAvoided).toBe(7_000); // ONLY the matching session_id
   });
 
-  test("worktreeHash filter applies to filename prefix in every adapter dir", () => {
+  test("worktreeHash filter applies to the filename prefix in each enumerated dir", () => {
     const home = tmpHome();
     const claudeSessions = ensureDir(join(home, ".claude", "context-mode", "sessions"));
     const codexSessions = ensureDir(join(home, ".codex", "context-mode", "sessions"));
@@ -347,7 +349,9 @@ describe("Slice 2.4 — getMultiAdapterRealBytesStats()", () => {
     ]);
 
     const r = getMultiAdapterRealBytesStats({ home, worktreeHash: "60303a5b5b31fb98" });
-    expect(r.bytesReturned).toBe(11_000); // 7_000 + 4_000, NOT 99_999
+    // 7_000 from the one enumerated dir: NOT 99_999 (wrong worktree) and NOT
+    // the 4_000 sitting under a removed host's root.
+    expect(r.bytesReturned).toBe(7_000);
   });
 
   test("returns zeroes when no adapter dir exists", () => {

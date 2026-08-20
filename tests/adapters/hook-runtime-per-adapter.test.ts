@@ -8,9 +8,10 @@
  *
  * An adapter that emits a CLI dispatcher command instead invokes
  * `context-mode hook <adapter> <event>` and inherits the CLI's runtime choice.
- * That is codex, and it is covered below as the non-regression half — the two
- * emission shapes are the reason this file exists, and one example of each is
- * what it takes to keep them apart.
+ * The one adapter of that shape left with the Codex removal, so only the
+ * runtime-spawn half has an example to run against. The pairing returns with
+ * the next dispatcher-form host, and #738 — one shape silently adopting the
+ * other's — is why it has to.
  *
  * Test strategy: rather than fight Vitest's module cache (which caches
  * `runtime.js` after the first import and never picks up subsequent
@@ -63,26 +64,6 @@ describe("hook command emission flows through buildHookRuntimeCommand (#738)", (
     }
   });
 
-
-
-});
-
-describe("CLI-dispatcher adapters keep their dispatcher form (#738 non-regression)", () => {
-  // Codex is the only dispatcher-form adapter left. The point of the pairing
-  // survives the removal: two adapters, two emission shapes, and #738 was the
-  // bug where one silently adopted the other's.
-
-  test("codex still emits 'context-mode hook codex <event>' shape", async () => {
-    const { CodexAdapter } = await import("../../src/adapters/codex/index.js");
-    const adapter = new CodexAdapter();
-    const config = adapter.generateHookConfig("/plugin/root") as Record<string, Array<{ hooks: Array<{ command: string }> }>>;
-    const cmds = Object.values(config).flatMap((arr) =>
-      arr.flatMap((e) => e.hooks.map((h) => h.command))
-    );
-    for (const cmd of cmds) {
-      expect(cmd).toMatch(/^context-mode hook codex /);
-    }
-  });
 
 
 });

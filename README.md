@@ -122,117 +122,6 @@ This gives you all 15 MCP tools without automatic routing. The model can still u
 </details>
 
 <details>
-<summary><strong>Codex CLI</strong> — MCP + hooks</summary>
-
-**Prerequisites:** Node.js >= 22.5 (or Bun), Codex CLI installed.
-
-**Install:**
-
-1. Add the context-mode marketplace and install the plugin from Codex's plugin UI:
-
-   ```bash
-   codex plugin marketplace add OSDDQD/context-mode
-   ```
-
-2. Enable plugin-provided hooks while the Codex feature is still gated:
-
-   ```toml
-   [features]
-   plugin_hooks = true
-   hooks = true
-   ```
-
-   > **Feature flag note:** Current Codex builds expose hooks under `[features].hooks`
-   > (or `codex --enable hooks`). Prefer `[features].hooks`; `[features].codex_hooks`
-   > remains accepted as a legacy alias in current Codex builds. Bundled plugin hooks
-   > additionally require `plugin_hooks` until Codex enables plugin hooks by default.
-
-   **Custom storage location:** if Codex cannot write the adapter default storage directory, set
-   `CONTEXT_MODE_DIR` to an absolute writable root in the environment that launches Codex. Sessions
-   and stats use `<root>/sessions`; indexed content uses `<root>/content`.
-
-   ```bash
-   CONTEXT_MODE_DIR="$HOME/.codex-context-mode" codex
-   ```
-
-3. Restart Codex CLI and verify MCP with `ctx stats`.
-
-   `ctx stats` proves the plugin MCP server is installed and reachable; it does
-   not prove hooks are trusted or running.
-
-4. Review and trust the context-mode plugin hooks if Codex prompts for hook
-   approval. Plugin hooks are only active after both feature flags are enabled
-   and Codex has accepted the hook commands.
-
-The Codex plugin manifest provides MCP via `.codex-plugin/mcp.json`, skills via
-`skills/`, and bundled hooks via `.codex-plugin/hooks.json`. No manual
-`[mcp_servers.context-mode]` block or `$CODEX_HOME/hooks.json` is needed when
-`plugin_hooks` is enabled and the plugin hooks are trusted.
-
-> **Node/PATH note:** context-mode still needs `node` visible to the Codex process.
-> The plugin removes manual Codex config, but it does not vendor Node or inherit
-> login-shell PATH fixes automatically.
-
-**Manual fallback for Codex builds without `plugin_hooks`:**
-
-1. Install context-mode globally:
-
-   ```bash
-   npm install -g context-mode
-   ```
-
-2. Add to `~/.codex/config.toml`:
-
-   ```toml
-   [features]
-   hooks = true
-
-   [mcp_servers.context-mode]
-   command = "context-mode"
-
-   [mcp_servers.context-mode.env]
-   CONTEXT_MODE_PLATFORM = "codex"
-   ```
-
-3. Create `$CODEX_HOME/hooks.json` (or `~/.codex/hooks.json` when `CODEX_HOME` is unset):
-
-   ```json
-   {
-     "hooks": {
-      "PreToolUse": [{ "matcher": "local_shell|shell|shell_command|exec_command|Bash|Shell|apply_patch|Edit|Write|grep_files|ctx_execute|ctx_execute_file|ctx_batch_execute|ctx_fetch_and_index|ctx_search|ctx_index|mcp__", "hooks": [{ "type": "command", "command": "context-mode hook codex pretooluse" }] }],
-       "PostToolUse": [{ "hooks": [{ "type": "command", "command": "context-mode hook codex posttooluse" }] }],
-       "SessionStart": [{ "hooks": [{ "type": "command", "command": "context-mode hook codex sessionstart" }] }],
-       "PreCompact": [{ "hooks": [{ "type": "command", "command": "context-mode hook codex precompact" }] }],
-       "UserPromptSubmit": [{ "hooks": [{ "type": "command", "command": "context-mode hook codex userpromptsubmit" }] }],
-       "Stop": [{ "hooks": [{ "type": "command", "command": "context-mode hook codex stop" }] }]
-     }
-   }
-   ```
-
-   `PreToolUse` enforces deny/block routing today and is prepared for input rewrites once Codex supports them. `PostToolUse` captures session events. `PreCompact` builds the resume snapshot before compaction. `SessionStart` restores state after compaction. `UserPromptSubmit` captures user decisions and corrections. `Stop` records turn-end state.
-
-   > **Note:** Codex PreToolUse routing currently supports deny rules only (blocks dangerous commands). It still needs upstream `updatedInput` support before context-mode can rewrite tool input; track [openai/codex#18491](https://github.com/openai/codex/issues/18491). Context injection (`additionalContext`) is not supported in Codex PreToolUse — it works via PostToolUse and SessionStart instead. This is handled automatically.
-   >
-   > `PreCompact` support is runtime-gated: it is present in Codex CLI 0.130.0, while the public Codex hooks docs may lag the shipped hook-event list. Older Codex builds that do not emit `PreCompact` will not create pre-compaction snapshots.
-
-4. Copy routing instructions (recommended even with hooks for full routing awareness):
-
-   ```bash
-   CM_ROOT="$(npm root -g)/context-mode"
-   cp "$CM_ROOT/configs/codex/AGENTS.md" ./AGENTS.md
-   ```
-
-   For global use: `CM_ROOT="$(npm root -g)/context-mode"; cp "$CM_ROOT/configs/codex/AGENTS.md" ~/.codex/AGENTS.md`. Global applies to all projects. If both exist, Codex CLI merges them.
-
-5. Restart Codex CLI.
-
-**Verify:** Start a session and type `ctx stats` to verify MCP. To verify hook routing, confirm Codex lists/trusts the context-mode plugin hooks, then run a command that matches the routing rules.
-
-**Routing:** MCP tools work after plugin install. Plugin hook routing is active only when `hooks` and `plugin_hooks` are enabled and Codex trusts the plugin hook commands. Manual hook routing is active when `$CODEX_HOME/hooks.json` or `~/.codex/hooks.json` is configured. The `AGENTS.md` file provides routing instructions for model awareness.
-
-</details>
-
-<details>
 <summary><strong>Build Prerequisites</strong> <sup>(CentOS, RHEL, Alpine)</sup></summary>
 
 Context Mode uses [better-sqlite3](https://github.com/WiseLibs/better-sqlite3) on Node.js, which ships prebuilt native binaries for most platforms. On glibc >= 2.31 systems (Ubuntu 20.04+, Debian 11+, Fedora 34+, macOS, Windows), `npm install` works without any build tools.
@@ -362,17 +251,18 @@ Context Mode captures every meaningful event during your session and persists th
 
 Session continuity requires 5 hooks working together:
 
-| Hook | Role | Claude Code | Codex CLI |
-| --- | --- | :---: | :---: |
-| **PreToolUse** | Enforces sandbox routing before tool execution | Yes | Yes |
-| **PostToolUse** | Captures events after each tool call | Yes | Yes |
-| **UserPromptSubmit** | Captures user decisions and corrections | Yes | Yes |
-| **Stop** | Captures assistant turn-end state | Yes | Yes |
-| **PreCompact** | Builds snapshot before compaction | Yes | Yes |
-| **SessionStart** | Restores state after compaction or resume | Yes | Yes |
-|  | **Session completeness** | **Full** | **Partial** |
+| Hook | Role | Claude Code |
+| --- | --- | :---: |
+| **PreToolUse** | Enforces sandbox routing before tool execution | Yes |
+| **PostToolUse** | Captures events after each tool call | Yes |
+| **UserPromptSubmit** | Captures user decisions and corrections | Yes |
+| **Stop** | Captures assistant turn-end state | Yes |
+| **SubagentStop** | Captures a finished subagent's transcript | Yes |
+| **PreCompact** | Builds snapshot before compaction | Yes |
+| **SessionStart** | Restores state after compaction or resume | Yes |
+| **SessionEnd** | Closes the books and drains the capture queues | Yes |
 
-> **Note:** Full session continuity (capture + snapshot + restore) works on **Claude Code**, where all six hooks fire. **Codex CLI** is partial: its hooks must be enabled with `[features].hooks = true`, and what they capture is listed per host below.
+> Full session continuity — capture, snapshot, restore — works on Claude Code, where every hook fires.
 
 <details>
 <summary><strong>What gets captured</strong></summary>
@@ -455,40 +345,38 @@ Detailed event data is also indexed into FTS5 for on-demand retrieval via `ctx_s
 <details>
 <summary><strong>Per-platform details</strong></summary>
 
-**Claude Code** — Full session support. All 5 hook types fire, capturing tool events, user decisions, building compaction snapshots, and restoring state after compaction, `--continue`, `--resume`, or `/resume`.
-
-**Codex CLI** — MCP active, hooks require `[features].hooks = true`. Hook scripts (PreToolUse, PostToolUse, PreCompact, SessionStart, UserPromptSubmit, Stop) are implemented and tested; `PreCompact` remains runtime-gated on Codex builds that emit the event. PreToolUse deny routing works; input rewriting still depends on upstream `updatedInput` support ([openai/codex#18491](https://github.com/openai/codex/issues/18491)).
+**Claude Code** — Full session support. Every hook type fires, capturing tool events, user decisions, building compaction snapshots, and restoring state after compaction, `--continue`, `--resume`, or `/resume`.
 
 </details>
 
 ## Platform Compatibility
 
-| Feature | Claude Code | Codex CLI |
-| --- | :---: | :---: |
-| MCP Server / Native Tools | Yes | Yes |
-| PreToolUse Hook | Yes | Yes |
-| PostToolUse Hook | Yes | Yes |
-| SessionStart Hook | Yes | Yes |
-| PreCompact Hook | Yes | Yes |
-| Can Modify Args | Yes | -- |
-| Can Block Tools | Yes | Yes |
-| Utility Commands (ctx) | Yes | Yes |
-| Slash Commands | Yes | -- |
-| Plugin Marketplace | Yes | -- |
+| Feature | Claude Code |
+| --- | :---: |
+| MCP Server / Native Tools | Yes |
+| PreToolUse Hook | Yes |
+| PostToolUse Hook | Yes |
+| SessionStart Hook | Yes |
+| PreCompact Hook | Yes |
+| Can Modify Args | Yes |
+| Can Block Tools | Yes |
+| Utility Commands (ctx) | Yes |
+| Slash Commands | Yes |
+| Plugin Marketplace | Yes |
 
-> **Codex CLI** hooks require `[features].hooks = true`. MCP tools work, and hook scripts activate through `$CODEX_HOME/hooks.json` or `~/.codex/hooks.json`. PreToolUse supports `permissionDecision: "deny"` only; input modification still needs upstream `updatedInput` support ([openai/codex#18491](https://github.com/openai/codex/issues/18491)). `additionalContext` is not supported in PreToolUse (context injection works via PostToolUse and SessionStart instead; the codex formatter handles this automatically). PreCompact stores resume snapshots before compaction on Codex builds that emit the event, SessionStart restores them, and UserPromptSubmit/Stop capture prompt and turn-end continuity events. See the Codex install section for setup.
->
+> One supported host since v1.2.0. Codex CLI was the second and was removed in
+> full — see [ADR-0026](docs/adr/0026-one-supported-host.md) for why, and
+> `git revert` of the deletion commit for how to bring it back.
 
 ### Routing Enforcement
 
 Hooks intercept tool calls programmatically — they can block dangerous commands and redirect them to the sandbox before execution. Instruction files guide the model via prompt instructions but cannot block anything. **Always enable hooks where supported.**
 
-> **Note:** Routing instruction files were previously auto-written to project directories on first session start. This was disabled to prevent git tree pollution ([#158](https://github.com/mksglu/context-mode/issues/158), [#164](https://github.com/mksglu/context-mode/issues/164)). Both supported platforms inject or enforce routing through hooks instead of writing a file into your tree.
+> **Note:** Routing instruction files were previously auto-written to project directories on first session start. This was disabled to prevent git tree pollution ([#158](https://github.com/mksglu/context-mode/issues/158), [#164](https://github.com/mksglu/context-mode/issues/164)). The supported platform injects and enforces routing through hooks instead of writing a file into your tree.
 
 | Platform | Hooks | Instruction File | With Hooks | Without Hooks |
 |---|:---:|---|:---:|:---:|
 | Claude Code | Yes (auto) | [`CLAUDE.md`](configs/claude-code/CLAUDE.md) | **~98% saved** | ~60% saved |
-| Codex CLI | Yes | [`AGENTS.md`](configs/codex/AGENTS.md) | **~98% saved** | ~60% saved |
 
 Without hooks, one unrouted `curl` or Playwright snapshot can dump 56 KB into context — wiping out an entire session's worth of savings.
 
@@ -615,7 +503,7 @@ Context Mode enforces the same permission rules you already use — but extends 
 }
 ```
 
-Add this to your project's `.claude/settings.json` (or `~/.claude/settings.json` for global rules). Both platforms read security policies from Claude Code's settings format — Codex too, so one policy file covers the fork's whole surface.
+Add this to your project's `.claude/settings.json` (or `~/.claude/settings.json` for global rules). The security reader follows the adapter registry rather than a hardcoded path, so a second host is covered on the day it is added.
 
 The pattern is `Tool(what to match)` where `*` means "anything".
 
@@ -666,7 +554,7 @@ That blocks loopback + RFC1918 + ULA in addition to the always-blocked ranges. U
 
 | Variable | Default | Purpose |
 |---|---|---|
-| `CONTEXT_MODE_DIR` | Adapter default, for example `~/.codex/context-mode` or `~/.claude/context-mode` | Since v1.0.147. Absolute writable root for context-mode storage. Sessions and stats use `<root>/sessions`; indexed content uses `<root>/content`. Empty or whitespace-only values are treated as unset and shown by `ctx_doctor`; non-empty values must be absolute. `~` is not expanded. |
+| `CONTEXT_MODE_DIR` | Adapter default, `~/.claude/context-mode` | Since v1.0.147. Absolute writable root for context-mode storage. Sessions and stats use `<root>/sessions`; indexed content uses `<root>/content`. Empty or whitespace-only values are treated as unset and shown by `ctx_doctor`; non-empty values must be absolute. `~` is not expanded. |
 
 ### Routing-guidance environment variables
 

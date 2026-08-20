@@ -96,7 +96,6 @@ afterEach(() => {
 /** The wire shape each host gives an MCP tool. */
 const EXPECTED_NAMES: Record<string, (tool: string) => string> = {
   "claude-code": (tool) => `mcp__plugin_context-mode_context-mode__${tool}`,
-  "codex": (tool) => tool,
 };
 const PLATFORMS = Object.keys(EXPECTED_NAMES);
 
@@ -136,9 +135,9 @@ function expectNamedFor(platform: string, text: string, label: string): void {
     expect(mention, `${label} on ${platform}: "${mention}" is not how ${platform} spells it`).toBe(name(bare));
   }
   for (const other of PLATFORMS.filter((p) => p !== platform)) {
-    // Only meaningful when the other host's spelling is distinguishable —
-    // Codex's bare names are a substring of every prefixed name, so the leak
-    // check runs in the direction that can actually detect one.
+    // Only meaningful when the other host's spelling is distinguishable: a
+    // host that spells tools bare has names that are a substring of every
+    // prefixed one, so the leak check runs in the direction that can detect.
     const sample = EXPECTED_NAMES[other]("ctx_execute");
     if (sample.startsWith("mcp__")) {
       expect(text, `${label} on ${platform} leaks ${other} naming`).not.toContain("mcp__");
@@ -320,18 +319,20 @@ describe("routePreToolUse names tools the host's way", () => {
 });
 
 describe("native tool names route through the canonical aliases", () => {
-  // Codex names its executor several ways across releases, and all of them
-  // have to land on the Bash branch — an alias that stops resolving does not
-  // fail loudly, it just quietly stops enforcing anything on that host.
+  // The departed host named its executor several ways across releases, and
+  // the aliases stay because an alias that stops resolving does not fail
+  // loudly — it quietly stops enforcing anything on the host that uses it.
+  // Routed here under claude-code, which is what canonicalisation means: the
+  // branch is chosen by the alias table, not by the platform.
   const bashAliases = ["shell", "shell_command", "exec_command", "container.exec", "local_shell", "Shell"];
 
   for (const alias of bashAliases) {
     it(`${alias} routes as Bash`, () => {
       resetGuidanceThrottle();
-      const decision = routePreToolUse(alias, { command: "curl https://example.com" }, "/tmp", "codex");
+      const decision = routePreToolUse(alias, { command: "curl https://example.com" }, "/tmp", "claude-code");
       expect(decision, `${alias} did not reach the Bash branch`).not.toBeNull();
-      // Codex cannot rewrite a command unconditionally, so the decision shape
-      // varies; what must hold is that the redirect names the replacement.
+      // The decision shape varies with the rung; what must hold is that the
+      // redirect names the replacement.
       const text = String(
         (decision!.updatedInput as Record<string, string>)?.command ?? decision!.reason ?? "",
       );
@@ -341,7 +342,7 @@ describe("native tool names route through the canonical aliases", () => {
 
   it("grep_files routes as Grep", () => {
     resetGuidanceThrottle();
-    const decision = routePreToolUse("grep_files", { pattern: "TODO" }, "/tmp", "codex");
+    const decision = routePreToolUse("grep_files", { pattern: "TODO" }, "/tmp", "claude-code");
     expect(decision).not.toBeNull();
     expect(String(decision!.additionalContext ?? decision!.reason ?? "")).toContain("ctx_execute");
   });

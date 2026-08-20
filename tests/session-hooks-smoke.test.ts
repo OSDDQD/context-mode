@@ -24,7 +24,6 @@ let fakeProjectDir: string;
 let fakeHomeDir: string;
 /** Where getSessionDBPath() actually writes: <fakeHome>/.claude/context-mode/sessions/ */
 let sessionDBDir: string;
-let codexSessionDBDir: string;
 
 beforeAll(() => {
   fakePluginDir = mkdtempSync(join(tmpdir(), "ctx-marketplace-sim-"));
@@ -50,7 +49,6 @@ beforeAll(() => {
   // Fake HOME so getSessionDBPath() writes to an isolated location
   fakeHomeDir = mkdtempSync(join(tmpdir(), "ctx-fakehome-"));
   sessionDBDir = join(fakeHomeDir, ".claude", "context-mode", "sessions");
-  codexSessionDBDir = join(fakeHomeDir, ".codex", "context-mode", "sessions");
 });
 
 afterAll(() => {
@@ -90,11 +88,6 @@ function getDBFiles(): string[] {
     : [];
 }
 
-function getCodexDBFiles(): string[] {
-  return existsSync(codexSessionDBDir)
-    ? readdirSync(codexSessionDBDir).filter(f => f.endsWith(".db"))
-    : [];
-}
 
 describe("Issue #117 — Session hooks without build/session/", () => {
   test("posttooluse.mjs creates session DB via bundle (no build/ needed)", () => {
@@ -109,40 +102,6 @@ describe("Issue #117 — Session hooks without build/session/", () => {
 
     // Bundle-first fix: DB is created in ~/.claude/context-mode/sessions/
     expect(getDBFiles().length).toBeGreaterThan(0);
-  });
-
-  test("hooks/codex/posttooluse.mjs normalizes failed apply_patch into tool_output.isError", () => {
-    const sessionId = "codex-posttooluse-error";
-    const result = runHook("codex/posttooluse.mjs", {
-      session_id: sessionId,
-      cwd: fakeProjectDir,
-      tool_name: "apply_patch",
-      tool_input: {
-        command: [
-          "*** Begin Patch",
-          "*** Add File: src/will-fail.ts",
-          "+export {};",
-          "*** End Patch",
-        ].join("\n"),
-      },
-      tool_response: "Patch failed",
-      tool_output: { is_error: true },
-    }, {
-      CONTEXT_MODE_PLATFORM: "codex",
-      CODEX_PROJECT_DIR: fakeProjectDir,
-    });
-
-    expect(result.exitCode).toBe(0);
-    const dbFiles = getCodexDBFiles();
-    expect(dbFiles.length).toBeGreaterThan(0);
-
-    const db = new SessionDB({ dbPath: join(codexSessionDBDir, dbFiles[0]!) });
-    const events = db.getEvents(sessionId);
-    db.close();
-
-    expect(events.some((event) => event.type === "error_tool")).toBe(true);
-    expect(events.some((event) => event.type === "file_write")).toBe(false);
-    expect(events.some((event) => event.type === "file_edit")).toBe(false);
   });
 
   test("sessionstart.mjs routing block works (independent of build/)", () => {

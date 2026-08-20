@@ -836,12 +836,11 @@ export function enumerateAdapterDirs(opts?: { home?: string }): AdapterDirEntry[
   // each, and they have to agree: this module cannot import an adapter (the
   // report renders in contexts where none has been instantiated), so the map
   // is copied rather than derived. That duplication was worth flagging when it
-  // was seventeen rows; at two it is cheaper to keep than to break the
+  // was seventeen rows; at one it is cheaper to keep than to break the
   // no-adapter-import property that makes this file testable without a
   // filesystem.
   const map: ReadonlyArray<readonly [string, readonly string[]]> = [
     ["claude-code",      [".claude"]],
-    ["codex",            [".codex"]],
   ];
   return map.map(([name, segments]) => {
     const base = join(home, ...segments, "context-mode");
@@ -2252,7 +2251,6 @@ export const autoMemoryLabels: Record<string, string> = {
  */
 export const adapterLabels: Record<string, string> = {
   "claude-code":       "Claude Code",
-  "codex":             "Codex CLI",
 };
 
 /** Look up an adapter's marketing label. Falls back to the raw id. */

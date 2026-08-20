@@ -1,12 +1,32 @@
 import "../setup-home";
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { tmpdir, homedir } from "node:os";
 import { join } from "node:path";
 
 import { searchAutoMemory } from "../../src/search/auto-memory.js";
-import { CodexAdapter } from "../../src/adapters/codex/index.js";
 import { ClaudeCodeAdapter } from "../../src/adapters/claude-code/index.js";
+import type { HookAdapter } from "../../src/adapters/types.js";
+
+/**
+ * A second set of conventions, with no second host behind it.
+ *
+ * These cases exist to prove searchAutoMemory reads the adapter's
+ * declarations rather than the Claude defaults it happens to share with them.
+ * That needs two answers to compare, and until the Codex removal the second
+ * one came from a real adapter. A stub is the honest replacement: the
+ * property under test is dispatch, not whose conventions these are, and a
+ * suite that can only see one set of names cannot tell dispatch from
+ * coincidence.
+ */
+function stubAdapter(overrides: Partial<HookAdapter> = {}): HookAdapter {
+  return {
+    getConfigDir: () => join(homedir(), ".stub-host"),
+    getMemoryDir: () => join(homedir(), ".stub-host", "memories"),
+    getInstructionFiles: () => ["AGENTS.md", "AGENTS.override.md"],
+    ...overrides,
+  } as unknown as HookAdapter;
+}
 
 /**
  * Slice 4 — searchAutoMemory accepts an adapter and uses its
@@ -32,16 +52,16 @@ describe("searchAutoMemory adapter dispatch", () => {
   });
 
   it("uses adapter.getInstructionFiles() to discover project rule files", () => {
-    // Codex declares ['AGENTS.md', 'AGENTS.override.md'].
+    // The stub declares ['AGENTS.md', 'AGENTS.override.md'].
     writeFileSync(
       join(projectDir, "AGENTS.md"),
-      "# Codex Agent Rules\nUse exact terms like ALPHA-CODEX-MARKER everywhere.\n",
+      "# Agent Rules\nUse exact terms like ALPHA-AGENTS-MARKER everywhere.\n",
       "utf-8",
     );
-    const adapter = new CodexAdapter();
+    const adapter = stubAdapter();
 
     const results = searchAutoMemory(
-      ["ALPHA-CODEX-MARKER"],
+      ["ALPHA-AGENTS-MARKER"],
       5,
       projectDir,
       undefined,
@@ -52,8 +72,8 @@ describe("searchAutoMemory adapter dispatch", () => {
     expect(results[0].source).toContain("AGENTS.md");
   });
 
-  it("uses adapter.getMemoryDir() (e.g. ~/.codex/memories) for memory scan", () => {
-    // Build a fake codex config with memories/ subdir.
+  it("uses adapter.getMemoryDir() for the memory scan, not ~/.claude/memory", () => {
+    // Build a fake config root with a memories/ subdir.
     const fakeMemoriesDir = join(configDir, "memories");
     mkdirSync(fakeMemoriesDir, { recursive: true });
     writeFileSync(
@@ -63,7 +83,7 @@ describe("searchAutoMemory adapter dispatch", () => {
     );
 
     // Custom adapter overriding getConfigDir + getMemoryDir to point at fixture.
-    const adapter = new CodexAdapter();
+    const adapter = stubAdapter();
     (adapter as unknown as { getConfigDir(): string }).getConfigDir = () => configDir;
     (adapter as unknown as { getMemoryDir(): string }).getMemoryDir = () => fakeMemoriesDir;
     (adapter as unknown as { getInstructionFiles(): string[] }).getInstructionFiles = () => ["AGENTS.md"];
@@ -99,7 +119,7 @@ describe("searchAutoMemory adapter dispatch", () => {
       "Override note: DELTA-OVERRIDE-MARKER takes precedence.\n",
       "utf-8",
     );
-    const adapter = new CodexAdapter();
+    const adapter = stubAdapter();
 
     const results = searchAutoMemory(
       ["DELTA-OVERRIDE-MARKER"],
@@ -117,8 +137,8 @@ describe("searchAutoMemory adapter dispatch", () => {
   // the lookup was table-driven rather than an AGENTS.md special case. Gemini
   // CLI went with the other fourteen hosts in 15a02cf, and with it the only
   // convention that was neither CLAUDE.md nor AGENTS.md. What still exists is
-  // the other half of the same property: a second adapter, a second file
-  // name, chosen by the adapter and not by searchAutoMemory. Dropping the
+  // the other half of the same property: a second set of conventions, a
+  // second file name, chosen by the adapter and not by searchAutoMemory. Dropping the
   // case entirely would have left the Claude convention asserted nowhere but
   // in the no-adapter fallback, where CLAUDE.md is also the hardcoded default
   // — a test that cannot tell dispatch from coincidence.
@@ -128,11 +148,11 @@ describe("searchAutoMemory adapter dispatch", () => {
       "Claude rules: invoke EPSILON-CLAUDE-FLAG on every read.\n",
       "utf-8",
     );
-    // AGENTS.md sits next to it: if the adapter were ignored and the codex
+    // AGENTS.md sits next to it: if the adapter were ignored and the other
     // list applied anyway, this file would win and the assertion would fail.
     writeFileSync(
       join(projectDir, "AGENTS.md"),
-      "Codex rules: invoke EPSILON-CLAUDE-FLAG on every read.\n",
+      "Stub-host rules: invoke EPSILON-CLAUDE-FLAG on every read.\n",
       "utf-8",
     );
 
@@ -186,7 +206,7 @@ describe("searchAutoMemory project isolation (#663)", () => {
     // Adapter that mimics shared-configDir layout: both projects point at
     // the SAME configDir base, but the project hash should separate them.
     const sharedConfigDir = configDirForA;
-    const adapter = new CodexAdapter();
+    const adapter = stubAdapter();
     (adapter as unknown as { getConfigDir(): string }).getConfigDir = () => sharedConfigDir;
     (adapter as unknown as { getInstructionFiles(): string[] }).getInstructionFiles = () => ["AGENTS.md"];
     // Spy on the projectDir-aware override — delegate to a hash-scoped layout
@@ -226,7 +246,7 @@ describe("searchAutoMemory project isolation (#663)", () => {
     const { hashProjectDirCanonical } = await import("../../src/session/db.js");
 
     const sharedConfigDir = configDirForA;
-    const adapter = new CodexAdapter();
+    const adapter = stubAdapter();
     (adapter as unknown as { getConfigDir(): string }).getConfigDir = () => sharedConfigDir;
     (adapter as unknown as { getInstructionFiles(): string[] }).getInstructionFiles = () => ["AGENTS.md"];
     (adapter as unknown as { getMemoryDir(p?: string): string }).getMemoryDir =

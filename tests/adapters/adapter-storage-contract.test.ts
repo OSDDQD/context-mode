@@ -4,7 +4,6 @@ import { homedir, tmpdir } from "node:os";
 import { mkdtempSync, rmSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { ClaudeCodeAdapter } from "../../src/adapters/claude-code/index.js";
-import { CodexAdapter } from "../../src/adapters/codex/index.js";
 import { hashProjectDirCanonical } from "../../src/session/db.js";
 
 /**
@@ -15,10 +14,10 @@ import { hashProjectDirCanonical } from "../../src/session/db.js";
  * This suite used to run against a synthetic `TestAdapter extends BaseAdapter`
  * constructed with `[".pi"]`, `[".gemini"]`, `[".omp"]` — it verified the base
  * class's DEFAULTS, which is to say it verified behaviour for adapters that
- * did not exist. Both surviving adapters override every one of those defaults
- * (claude-code roots at `$CLAUDE_CONFIG_DIR`, codex at `$CODEX_HOME` with a
- * `memories` folder), so the base class was folded into them and the same
- * assertions now run against the code that actually ships. That is the point
+ * did not exist. The surviving adapter overrides every one of those defaults
+ * (claude-code roots at `$CLAUDE_CONFIG_DIR`), so the base class was folded
+ * into it and the same assertions now run against the code that actually
+ * ships. That is the point
  * of the rewrite, not a side effect of it: the #649 override and the #663
  * project scoping had NO coverage against a real adapter before.
  */
@@ -32,14 +31,6 @@ const ADAPTERS = [
     instructionFiles: ["CLAUDE.md"],
     /** Env vars that relocate this adapter's platform-native config root. */
     configEnv: ["CLAUDE_CONFIG_DIR"],
-  },
-  {
-    name: "codex",
-    make: () => new CodexAdapter() as unknown as StorageAdapter,
-    configSegment: ".codex",
-    memoryFolder: "memories",
-    instructionFiles: ["AGENTS.md", "AGENTS.override.md"],
-    configEnv: ["CODEX_HOME"],
   },
 ] as const;
 
@@ -188,7 +179,7 @@ describe.each(ADAPTERS)(
 // case-fold migration, worktree-suffix handling). Exposing them on every
 // adapter is a SHALLOW interface — its complexity equals its implementation —
 // and tempts adapter authors to override for cargo-cult reasons (e.g. the
-// pre-narrowing CodexAdapter override that just delegated to the same helper).
+// pre-narrowing per-adapter override that just delegated to the same helper).
 // Deletion test: collapses to ONE call site, complexity does NOT reappear in
 // N callers.
 describe.each(ADAPTERS)("$name — adapter-storage interface narrowing (C2)", ({ make }) => {

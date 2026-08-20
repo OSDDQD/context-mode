@@ -861,9 +861,11 @@ describe("CLAUDE_CONFIG_DIR honors security policy reader", () => {
  *
  * `resolveClaudeGlobalSettingsPath` hardcoded the `.claude` segment, so a
  * non-Claude adapter received zero file-deny enforcement: its global
- * settings.json (e.g. ~/.codex/settings.json) was never consulted by
- * `readBashPolicies` or `readToolDenyPatterns`. This is a cross-adapter
- * security parity gap.
+ * settings.json was never consulted by `readBashPolicies` or
+ * `readToolDenyPatterns`. With one host left the gap is unreachable, and the
+ * derived table below is what keeps it that way — the reader follows the
+ * adapter registry rather than a literal, so the next host is covered on the
+ * day it is added instead of the day someone remembers.
  *
  * Behavior under test:
  *   - When CONTEXT_MODE_PLATFORM identifies a non-claude adapter, the security
@@ -892,14 +894,14 @@ describe("cross-adapter deny-policy parity (#451 round-3)", () => {
     });
 
   // A derived table can go empty (bad import, renamed export) and take every
-  // assertion below with it in silence. Two live hosts is the floor: one of
-  // them is claude, so anything less means the cross-adapter case — the whole
-  // point of this block — is no longer exercised.
-  test("the derived adapter table still covers both live hosts", () => {
+  // assertion below with it in silence. One live host is the floor now that
+  // Codex is gone; the cross-adapter case it exercised is unreachable until a
+  // second host lands, and the union case below keeps the other half honest.
+  test("the derived adapter table still covers every live host", () => {
     const names = ADAPTER_SEGMENTS.map(([n]) => n);
     assert.ok(
-      names.includes("claude-code") && names.includes("codex"),
-      `expected claude-code and codex in the derived table, got ${JSON.stringify(names)}`,
+      names.includes("claude-code"),
+      `expected claude-code in the derived table, got ${JSON.stringify(names)}`,
     );
   });
 
@@ -983,14 +985,17 @@ describe("cross-adapter deny-policy parity (#451 round-3)", () => {
     });
   }
 
-  test("union semantics: claude global is also read when non-claude adapter active", () => {
+  test("union semantics: claude global is read even under an unrecognised platform", () => {
     const fakeHome = join(parityTmpBase, "union-home");
-    const codexDir = join(fakeHome, ".codex");
+    const strayDir = join(fakeHome, ".codex");
     const claudeDir = join(fakeHome, ".claude");
-    mkdirSync(codexDir, { recursive: true });
+    mkdirSync(strayDir, { recursive: true });
     mkdirSync(claudeDir, { recursive: true });
+    // A settings.json left behind by the removed host. It must NOT be read —
+    // it belongs to no adapter — and it must not stop the claude global from
+    // being read either, which is the defense-in-depth half of #451.
     writeFileSync(
-      join(codexDir, "settings.json"),
+      join(strayDir, "settings.json"),
       JSON.stringify({ permissions: { allow: [], deny: ["Bash(codex-only *)"] } }),
     );
     writeFileSync(
@@ -1006,8 +1011,8 @@ describe("cross-adapter deny-policy parity (#451 round-3)", () => {
     const policies = readBashPolicies();
     const allDeny = policies.flatMap((p) => p.deny);
     assert.ok(
-      allDeny.includes("Bash(codex-only *)"),
-      `expected codex deny in union, got ${JSON.stringify(allDeny)}`,
+      !allDeny.includes("Bash(codex-only *)"),
+      `a removed host's settings must not be read, got ${JSON.stringify(allDeny)}`,
     );
     assert.ok(
       allDeny.includes("Bash(claude-only *)"),

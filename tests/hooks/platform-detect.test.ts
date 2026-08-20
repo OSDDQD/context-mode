@@ -56,8 +56,8 @@ function detectTsVarsFor(platform: string): string[] | null {
 const MIRROR = new Map(PLATFORM_ENV_VARS_MIRROR as Array<[string, string[]]>);
 
 describe("the hook mirror and src/adapters/detect.ts", () => {
-  it("covers exactly the two supported hosts", () => {
-    expect([...MIRROR.keys()].sort()).toEqual(["claude-code", "codex"]);
+  it("covers exactly the supported hosts", () => {
+    expect([...MIRROR.keys()].sort()).toEqual(["claude-code"]);
   });
 
   it("can still find the table it is mirroring", () => {
@@ -104,17 +104,17 @@ describe("detectPlatformFromEnv", () => {
 
   it("ignores a variable set to the empty string", () => {
     // Hosts clear variables by emptying them rather than unsetting them, and
-    // an empty CODEX_CI must not claim the session for Codex.
-    expect(detectPlatformFromEnv({ CODEX_CI: "" })).toBe("claude-code");
+    // an empty variable must not claim the session for the host that owns it.
+    expect(detectPlatformFromEnv({ CLAUDE_CODE_ENTRYPOINT: "" })).toBe("claude-code");
   });
 
   it("does not promote a variable that merely looks like one of ours", () => {
-    // The table is a list of exact names, not a prefix match. CODEX_HOME is
-    // the case that can actually fail: it is a real Codex variable, set by
-    // users who moved their config, and it says nothing about which host is
-    // running right now. Claiming the session for Codex on the strength of it
-    // would send a Claude Code session's data to ~/.codex.
+    // The table is a list of exact names, not a prefix match, and it holds
+    // only live hosts. CODEX_HOME is the case that can actually fail: a real
+    // variable of a removed host, still set by users who moved that config,
+    // saying nothing about which host is running now.
     expect(detectPlatformFromEnv({ CODEX_HOME: "/tmp/codex" })).toBe("claude-code");
+    expect(detectPlatformFromEnv({ CODEX_CI: "1" })).toBe("claude-code");
   });
 
   it("defaults to the process environment when called with no argument", () => {

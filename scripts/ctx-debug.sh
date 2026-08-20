@@ -269,17 +269,6 @@ else
   fi
 fi
 
-# Codex CLI
-CODEX_VER="$(safe_cmd_quiet codex --version 2>/dev/null | head -1)"
-if [ -n "$CODEX_VER" ]; then
-  kv "Codex CLI" "$CODEX_VER"
-  # Warn about exec-mode MCP regression in 0.118.0+
-  CODEX_MINOR="$(echo "$CODEX_VER" | sed -E 's/[^0-9]*([0-9]+\.[0-9]+\.[0-9]+).*/\1/' | cut -d. -f2)"
-  if [ -n "$CODEX_MINOR" ] && [ "$CODEX_MINOR" -ge 118 ] 2>/dev/null; then
-    warn "Codex ≥0.118.0: exec-mode MCP broken (openai/codex#16685). Pin to ≤0.116.0 for exec-mode."
-  fi
-fi
-
 # Python
 PY_VER="$(safe_cmd_quiet python3 --version || safe_cmd_quiet python --version)"
 [ -n "$PY_VER" ] && kv "Python" "$PY_VER"
@@ -375,7 +364,6 @@ printf '| Variable | Value |\n|----------|-------|\n'
 ADAPTER_VARS=(
   CONTEXT_MODE_PLATFORM
   CLAUDE_PROJECT_DIR CLAUDE_SESSION_ID
-  CODEX_CI CODEX_THREAD_ID
 )
 
 DETECTED_ADAPTER="none"
@@ -391,8 +379,6 @@ done
 # Detection logic (mirrors context-mode adapter selection)
 if [ -n "${CONTEXT_MODE_PLATFORM:-}" ]; then
   DETECTED_ADAPTER="$CONTEXT_MODE_PLATFORM (explicit)"
-elif [ -n "${CODEX_CI:-}${CODEX_THREAD_ID:-}" ]; then
-  DETECTED_ADAPTER="codex"
 elif [ -n "${CLAUDE_SESSION_ID:-}${CLAUDE_PROJECT_DIR:-}" ]; then
   DETECTED_ADAPTER="claude-code"
 fi
@@ -404,7 +390,6 @@ kv "Active adapter (env)" "$DETECTED_ADAPTER"
 HOME_DIR_EARLY="${HOME:-$USERPROFILE}"
 INSTALLED=()
 [ -d "$HOME_DIR_EARLY/.claude" ]                && INSTALLED+=("claude-code")
-[ -d "$HOME_DIR_EARLY/.codex" ]                 && INSTALLED+=("codex")
 
 if [ ${#INSTALLED[@]} -gt 0 ]; then
   kv "Installed adapters" "${INSTALLED[*]}"
@@ -423,10 +408,6 @@ CWD="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
 # Claude Code
 config_file "Claude settings.json" "$HOME_DIR/.claude/settings.json"
 config_file "Claude settings.local.json" "$HOME_DIR/.claude/settings.local.json"
-
-# Codex
-config_file "Codex config.toml" "$HOME_DIR/.codex/config.toml"
-config_file "Codex hooks.json" "$HOME_DIR/.codex/hooks.json"
 
 # ─── 7. Hook Validation ──────────────────────────────────────────────────────
 
@@ -468,13 +449,12 @@ fi
 # to never scan — a Codex user got a clean "no stale hook paths" line that was
 # only ever an answer about Claude Code.
 #
-# Both files nest the same way (event -> [{matcher?, hooks: [{command}]}]), so
-# one walker serves both. It descends into `h.hooks[]` as well as reading the
-# entry itself: the flat read alone found nothing in either file, which is how a
-# check can pass on evidence it never gathered.
+# The walker descends into `h.hooks[]` as well as reading the entry itself: the
+# flat read alone found nothing, which is how a check can pass on evidence it
+# never gathered. Still written as a loop over sources — one host today, and the
+# next one is a row rather than a rewrite.
 CLAUDE_SETTINGS="$HOME_DIR/.claude/settings.json"
-CODEX_HOOKS_JSON="${CODEX_HOME:-$HOME_DIR/.codex}/hooks.json"
-for HOOK_SRC_PAIR in "Claude settings.json|$CLAUDE_SETTINGS" "Codex hooks.json|$CODEX_HOOKS_JSON"; do
+for HOOK_SRC_PAIR in "Claude settings.json|$CLAUDE_SETTINGS"; do
   HOOK_SRC_LABEL="${HOOK_SRC_PAIR%%|*}"
   HOOK_SRC_FILE="${HOOK_SRC_PAIR#*|}"
   [ -f "$HOOK_SRC_FILE" ] || continue
@@ -602,13 +582,11 @@ fi
 
 section "11. Session Databases"
 
-# Check session dirs for both adapters. A store left behind by a host this
-# fork no longer ships is not this script's business — ctx_purge and the
-# retention sweep own cleanup, and listing dead paths only invites the reader
-# to think those hosts are still supported.
+# A store left behind by a host this fork no longer ships is not this script's
+# business — ctx_purge and the retention sweep own cleanup, and listing dead
+# paths only invites the reader to think those hosts are still supported.
 SESSION_DIRS=(
   "$HOME_DIR/.claude/context-mode/sessions"
-  "$HOME_DIR/.codex/context-mode/sessions"
 )
 TOTAL_DB_COUNT=0
 for SESSION_DIR in "${SESSION_DIRS[@]}"; do
@@ -772,10 +750,10 @@ fi
 
 section "15. SQLite Concurrency"
 
-# Both hosts, not just Claude Code. Section 12 above already knows both paths;
-# this one used to pin ~/.claude and told a Codex-only user "no session
-# directory" while their WAL journals went unexamined.
-for SESSION_BASE in "$HOME_DIR/.claude/context-mode/sessions" "${CODEX_HOME:-$HOME_DIR/.codex}/context-mode/sessions"; do
+# Written as a loop over session roots, matching section 12: this block used to
+# pin one path and tell a user of the other host "no session directory" while
+# their WAL journals went unexamined.
+for SESSION_BASE in "$HOME_DIR/.claude/context-mode/sessions"; do
 if [ -d "$SESSION_BASE" ]; then
   FIRST_DB="$(find "$SESSION_BASE" -name '*.db' -type f 2>/dev/null | head -1)"
   if [ -n "$FIRST_DB" ]; then

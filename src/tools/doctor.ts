@@ -40,7 +40,7 @@ import type { DoctorToolDeps } from "./shared/deps.js";
 export function registerCtxDoctor(deps: DoctorToolDeps): void {
   const {
     getProjectDir, trackResponse, VERSION,
-    runtimes, available, getRuntimeAwarePackageRoot,
+    runtimes, available, getPackageRoot,
     getDefaultSessionDir, getDiagnosticAdapter, REGISTERED_CTX_TOOLS,
   } = deps;
   // Aliased so the handler body below stays byte-identical to the version that
@@ -85,7 +85,7 @@ export function registerCtxDoctor(deps: DoctorToolDeps): void {
       // __pkg_dir is build/ for tsc, plugin root for bundle — resolve to plugin root.
       // Codex is special: when plugin-manager runtime root differs from the
       // current package root, diagnose the root Codex will actually execute.
-      const pluginRoot = getRuntimeAwarePackageRoot(currentPlatform);
+      const pluginRoot = getPackageRoot();
 
       // Runtimes
       const total = 11;

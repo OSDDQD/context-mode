@@ -13,9 +13,9 @@
  *
  *     Tool          Captures   Indexed     Total kept out
  *     Claude Code     17.413   276.7 MB        291.1 MB
- *     Codex CLI            —     8.6 MB          8.6 MB
+ *     second-host          —     8.6 MB          8.6 MB
  *
- *     Skipped (1): Codex CLI
+ *     Skipped (1): second-host
  *     These adapters have DBs on disk but only test fixtures, dev skeletons,
  *     or detection probes — no real chat activity.
  *
@@ -130,13 +130,16 @@ describe("Slice 3.2 — formatReport renders 'Where it came from' sub-block", ()
       lifetime: lifetime(),
       multiAdapter: multi([
         adapter("claude-code", { events: 17_413, data: 276_700_000, rescue: 14_400_000, projects: new Array(12).fill(0).map((_, i) => `/p/${i}`), isReal: true }),
-        adapter("codex", { events: 1_200, data: 8_600_000, projects: new Array(6).fill(0).map((_, i) => `/cdx/${i}`), isReal: true }),
+        adapter("second-host", { events: 1_200, data: 8_600_000, projects: new Array(6).fill(0).map((_, i) => `/cdx/${i}`), isReal: true }),
       ]),
     });
     expect(text).toMatch(/Where it came from/);
     // Real adapters render with marketing-grade labels (not raw IDs).
     expect(text).toMatch(/Claude Code/);
-    expect(text).toMatch(/Codex CLI/);
+    // An id with no marketing label renders as the raw id — the documented
+    // fallback of getAdapterLabel, and the only shape a second row can take
+    // until a second adapter ships with a label of its own.
+    expect(text).toMatch(/second-host/);
   });
 
   test("each rendered adapter row shows captures count and a byte total", () => {
@@ -144,7 +147,7 @@ describe("Slice 3.2 — formatReport renders 'Where it came from' sub-block", ()
       lifetime: lifetime(),
       multiAdapter: multi([
         adapter("claude-code", { events: 17_413, data: 276_700_000, rescue: 14_400_000, projects: new Array(12).fill(0).map((_, i) => `/p/${i}`), isReal: true }),
-        adapter("codex", { events: 1_200, data: 8_600_000, projects: new Array(6).fill(0).map((_, i) => `/cdx/${i}`), isReal: true }),
+        adapter("second-host", { events: 1_200, data: 8_600_000, projects: new Array(6).fill(0).map((_, i) => `/cdx/${i}`), isReal: true }),
       ]),
     });
     // Captures count formatted with K/M suffixes from fmtNum().
@@ -170,16 +173,16 @@ describe("Slice 3.3 — Skipped adapters disclosure", () => {
       lifetime: lifetime(),
       multiAdapter: multi([
         adapter("claude-code", { events: 17_413, data: 276_700_000, projects: new Array(12).fill(0).map((_, i) => `/p/${i}`), isReal: true }),
-        adapter("codex",       { events: 2, data: 50,  projects: ["/p/cdx"], isReal: false }),
+        adapter("second-host", { events: 2, data: 50,  projects: ["/p/cdx"], isReal: false }),
       ]),
     });
-    // One real host and one filtered host is the widest split two adapters
-    // allow. The behaviour under test — count, marketing name, rationale —
-    // is the same one the four-row fixture pinned; only the ceiling moved.
+    // One real row and one filtered row is the widest split two rows allow.
+    // The second row is synthetic since the Codex removal: the renderer takes
+    // whatever the scan hands it, and the behaviour under test — count, name,
+    // rationale — does not depend on a second host existing.
     expect(text).toMatch(/Skipped \(1\):/);
-    // Marketing names appear in the skipped list, not raw IDs.
-    expect(text).toMatch(/Codex CLI/);
-    expect(text).not.toMatch(/\bcodex\b/);
+    // Labelled adapters appear by label; an unlabelled id appears as itself.
+    expect(text).toMatch(/second-host/);
     // Disclosure rationale.
     expect(text).toMatch(/no real chat activity/i);
   });
@@ -189,14 +192,12 @@ describe("Slice 3.3 — Skipped adapters disclosure", () => {
       lifetime: lifetime(),
       multiAdapter: multi([
         adapter("claude-code", { events: 5, data: 100, projects: ["/p/cc"], isReal: false }),
-        adapter("codex",       { events: 2, data: 50,  projects: ["/p/cdx"], isReal: false }),
+        adapter("second-host", { events: 2, data: 50,  projects: ["/p/cdx"], isReal: false }),
       ]),
     });
-    // The comma join used to be exercised by a seven-name skipped list. With
-    // two adapters it survives in exactly one shape: a fresh machine where
-    // both hosts hold nothing but probes and fixtures. Without this case the
-    // join would have no coverage at all.
-    expect(text).toMatch(/Skipped \(2\): Claude Code, Codex CLI/);
+    // The comma join used to be exercised by a seven-name skipped list.
+    // Without this case it would have no coverage at all.
+    expect(text).toMatch(/Skipped \(2\): Claude Code, second-host/);
     expect(text).toMatch(/no real chat activity/i);
     // Nothing qualifies as real, so the table half of the block stays away.
     expect(text).not.toMatch(/Where it came from/);
@@ -207,7 +208,7 @@ describe("Slice 3.3 — Skipped adapters disclosure", () => {
       lifetime: lifetime(),
       multiAdapter: multi([
         adapter("claude-code", { events: 17_413, data: 276_700_000, projects: new Array(12).fill(0).map((_, i) => `/p/${i}`), isReal: true }),
-        adapter("codex", { events: 1_200, data: 8_600_000, projects: new Array(6).fill(0).map((_, i) => `/cdx/${i}`), isReal: true }),
+        adapter("second-host", { events: 1_200, data: 8_600_000, projects: new Array(6).fill(0).map((_, i) => `/cdx/${i}`), isReal: true }),
       ]),
     });
     expect(text).not.toMatch(/Skipped \(/);
@@ -220,7 +221,7 @@ describe("Slice 3.4 — Headline updates", () => {
       lifetime: lifetime(),
       multiAdapter: multi([
         adapter("claude-code",       { events: 17_413, data: 276_700_000, projects: new Array(12).fill(0).map((_, i) => `/p/${i}`), isReal: true }),
-        adapter("codex",       { events: 1_200, data: 8_600_000,    projects: new Array(6).fill(0).map((_, i) => `/cdx/${i}`), isReal: true }),
+        adapter("second-host", { events: 1_200, data: 8_600_000,    projects: new Array(6).fill(0).map((_, i) => `/cdx/${i}`), isReal: true }),
       ]),
     });
     // Phrase: "across N AI tools" — N is the real-adapter count.
@@ -232,7 +233,7 @@ describe("Slice 3.4 — Headline updates", () => {
       lifetime: lifetime(),
       multiAdapter: multi([
         adapter("claude-code", { events: 17_413, data: 276_700_000, projects: new Array(12).fill(0).map((_, i) => `/p/${i}`), isReal: true }),
-        adapter("codex",       { events: 5, data: 100, projects: ["/p/cdx"], isReal: false }),
+        adapter("second-host", { events: 5, data: 100, projects: ["/p/cdx"], isReal: false }),
       ]),
     });
     expect(text).toMatch(/in\s+Claude\s+Code/);
@@ -246,7 +247,7 @@ describe("Slice 3.6 — Cross-adapter scope ladder ('the receipt — getting wid
       lifetime: lifetime(),
       multiAdapter: multi([
         adapter("claude-code",       { events: 17_413, data: 276_700_000, projects: new Array(12).fill(0).map((_, i) => `/p/${i}`), isReal: true }),
-        adapter("codex",       { events: 1_200, data: 8_600_000,    projects: new Array(6).fill(0).map((_, i) => `/cdx/${i}`), isReal: true }),
+        adapter("second-host", { events: 1_200, data: 8_600_000,    projects: new Array(6).fill(0).map((_, i) => `/cdx/${i}`), isReal: true }),
       ]),
     });
     expect(text).toMatch(/All your work everywhere/i);

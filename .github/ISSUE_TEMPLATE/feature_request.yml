@@ -15,7 +15,6 @@ body:
       description: Which AI agent platform is this feature for?
       options:
         - Claude Code
-        - Codex CLI
         - All platforms
         - Other (please specify)
     validations:

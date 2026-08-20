@@ -301,10 +301,18 @@ describe("Issue #531 — asymmetric-drift invariant", () => {
       return out;
     }
 
-    const files = walk(resolve(ROOT, "configs"));
-    // Sanity: configs/ should ship multiple adapter templates. If this is
-    // ever 0 the test silently passes -- guard against that.
-    expect(files.length, "configs/ should contain at least one .json template").toBeGreaterThan(0);
+    // configs/ held one .json per host and emptied out with the Codex
+    // removal; the rule it enforced did not. Scan every committed JSON that
+    // ships to a user's machine, which is what "Tier C" meant all along --
+    // configs/ when it has templates again, and the plugin manifests and hook
+    // wiring that ship today.
+    const files = [
+      ...walk(resolve(ROOT, "configs")),
+      ...walk(resolve(ROOT, ".claude-plugin")),
+      ...walk(resolve(ROOT, "hooks")),
+    ];
+    // Sanity: if this is ever 0 the test silently passes -- guard against it.
+    expect(files.length, "no committed .json template found to check").toBeGreaterThan(0);
 
     // Forbidden patterns -- each captures a different way the bug class
     // re-surfaces in practice:

@@ -6,7 +6,7 @@
  * `hooks/core/routing.mjs` carried a dedicated `isUnboundedGlob` helper, a
  * decision branch, the replacement text and a comment explaining the policy,
  * while `PRE_TOOL_USE_MATCHERS` did not list `Glob`, so Claude Code never
- * delivered one. Codex has no Glob tool at all. The branch ran nowhere.
+ * delivered one. The branch ran nowhere.
  *
  * It was worse than a dead branch. `FLOODY_TOOLS` has always listed Glob, so a
  * big listing was charged on the way OUT — price line, unrouted tally,
@@ -35,7 +35,6 @@ import { PRE_TOOL_USE_MATCHERS } from "../../src/adapters/claude-code/hooks.js";
 
 const REPO_ROOT = resolve(__dirname, "..", "..");
 const ROUTING_SRC = readFileSync(join(REPO_ROOT, "hooks", "core", "routing.mjs"), "utf-8");
-const CODEX_SRC = readFileSync(join(REPO_ROOT, "src", "adapters", "codex", "index.ts"), "utf-8");
 
 // ── The three lists, read as written ──────────────────────────────────────
 
@@ -72,15 +71,8 @@ const TOOL_ALIASES: Record<string, string> = (() => {
   );
 })();
 
-const CODEX_MATCHERS: string[] = (() => {
-  const m = CODEX_SRC.match(/const PRE_TOOL_USE_MATCHER_PATTERN =\s*\n?\s*"([^"]+)"/);
-  if (!m) throw new Error("Codex PRE_TOOL_USE_MATCHER_PATTERN not found");
-  return m[1].split("|");
-})();
-
 const HOSTS = [
   { name: "claude-code", matchers: [...PRE_TOOL_USE_MATCHERS] as string[] },
-  { name: "codex", matchers: CODEX_MATCHERS },
 ] as const;
 
 /**
@@ -104,11 +96,6 @@ function delivers(matchers: readonly string[], canonical: string): boolean {
  */
 const UNREACHABLE: Record<string, Record<string, string>> = {
   "claude-code": {},
-  codex: {
-    Glob: "Codex has no filename-pattern tool; it globs through the shell, which arrives as Bash.",
-    WebFetch: "Codex has no native fetch tool; network reads arrive as shell commands.",
-    Agent: "Codex has no subagent tool, so there is no launch to route.",
-  },
 };
 
 /**
@@ -121,24 +108,14 @@ const UNREACHABLE: Record<string, Record<string, string>> = {
  * closing a gap fails this test (shrink the list), opening a new one fails it
  * too.
  *
- * codex/Read is the first entry and it was found by this file on its first
- * run. Codex's matcher carries `apply_patch`, `Edit` and `Write` — three names
- * from the same family — but no `Read`, so the D2 size refusal, the flagship
- * rule of this wave, cannot fire there. `tests/hooks/platform-parity.test.ts`
- * asserts "a large Read is refused on both" and passes, because it invokes the
- * Codex hook script directly and never asks whether the host would have called
- * it — the same coverage-without-behaviour shape that hid the Glob defect.
- *
- * Not fixed here on purpose. The fix is one literal in four lock-stepped
- * places (src/adapters/codex/index.ts, configs/codex/hooks.json,
- * .codex-plugin/hooks.json, README.md), and it is safe in both worlds — inert
- * if Codex never emits `Read`, load-bearing if it does — but which of those
- * two is true has to be read out of Codex's own source, not assumed. See
- * review-d8.md.
+ * Empty since the Codex removal: its `Read` gap was the only entry, found by
+ * this file on its first run, and it left with the host. The table stays
+ * because the shape of that finding is the point — a decision branch the host
+ * never delivers is invisible to every unit test that calls the router
+ * directly, which is how the Glob defect survived four of them.
  */
 const KNOWN_GAPS: Record<string, readonly string[]> = {
   "claude-code": [],
-  codex: ["Read"],
 };
 
 /**
@@ -150,15 +127,6 @@ const KNOWN_GAPS: Record<string, readonly string[]> = {
 const MATCHER_WITHOUT_BRANCH: Record<string, Record<string, string>> = {
   "claude-code": {
     mcp__: "Catch-all for external MCP tools; the branch is in the hook body (isExternalMcpTool), not on a canonical name.",
-  },
-  codex: {
-    mcp__: "Same catch-all, kept for parity with hooks/hooks.json.",
-    apply_patch: "No PreToolUse branch. The read-before-edit window is armed in the Read branch and consumed in PostToolUse, so an edit needs no PreToolUse pass — candidate for removal (review-d8.md).",
-    Edit: "No PreToolUse branch — same as apply_patch.",
-    Write: "No PreToolUse branch — same as apply_patch.",
-    ctx_fetch_and_index: "Enumerated for readability; the router branches only on ctx_execute, ctx_execute_file and ctx_batch_execute.",
-    ctx_search: "Enumerated for readability; no branch.",
-    ctx_index: "Enumerated for readability; no branch.",
   },
 };
 

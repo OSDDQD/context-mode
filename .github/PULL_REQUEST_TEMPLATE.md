@@ -7,7 +7,6 @@
 <!-- Check all platforms affected by this change -->
 
 - [ ] Claude Code
-- [ ] Codex CLI
 - [ ] Both
 
 ## Test plan

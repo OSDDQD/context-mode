@@ -28,7 +28,7 @@
  *
  * Two remarks that used to need saying and no longer do. Ordering was
  * load-bearing when forks had to be listed before their parent (Cursor before
- * VS Code, which inherits `VSCODE_PID`); with two hosts whose variables share
+ * VS Code, which inherits `VSCODE_PID`); with one host whose variables share
  * no prefix, order cannot change an answer. And the disambiguation logic in
  * detect.ts for Claude Code running inside a VS Code terminal has nothing left
  * to disambiguate against — that path is dead on this side, which is why this
@@ -50,7 +50,6 @@ const PLATFORM_ENV_VARS_MIRROR = [
     "CLAUDE_PROJECT_DIR",
     "CLAUDE_SESSION_ID",
   ]],
-  ["codex", ["CODEX_THREAD_ID", "CODEX_CI"]],
 ];
 
 export function detectPlatformFromEnv(env = process.env) {

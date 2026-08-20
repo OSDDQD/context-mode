@@ -18,13 +18,13 @@ describe("CLIENT_NAME_TO_PLATFORM", () => {
     expect(CLIENT_NAME_TO_PLATFORM["claude-code"]).toBe("claude-code");
   });
 
-  it("maps both Codex client names → codex", () => {
-    // Codex sends `Codex` from the CLI and `codex-mcp-client` from the MCP
-    // client wrapper, depending on how the session was started. Both are real
-    // names observed in handshakes; dropping either sends that shape of Codex
-    // session down to the env-var tier.
-    expect(CLIENT_NAME_TO_PLATFORM["Codex"]).toBe("codex");
-    expect(CLIENT_NAME_TO_PLATFORM["codex-mcp-client"]).toBe("codex");
+  it("maps a removed host's client names to nothing", () => {
+    // Codex announced itself as `Codex` from the CLI and `codex-mcp-client`
+    // from the MCP wrapper. Resolving either now would produce a PlatformId
+    // with no adapter behind it; falling through to the env tier and the
+    // claude-code default is the honest answer.
+    expect(CLIENT_NAME_TO_PLATFORM["Codex"]).toBeUndefined();
+    expect(CLIENT_NAME_TO_PLATFORM["codex-mcp-client"]).toBeUndefined();
   });
 
   it("returns undefined for unknown client name", () => {
@@ -69,7 +69,6 @@ describe("CLIENT_NAME_TO_PLATFORM", () => {
     // that still exists, whatever the keys grow into.
     expect([...new Set(Object.values(CLIENT_NAME_TO_PLATFORM))].sort()).toEqual([
       "claude-code",
-      "codex",
     ]);
   });
 });

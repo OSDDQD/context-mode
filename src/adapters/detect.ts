@@ -9,7 +9,6 @@
  * Verified env vars per platform (from source code audit):
  *   - Claude Code:    CLAUDE_CODE_ENTRYPOINT, CLAUDE_PLUGIN_ROOT,
  *                     CLAUDE_PROJECT_DIR, CLAUDE_SESSION_ID | ~/.claude/
- *   - Codex CLI:      CODEX_CI, CODEX_THREAD_ID | ~/.codex/
  */
 
 import { existsSync, readFileSync } from "node:fs";
@@ -70,12 +69,12 @@ export interface PlatformEnvEntry {
  * `getEnvVarNames(p)` to get just the names (legacy `string[]` shape).
  */
 const _PLATFORM_ENV_VARS_RAW: ReadonlyArray<readonly [PlatformId, readonly PlatformEnvEntry[]]> = [
-  // Two rows since the fifteen-host removal. The ordering rule that governed
+  // One row since the sixteen-host removal. The ordering rule that governed
   // this table — forks listed BEFORE the fork's parent, so a Cursor or
   // Antigravity session was not claimed by the VS Code vars it inherits — has
-  // no work left to do: neither remaining host is a fork of the other, and
-  // their vars share no prefix. Entries stay verified against each platform's
-  // own runtime source.
+  // nothing left to order. The table stays a table because the detection tiers
+  // read it, and because the next host added has to declare its vars here
+  // rather than in a branch somewhere.
   //
   // Claude Code — verified against a live `env` dump (2026-05-11):
   //   CLAUDE_CODE_ENTRYPOINT=cli               (set on every CC session)
@@ -87,13 +86,6 @@ const _PLATFORM_ENV_VARS_RAW: ReadonlyArray<readonly [PlatformId, readonly Platf
     { name: "CLAUDE_PLUGIN_ROOT",     role: "identification" },
     { name: "CLAUDE_PROJECT_DIR",     role: "workspace" },
     { name: "CLAUDE_SESSION_ID",      role: "identification" },
-  ]],
-  // codex — openai/codex codex-rs/core/src/exec_env.rs sets CODEX_THREAD_ID
-  // per exec; unified_exec/process_manager.rs sets CODEX_CI in CI mode.
-  // No workspace var: Codex passes cwd in hook stdin.
-  ["codex", [
-    { name: "CODEX_THREAD_ID", role: "identification" },
-    { name: "CODEX_CI",        role: "identification" },
   ]],
 ];
 
@@ -112,9 +104,8 @@ export function getEnvVarNames(platform: PlatformId): string[] {
 
 /**
  * Issue #545 — return only role=workspace env var names for a platform, in
- * registry order. Empty array for a platform with no workspace var — Codex,
- * which passes cwd in hook stdin instead. Consumed by
- * `resolveProjectDir({ strictPlatform })` to build the cascade.
+ * registry order. Empty array for a platform with no workspace var. Consumed
+ * by `resolveProjectDir({ strictPlatform })` to build the cascade.
  */
 export function workspaceEnvVarsFor(platform: PlatformId): string[] {
   return (PLATFORM_ENV_VARS.get(platform) ?? [])
@@ -127,10 +118,10 @@ export function workspaceEnvVarsFor(platform: PlatformId): string[] {
  * EXCEPT the given one, so a caller can strip another host's notion of the
  * workspace before it is mistaken for its own.
  *
- * Its original consumer, Pi's MCP bridge, is gone with the fifteen removed
- * hosts. The rule it enforced is not: a Codex session started from a shell
- * where Claude Code exported CLAUDE_PROJECT_DIR still has to ignore that
- * variable, and this is where that answer comes from.
+ * With one supported host the union is empty, and that is the correct answer
+ * rather than a dead function: the rule — a session must ignore another
+ * host's notion of the workspace — is what the registry encodes, and it comes
+ * back the moment a second row is added.
  */
 export function foreignWorkspaceEnv(platform: PlatformId): Set<string> {
   const ban = new Set<string>();
@@ -148,11 +139,10 @@ export function foreignWorkspaceEnv(platform: PlatformId): Set<string> {
  * platforms EXCEPT the given one. Sibling of `foreignWorkspaceEnv`,
  * filtered on `role === "identification"` instead of "workspace".
  *
- * The failure it prevents: a child spawned under one host inherits the shell
+ * The failure it prevented: a child spawned under one host inherits the shell
  * env of whatever else is running, and `detectPlatform()` walks the registry
- * in order. A stray CLAUDE_CODE_ENTRYPOINT is enough to make a Codex child
- * write its session data into `~/.claude/context-mode/`. Scrubbing the OTHER
- * host's identification vars while keeping its own is what stops that.
+ * in order, so a stray identification var was enough to send a session's data
+ * to the wrong root. Empty with a single row, and load-bearing again with two.
  */
 export function foreignIdentificationEnv(platform: PlatformId): Set<string> {
   const ban = new Set<string>();
@@ -173,7 +163,7 @@ export function foreignIdentificationEnv(platform: PlatformId): Set<string> {
  * MCP server start and `initialize` handshake completion).
  *
  * `src/session/analytics.ts` keeps a second copy of this map for the stats
- * report, which cannot import an adapter. Two entries each, and they have to
+ * report, which cannot import an adapter. One entry each, and they have to
  * agree.
  *
  * Returns `null` for "unknown" or any string outside the supported set so the
@@ -182,7 +172,6 @@ export function foreignIdentificationEnv(platform: PlatformId): Set<string> {
 export function getSessionDirSegments(platform: string): string[] | null {
   switch (platform) {
     case "claude-code":      return [".claude"];
-    case "codex":            return [".codex"];
     default:                 return null;
   }
 }
@@ -209,7 +198,7 @@ export function detectPlatform(clientInfo?: { name: string; version?: string }):
   // ── Explicit platform override ────────────────────────
   const platformOverride = process.env.CONTEXT_MODE_PLATFORM;
   if (platformOverride) {
-    const validPlatforms: PlatformId[] = ["claude-code", "codex"];
+    const validPlatforms: PlatformId[] = ["claude-code"];
     if (validPlatforms.includes(platformOverride as PlatformId)) {
       return {
         platform: platformOverride as PlatformId,
@@ -235,27 +224,17 @@ export function detectPlatform(clientInfo?: { name: string; version?: string }):
 
   const home = homedir();
 
-  // Two roots left, and they cannot collide: a machine with both ~/.claude and
-  // ~/.codex is a machine running both, and the env tier above has already
-  // spoken for whichever one is actually hosting this process. The elaborate
-  // ordering this block used to carry — CLI agents probed before host IDEs
-  // (#542), `agy` and Copilot CLI probed before the generic ~/.claude and
-  // ~/.gemini fallbacks (#774) — existed to break exactly the ties that no
-  // longer exist. Claude Code first because it is the default the low-
-  // confidence tier falls back to anyway.
+  // One root left, so there is no tie to break. The elaborate ordering this
+  // block used to carry — CLI agents probed before host IDEs (#542), `agy` and
+  // Copilot CLI probed before the generic ~/.claude and ~/.gemini fallbacks
+  // (#774) — existed for ties that no longer exist. The probe survives because
+  // it distinguishes "Claude Code is installed here" from the low-confidence
+  // fallback below, which guesses.
   if (existsSync(resolve(home, ".claude"))) {
     return {
       platform: "claude-code",
       confidence: "medium",
       reason: "~/.claude/ directory exists",
-    };
-  }
-
-  if (existsSync(resolve(home, ".codex"))) {
-    return {
-      platform: "codex",
-      confidence: "medium",
-      reason: "~/.codex/ directory exists",
     };
   }
 
@@ -276,16 +255,11 @@ export async function getAdapter(platform?: PlatformId): Promise<HookAdapter> {
   const target = platform ?? detectPlatform().platform;
 
   switch (target) {
-    case "codex": {
-      const { CodexAdapter } = await import("./codex/index.js");
-      return new CodexAdapter();
-    }
-
     case "claude-code":
     default: {
       // Unknown platform falls back to Claude Code: the MCP server works
       // everywhere, and its hooks are the ones a foreign host is most likely
-      // to understand. This is also why the fifteen removed adapters do not
+      // to understand. This is also why the sixteen removed adapters do not
       // need a migration path — a session on one of them lands here.
       const { ClaudeCodeAdapter } = await import("./claude-code/index.js");
       return new ClaudeCodeAdapter();

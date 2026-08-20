@@ -8,7 +8,7 @@ body:
       value: |
         ## Read this before filing.
 
-        **This is a developer tool that runs on 2 platforms (Claude Code, Codex CLI) across 3 operating systems (macOS, Linux, Windows). It is maintained by one person. I cannot reproduce every platform-specific edge case.**
+        **This is a developer tool that runs on Claude Code across 3 operating systems (macOS, Linux, Windows). It is maintained by one person. I cannot reproduce every platform-specific edge case.**
 
         ### PRs > Issues. Always.
 
@@ -43,7 +43,6 @@ body:
       description: Which AI agent platform are you using?
       options:
         - Claude Code
-        - Codex CLI
         - Other (please specify)
     validations:
       required: true

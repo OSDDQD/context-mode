@@ -1,6 +1,6 @@
 {
   "name": "context-mode",
-  "version": "1.1.2",
+  "version": "1.2.0",
   "fork": {
     "name": "OSDDQD/context-mode",
     "repo": "https://github.com/OSDDQD/context-mode.git",
@@ -19,7 +19,6 @@
     "model-context-protocol",
     "claude",
     "claude-code",
-    "codex-cli",
     "context-window",
     "sandbox",
     "code-execution",
@@ -49,7 +48,6 @@
     "agents",
     "commands",
     ".claude-plugin",
-    ".codex-plugin",
     "start.mjs",
     "scripts/postinstall.mjs",
     "scripts/heal-better-sqlite3.mjs",
@@ -65,7 +63,7 @@
     "bundle": "esbuild src/server.ts --bundle --platform=node --target=node18 --format=esm --outfile=server.bundle.mjs --external:better-sqlite3 --external:@ff-labs/fff-node --external:turndown --external:turndown-plugin-gfm --external:@mixmark-io/domino --minify && esbuild src/cli.ts --bundle --platform=node --target=node18 --format=esm --outfile=cli.bundle.mjs --external:better-sqlite3 --external:@ff-labs/fff-node --minify && esbuild src/session/extract.ts --bundle --platform=node --target=node18 --format=esm --outfile=hooks/session-extract.bundle.mjs --minify && esbuild src/session/snapshot.ts --bundle --platform=node --target=node18 --format=esm --outfile=hooks/session-snapshot.bundle.mjs --minify && esbuild src/session/db.ts --bundle --platform=node --target=node18 --format=esm --outfile=hooks/session-db.bundle.mjs --external:better-sqlite3 --minify && esbuild src/session/project-attribution.ts --bundle --platform=node --target=node18 --format=esm --outfile=hooks/session-attribution.bundle.mjs --minify && esbuild src/security.ts --bundle --platform=node --target=node18 --format=esm --outfile=hooks/security.bundle.mjs --minify",
     "sync-upstream": "node scripts/sync-upstream.mjs",
     "version-sync": "node scripts/version-sync.mjs",
-    "version": "node scripts/version-sync.mjs && git add package.json .claude-plugin/plugin.json .claude-plugin/marketplace.json .codex-plugin/plugin.json",
+    "version": "node scripts/version-sync.mjs && git add package.json .claude-plugin/plugin.json .claude-plugin/marketplace.json",
     "prepublishOnly": "npm run build",
     "dev": "npx tsx src/server.ts",
     "setup": "npx tsx src/cli.ts setup",

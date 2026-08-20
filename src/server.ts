@@ -103,7 +103,6 @@ import { FloodGuard } from "./search/flood-guard.js";
 import { type HookAdapter, type PlatformId } from "./adapters/types.js";
 import { detectPlatform, getSessionDirSegments } from "./adapters/detect.js";
 import { CLIENT_NAME_TO_PLATFORM } from "./adapters/client-map.js";
-import { parseCodexContextModePluginRoot } from "./adapters/codex/index.js";
 // Which repository an upgrade pulls from — resolved from the install, because
 // a fork that upgrades from upstream downgrades itself. See util/fork-info.ts.
 import { resolveClaudeConfigDir } from "./util/claude-config.js";
@@ -126,37 +125,6 @@ function getPackageRoot(): string {
   return existsSync(resolve(__pkg_dir, "package.json")) ? __pkg_dir : dirname(__pkg_dir);
 }
 
-function resolveCodexRuntimePluginRoot(fallbackRoot: string): string {
-  try {
-    const probe = process.platform === "win32"
-      ? spawnSync("cmd.exe", ["/d", "/s", "/c", "codex plugin list"], {
-        encoding: "utf-8",
-        stdio: ["ignore", "pipe", "ignore"],
-        timeout: 5000,
-      })
-      : spawnSync("codex", ["plugin", "list"], {
-        encoding: "utf-8",
-        stdio: ["ignore", "pipe", "ignore"],
-        timeout: 5000,
-      });
-    if (probe.status !== 0) return fallbackRoot;
-    const runtimeRoot = parseCodexContextModePluginRoot(String(probe.stdout));
-    if (runtimeRoot && existsSync(resolve(runtimeRoot, ".codex-plugin", "hooks.json"))) {
-      return runtimeRoot;
-    }
-  } catch {
-    // Best effort only. Non-Codex hosts and older Codex builds may not expose
-    // plugin list; keep the package-root fallback for those environments.
-  }
-  return fallbackRoot;
-}
-
-function getRuntimeAwarePackageRoot(platformId?: PlatformId): string {
-  const packageRoot = getPackageRoot();
-  return platformId === "codex"
-    ? resolveCodexRuntimePluginRoot(packageRoot)
-    : packageRoot;
-}
 
 // Prevent silent MCP server death from unhandled async errors.
 //
@@ -208,11 +176,10 @@ export const REGISTERED_CTX_TOOLS: RegisteredCtxTool[] = [];
  * own tool list, emitted a stderr line explaining why, and answered
  * `tools/list` with an empty array rather than -32601.
  *
- * Both hosts are gone, and neither remaining one loads this module in
- * process — Claude Code and Codex both speak MCP over stdio, where an empty
- * tool list is a bug and never an intention. Keeping the machinery would have
- * meant a predicate that cannot return true guarding three helpers nothing
- * calls.
+ * Those hosts are gone, and the remaining one does not load this module in
+ * process — Claude Code speaks MCP over stdio, where an empty tool list is a
+ * bug and never an intention. Keeping the machinery would have meant a
+ * predicate that cannot return true guarding three helpers nothing calls.
  */
 
 /**
@@ -698,9 +665,9 @@ function getDefaultSessionDir(): string {
   // Pre-detection path (race window before MCP `initialize` completes):
   // call detectPlatform() (sync, env-var-based) and look up segments via
   // getSessionDirSegments() (sync map, no adapter instantiation). This keeps
-  // non-Claude platforms from spilling sessions into ~/.claude/. For Claude
-  // Code/Codex (single-segment roots), reroute through their config-dir
-  // contracts so the pre-detection window does not split-state with hooks.
+  // a foreign host from spilling sessions into ~/.claude/. For Claude Code
+  // (a single-segment root), reroute through its config-dir contract so the
+  // pre-detection window does not split-state with hooks.
   try {
     const signal = detectPlatform();
     const segments = getSessionDirSegments(signal.platform);
@@ -716,7 +683,6 @@ function getDefaultSessionDir(): string {
 
 function configDirEnvForSessionSegments(segments: string[]): string | undefined {
   if (segments.length === 1 && segments[0] === ".claude") return "CLAUDE_CONFIG_DIR";
-  if (segments.length === 1 && segments[0] === ".codex") return "CODEX_HOME";
   return undefined;
 }
 
@@ -733,8 +699,7 @@ function getSessionDir(): string {
  *   3. process.cwd() (last resort)
  *
  * CONTEXT_MODE_PROJECT_DIR guarantees correct projectDir even for a platform
- * that sets no workspace env var of its own — Codex, which passes cwd in hook
- * stdin and nowhere else.
+ * that sets no workspace env var of its own and passes cwd in hook stdin.
  */
 export function getProjectDir(): string {
   const override = projectDirOverride.getStore();
@@ -749,10 +714,10 @@ export function getProjectDir(): string {
   // app launch, /ctx-upgrade respawn). See src/util/project-dir.ts.
   //
   // Issue #521 (v1.0.119): the transcript heuristic ONLY applies on Claude
-  // Code. Codex has no transcript at that path. Worse, a Codex user who also
-  // runs Claude Code would pick up the most-recently-modified Claude Code
-  // session's cwd — wrong project entirely. Gate the path on detected platform
-  // so a non-Claude host skips the heuristic and falls through to PWD/cwd.
+  // Code, because it is the only host with a transcript at that path. A
+  // foreign host that also runs Claude Code would otherwise pick up the
+  // most-recently-modified Claude Code session's cwd — wrong project entirely.
+  // Gate the path on detected platform so it falls through to PWD/cwd.
   //
   // The Claude heuristic must also be fresh. A host can be misdetected as
   // Claude Code solely because ~/.claude exists; without a freshness guard an
@@ -769,19 +734,11 @@ export function getProjectDir(): string {
   // and the legacy literal cascade is preserved there for semver safety.
   let transcriptsRoot: string | undefined;
   let strictPlatform: PlatformId | undefined;
-  let codexHome: string | undefined;
   try {
     const detected = detectPlatform().platform;
     strictPlatform = detected;
     if (detected === "claude-code") {
       transcriptsRoot = join(homedir(), ".claude", "projects");
-    }
-    // Issue #45 — Codex publishes no workspace env var, so the resolver
-    // reads `meta.cwd` from the most-recently-modified session.jsonl under
-    // `${codexHome}/sessions/`. Wire codexHome at the call site so the
-    // resolver can be exercised under test without process-level mutation.
-    if (detected === "codex") {
-      codexHome = process.env.CODEX_HOME ?? join(homedir(), ".codex");
     }
   } catch { /* detection failure — leave undefined, resolver uses legacy cascade */ }
   return resolveProjectDir({
@@ -791,7 +748,6 @@ export function getProjectDir(): string {
     transcriptsRoot,
     transcriptMaxAgeMs: 5 * 60 * 1000,
     strictPlatform,
-    codexHome,
   });
 }
 
@@ -3008,7 +2964,7 @@ registerCtxDoctor({
   VERSION,
   runtimes,
   available,
-  getRuntimeAwarePackageRoot,
+  getPackageRoot,
   getDefaultSessionDir,
   getDiagnosticAdapter,
   REGISTERED_CTX_TOOLS,
@@ -3022,7 +2978,7 @@ registerCtxDoctor({
 // the handshake lands after registration.
 registerCtxUpgrade({
   ...toolDeps(),
-  getRuntimeAwarePackageRoot,
+  getPackageRoot,
   getClientVersion: () => server.server.getClientVersion(),
 });
 

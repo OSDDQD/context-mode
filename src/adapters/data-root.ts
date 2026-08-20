@@ -10,18 +10,15 @@
  * The override applies only to context-mode-owned state (`getSessionDir`,
  * `getMemoryDir`) — never to platform-native config (`getConfigDir`,
  * `getSettingsPath`), which must stay where the host platform's own tooling
- * expects it. Use `CLAUDE_CONFIG_DIR` / `CODEX_HOME` to move platform-native
- * config; use `CONTEXT_MODE_DATA_DIR` to move context-mode storage
- * independently.
+ * expects it. Use `CLAUDE_CONFIG_DIR` to move platform-native config; use
+ * `CONTEXT_MODE_DATA_DIR` to move context-mode storage independently.
  *
- * This lives in its own module rather than on a shared base class: it is the
- * only thing the two adapters ever actually shared. `BaseAdapter` used to carry
- * it plus default implementations built from a `sessionDirSegments` array, but
- * both remaining adapters override every one of those defaults — claude-code
- * because its root is `$CLAUDE_CONFIG_DIR`, codex because its root is
- * `$CODEX_HOME` and its memory folder is spelled `memories`. A base class whose
- * every method is overridden is a file, not a contract; the contract is
- * `HookAdapter` in `types.ts`, and both adapters implement it directly.
+ * This lives in its own module rather than on a shared base class: it was the
+ * only thing the adapters ever actually shared. `BaseAdapter` used to carry it
+ * plus default implementations built from a `sessionDirSegments` array, which
+ * every adapter then overrode. A base class whose every method is overridden is
+ * a file, not a contract; the contract is `HookAdapter` in `types.ts`, and the
+ * adapter implements it directly.
  */
 
 import { resolve } from "node:path";

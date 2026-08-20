@@ -15,16 +15,14 @@ process.env.APPDATA = join(fakeHome, "AppData", "Roaming");
 process.env.LOCALAPPDATA = join(fakeHome, "AppData", "Local");
 
 import { ClaudeCodeAdapter } from "../../src/adapters/claude-code/index.js";
-import { CodexAdapter } from "../../src/adapters/codex/index.js";
 
 /**
  * Slice 3 — per-adapter memory/config conventions.
  *
- * Each adapter declares its own configDir, instructionFiles, memoryDir. Two
- * adapters remain, and the pair is still worth pinning: they disagree on all
- * three (`.claude` vs `.codex`, CLAUDE.md vs AGENTS.md, `memory` vs
- * `memories`), and every one of those disagreements is a path some consumer
- * builds by hand.
+ * Each adapter declares its own configDir, instructionFiles, memoryDir. One
+ * adapter remains, and pinning its three answers is still worth doing: each
+ * is a path some consumer builds by hand, and the values are what a second
+ * adapter would be checked against for disagreement.
  *
  * These are consumed by:
  *   - searchAutoMemory()  (auto-memory file scan)
@@ -52,46 +50,11 @@ describe("Adapter memory conventions", () => {
     });
   });
 
-  describe("CodexAdapter", () => {
-    const a = new CodexAdapter();
-    it("getConfigDir is ~/.codex", () => {
-      expect(a.getConfigDir()).toBe(join(homedir(), ".codex"));
-    });
-    it("getInstructionFiles is ['AGENTS.md', 'AGENTS.override.md']", () => {
-      expect(a.getInstructionFiles()).toEqual(["AGENTS.md", "AGENTS.override.md"]);
-    });
-    it("getMemoryDir is ~/.codex/memories (plural)", () => {
-      expect(a.getMemoryDir()).toBe(join(homedir(), ".codex", "memories"));
-    });
-  });
-
-
-
-  // Project-scoped adapters resolve their convention dir against an
-  // explicit projectDir per the always-absolute getConfigDir contract.
-  const projectDir = join(fakeHome, "fixture-project");
-
-
-
-
-
-
-
-
-  // ──────────────────────────────────────────────────────────────────
-  // Cross-adapter contract — getConfigDir() ALWAYS returns absolute
-  //
-  // Catches the leaky-seam bug where some adapters returned project-
-  // relative segments ("", ".cursor", ".github", ".kiro") and others
-  // returned absolute paths. Every consumer (server.ts, auto-memory.ts)
-  // can now treat the return uniformly without isAbsolute() guards.
-  // ──────────────────────────────────────────────────────────────────
   describe("HookAdapter.getConfigDir contract", () => {
     const projectDirForContract = join(fakeHome, "fixture-project");
 
     const allAdapters: Array<{ name: string; instance: { getConfigDir: (p?: string) => string } }> = [
       { name: "ClaudeCodeAdapter", instance: new ClaudeCodeAdapter() },
-      { name: "CodexAdapter", instance: new CodexAdapter() },
     ];
 
     it.each(allAdapters)(

@@ -36,7 +36,6 @@ src/
     detect.ts      → Platform detection via env vars
     base.ts        → BaseAdapter — config dir, memory dir, instruction files
     claude-code/   → Claude Code adapter (index.ts, hooks.ts, config.ts)
-    codex/         → Codex CLI adapter
 hooks/               → Plain JS hooks (.mjs) — no build needed
 configs/             → Per-platform install files (settings.json, mcp.json, CLAUDE.md, etc.)
 ```
@@ -310,7 +309,7 @@ After rebuilding, restart your Claude Code session. The MCP server reloads on se
 | `src/executor.ts` | Polyglot code executor (JS, Python, Shell, etc.) |
 | `src/session/db.ts` | SessionDB — persistent session event storage |
 | `src/session/extract.ts` | Event extractors for PostToolUse hook |
-| `src/adapters/detect.ts` | Platform detection (Claude Code, Codex CLI) |
+| `src/adapters/detect.ts` | Platform detection (Claude Code) |
 | `src/adapters/types.ts` | HookAdapter interface, shared adapter types |
 | `hooks/sessionstart.mjs` | Session lifecycle (startup/compact/resume/clear) |
 | `hooks/posttooluse.mjs` | Real-time event capture from tool calls |
@@ -370,7 +369,7 @@ npx skills add https://github.com/OSDDQD/context-mode/tree/main/.claude/skills/c
 
 | Domain | Test File |
 |---|---|
-| Adapters | `tests/adapters/claude-code.test.ts`, `tests/adapters/codex.test.ts` |
+| Adapters | `tests/adapters/claude-code.test.ts`, `tests/adapters/detect.test.ts` |
 | Client detection | `tests/adapters/detect.test.ts`, `tests/adapters/client-map.test.ts` |
 | Search & FTS5 | `tests/core/search.test.ts` |
 | Server & tools | `tests/core/server.test.ts` |
@@ -379,7 +378,6 @@ npx skills add https://github.com/OSDDQD/context-mode/tree/main/.claude/skills/c
 | Hook routing | `tests/hooks/core-routing.test.ts` |
 | Hook formatting | `tests/hooks/formatters.test.ts` |
 | Hook integration | `tests/hooks/integration.test.ts` |
-| Codex hooks | `tests/hooks/codex-goal-compact.test.ts`, `tests/hooks/codex-sessionstart-rule-capture.test.ts` |
 | Cross-host hook wiring | `tests/hooks/platform-bridge-wire.test.ts`, `tests/hooks/platform-detect.test.ts` |
 | Hook path parity | `tests/adapters/hook-path-parity.test.ts` |
 | Session DB | `tests/session/session-db.test.ts` |
@@ -391,7 +389,6 @@ npx skills add https://github.com/OSDDQD/context-mode/tree/main/.claude/skills/c
 | Store/Search | `tests/store.test.ts` |
 | Security | `tests/security.test.ts` |
 | Plugin layout | `tests/plugins/plugin-structure.test.ts` |
-| Codex manifest | `tests/plugins/codex-manifest.test.ts` |
 
 If your change doesn't fit any existing file, discuss with the maintainer before creating a new one.
 

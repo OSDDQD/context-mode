@@ -4,11 +4,10 @@
  * Source: Apify MCP Client Capabilities Registry
  * https://github.com/apify/mcp-client-capabilities
  *
- * Only includes platforms we have adapters for. Codex announces itself under
- * two names depending on how it was built — `Codex` from the CLI, and
- * `codex-mcp-client` from the MCP client wrapper — and both must resolve, or a
- * Codex session drops to the env-var tier and is detected by CODEX_THREAD_ID
- * instead of by the handshake it already sent.
+ * Only includes platforms we have adapters for. A host that announces itself
+ * under more than one name needs a row per name, or the session drops to the
+ * env-var tier and is detected by a leftover variable instead of by the
+ * handshake it already sent.
  *
  * This tier answers before any env var is read: a host that says who it is
  * should be believed over a directory that happens to exist on disk.
@@ -29,6 +28,4 @@ import type { PlatformId } from "./types.js";
 
 export const CLIENT_NAME_TO_PLATFORM: Record<string, PlatformId> = {
   "claude-code": "claude-code",
-  "Codex": "codex",
-  "codex-mcp-client": "codex",
 };

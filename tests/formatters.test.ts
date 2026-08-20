@@ -25,8 +25,8 @@ const registry = formatters as Record<string, Record<string, (...args: any[]) =>
 const PLATFORMS = Object.keys(registry);
 
 describe("every formatter", () => {
-  it("exists for both supported hosts and no others", () => {
-    expect([...PLATFORMS].sort()).toEqual(["claude-code", "codex"]);
+  it("exists for every supported host and no others", () => {
+    expect([...PLATFORMS].sort()).toEqual(["claude-code"]);
   });
 
   for (const platform of PLATFORMS) {
@@ -91,22 +91,6 @@ describe("claude-code formatter", () => {
   });
 });
 
-describe("codex formatter", () => {
-  it("emits deny in the hookSpecificOutput shape Codex parses", () => {
-    const result = formatters["codex"].deny("sandbox only");
-    expect(result.hookSpecificOutput.permissionDecision).toBe("deny");
-    expect(result.hookSpecificOutput.permissionDecisionReason).toBe("sandbox only");
-  });
-
-  it("re-says a reasoned ask as guidance, since Codex has no prompt to show", () => {
-    expect(formatters["codex"].ask("why", { codexSupportsRewrite: true })).toEqual({
-      hookSpecificOutput: { hookEventName: "PreToolUse", additionalContext: "why" },
-    });
-    expect(formatters["codex"].ask("why", {})).toBeNull();
-    expect(formatters["codex"].ask(undefined, { codexSupportsRewrite: true })).toBeNull();
-  });
-});
-
 describe("formatDecision integration", () => {
   it("claude-code deny flows through with correct field names", () => {
     const result = formatDecision("claude-code", { action: "deny", reason: "sandbox only" });
@@ -118,13 +102,6 @@ describe("formatDecision integration", () => {
     const result = formatDecision("claude-code", { action: "modify", updatedInput: { command: "echo hi" } });
     expect(result.hookSpecificOutput.permissionDecision).toBe("deny");
     expect(result.hookSpecificOutput.permissionDecisionReason).toBeDefined();
-  });
-
-  it("threads capability hints into ask, not only into modify and context", () => {
-    // The hint reaches `modify` and `context` by long-standing wiring; `ask`
-    // was added later and would silently keep dropping without this.
-    expect(formatDecision("codex", { action: "ask", reason: "why" }, { codexSupportsRewrite: true }))
-      .toEqual({ hookSpecificOutput: { hookEventName: "PreToolUse", additionalContext: "why" } });
   });
 
   it("returns null for an unknown platform rather than guessing a shape", () => {

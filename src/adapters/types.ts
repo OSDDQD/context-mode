@@ -3,13 +3,12 @@
  *
  * Defines the contract that each platform adapter must implement.
  *
- * Both supported hosts — Claude Code and Codex CLI — speak JSON on hook
- * stdin/stdout; they disagree only about the response envelope and about
- * which mutations they accept (see PlatformCapabilities). A `HookParadigm`
- * field used to sit on every adapter naming one of three wire styles: this
- * one, TS plugin functions (OpenCode, KiloCode, OpenClaw), and MCP-only hosts
- * with no hook layer at all (Antigravity, Zed). The other two paradigms left
- * with their hosts, and a field that can hold one value is not a field, so it
+ * The supported host — Claude Code — speaks JSON on hook stdin/stdout. A
+ * `HookParadigm` field used to sit on every adapter naming one of three wire
+ * styles: this one, TS plugin functions (OpenCode, KiloCode, OpenClaw), and
+ * MCP-only hosts with no hook layer at all (Antigravity, Zed). The other two
+ * paradigms left with their hosts, and a field that can hold one value is not a
+ * field, so it
  * is gone; when a host arrives that does not speak this protocol, its adapter
  * is where that shows, not a label on the interface.
  *
@@ -185,11 +184,11 @@ export interface HookAdapter {
   /**
    * What this platform supports.
    *
-   * Declarative, and currently read by no production code: each adapter's
-   * format methods already refuse what its host cannot accept (Codex drops
-   * `updatedInput` and `updatedMCPToolOutput` on the floor rather than
-   * emitting them). It is kept because the two hosts genuinely disagree here
-   * and a new adapter has to answer the question before it can compile.
+   * Declarative, and currently read by no production code: an adapter's format
+   * methods already refuse what its host cannot accept. It is kept because a
+   * new adapter has to answer the question before it can compile, which is
+   * where the last host's inability to take `updatedInput` should have been
+   * declared and was instead discovered.
    */
   readonly capabilities: PlatformCapabilities;
 
@@ -255,9 +254,8 @@ export interface HookAdapter {
    *
    * Resolution rules:
    *   - Home-rooted platforms return paths under `homedir()` / XDG / APPDATA.
-   *     Both remaining adapters are home-rooted: claude-code at
-   *     `$CLAUDE_CONFIG_DIR` or `~/.claude`, codex at `$CODEX_HOME` or
-   *     `~/.codex`.
+   *     The remaining adapter is home-rooted: claude-code at
+   *     `$CLAUDE_CONFIG_DIR` or `~/.claude`.
    *   - A project-scoped platform (the departed hosts put their config in
    *     `.cursor`, `.github`, `.kiro`, or the project root) resolves its
    *     segment against the supplied `projectDir`, falling back to
@@ -281,7 +279,7 @@ export interface HookAdapter {
 
   /**
    * Directory where persistent per-user memory is stored
-   * (e.g., ~/.claude/memory, ~/.codex/memories). Auto-memory scans
+   * (e.g., ~/.claude/memory). Auto-memory scans
    * *.md files in this directory.
    *
    * When `projectDir` is supplied, the path MUST be project-scoped (issue
@@ -312,8 +310,9 @@ export interface HookAdapter {
    * OPTIONAL, and genuinely so: claude-code implements it with hook-script
    * existence checks that join `pluginRoot + scriptName` directly via
    * `existsSync` (so doctor never round-trips through a regex on a hook
-   * command — the #548 root cause), while codex ships its hook config inside
-   * the host's own `hooks.json` and has no per-script file to probe.
+   * command — the #548 root cause). It is optional because a host that ships
+   * its hook config inside its own settings file has no per-script file to
+   * probe.
    *
    * The doctor iterates `adapter.getHealthChecks?.(pluginRoot) ?? []` and
    * renders each — no per-adapter wiring in the doctor body.
@@ -469,7 +468,6 @@ export const JS_RUNTIMES: ReadonlySet<string> = new Set(["node", "bun", "deno"])
 /** Supported platform identifiers. */
 export type PlatformId =
   | "claude-code"
-  | "codex"
   | "unknown";
 
 /** Detection signal used to identify which platform is running. */

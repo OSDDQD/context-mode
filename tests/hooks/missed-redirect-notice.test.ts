@@ -237,7 +237,7 @@ describe("formatPostToolContext — the two hosts that carry the line", () => {
   it("emits the PostToolUse event name, not the PreToolUse one", () => {
     // Reusing the PreToolUse shape here is the failure mode that would make
     // the host drop the line silently.
-    for (const platform of ["claude-code", "codex"]) {
+    for (const platform of ["claude-code"]) {
       expect(formatPostToolContext(platform, "hello"), platform).toEqual({
         hookSpecificOutput: { hookEventName: "PostToolUse", additionalContext: "hello" },
       });

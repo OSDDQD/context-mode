@@ -20,23 +20,11 @@ import { fileURLToPath } from "node:url";
 export const TARGETS = [
   ".claude-plugin/plugin.json",
   ".claude-plugin/marketplace.json",
-  ".codex-plugin/plugin.json",
-  // .codex-plugin/marketplace.json is intentionally absent — Codex CLI
-  // reads marketplaces from .agents/plugins/marketplace.json (or
-  // .claude-plugin/marketplace.json for Claude-compat). See
-  // refs/platforms/codex/codex-rs/core-plugins/src/marketplace.rs:21
-  // (MARKETPLACE_MANIFEST_RELATIVE_PATHS).
   //
-  // .agents/plugins/marketplace.json has no top-level `version` field
-  // (per the Codex serde schema at marketplace.rs:694-700 — only `name`,
-  // `interface`, and `plugins[]`), so it doesn't need version-syncing.
-  // Per-plugin `version` lives in .codex-plugin/plugin.json which is
-  // already in this list.
-  //
-  // Three entries, down from eleven (15a02cf). Every removed entry was a
-  // manifest for a host this fork no longer ships, and each one was a place the
-  // number could be forgotten — which is the failure D0 spent a wave on. The
-  // shorter this list, the smaller the surface.
+  // Two entries, down from eleven (15a02cf) and then from three. Every removed
+  // entry was a manifest for a host this fork no longer ships, and each one was
+  // a place the number could be forgotten — which is the failure D0 spent a
+  // wave on. The shorter this list, the smaller the surface.
 ];
 
 // Every place inside a manifest that carries the version. The writer and

@@ -101,7 +101,8 @@ import { detectPlatform, getAdapter } from "./adapters/detect.js";
 const HOOK_MAP: Record<string, Record<string, string>> = {
   // claude-code's scripts sit at the root of hooks/ rather than in a
   // per-platform directory: it was the first host, and everything shared lives
-  // beside it. Codex gets its own directory because its wire protocol differs.
+  // beside it. A second host gets its own directory when its wire protocol
+  // differs.
   "claude-code": {
     pretooluse: "hooks/pretooluse.mjs",
     posttooluse: "hooks/posttooluse.mjs",
@@ -109,14 +110,6 @@ const HOOK_MAP: Record<string, Record<string, string>> = {
     sessionstart: "hooks/sessionstart.mjs",
     userpromptsubmit: "hooks/userpromptsubmit.mjs",
     stop: "hooks/stop.mjs",
-  },
-  "codex": {
-    pretooluse: "hooks/codex/pretooluse.mjs",
-    posttooluse: "hooks/codex/posttooluse.mjs",
-    precompact: "hooks/codex/precompact.mjs",
-    sessionstart: "hooks/codex/sessionstart.mjs",
-    userpromptsubmit: "hooks/codex/userpromptsubmit.mjs",
-    stop: "hooks/codex/stop.mjs",
   },
 };
 

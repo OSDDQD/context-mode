@@ -2238,29 +2238,6 @@ describe("ctx_upgrade tool: inline fallback for missing CLI", () => {
     expect(serverSrc).toMatch(/existsSync\(bundlePath\)/);
   });
 
-  test("ctx_doctor and ctx_upgrade prefer the Codex plugin manager runtime root only for Codex", () => {
-    expect(serverSrc).toContain("parseCodexContextModePluginRoot");
-    expect(serverSrc).toContain("function resolveCodexRuntimePluginRoot");
-    expect(serverSrc).toContain("function getRuntimeAwarePackageRoot");
-
-    const helperBody = serverSrc.slice(
-      serverSrc.indexOf("function getRuntimeAwarePackageRoot"),
-      serverSrc.indexOf("// Prevent silent MCP server death"),
-    );
-    expect(helperBody).toContain('platformId === "codex"');
-    expect(helperBody).toContain("resolveCodexRuntimePluginRoot(packageRoot)");
-
-    // Both blocks are located by name rather than by literal anchors: the
-    // registration line and the comment that used to follow it are layout
-    // facts of src/server.ts, and either tool may now live in its own module.
-    const doctorBody = toolRegistrationBlock("ctx_doctor");
-    const upgradeBody = toolRegistrationBlock("ctx_upgrade");
-
-    expect(doctorBody).toContain("getRuntimeAwarePackageRoot(currentPlatform)");
-    expect(upgradeBody).toContain("platformId = signal.platform");
-    expect(upgradeBody).toContain("getRuntimeAwarePackageRoot(platformId)");
-  });
-
   test("tries build/cli.js second", () => {
     expect(serverSrc).toContain('resolve(pluginRoot, "build", "cli.js")');
   });
@@ -4347,7 +4324,7 @@ describe("getSessionDirSegments — sync platform → segments map", () => {
   test("returns correct segments for every supported platform", async () => {
     const { getSessionDirSegments } = await import("../../src/adapters/detect.js");
     expect(getSessionDirSegments("claude-code")).toEqual([".claude"]);
-    expect(getSessionDirSegments("codex")).toEqual([".codex"]);
+    expect(getSessionDirSegments("codex")).toBeNull();
   });
 
   test("returns null for a platform removed in the fifteen-host cut", async () => {
@@ -4395,14 +4372,16 @@ describe("getDefaultSessionDir uses pre-detection when adapter not yet detected"
     expect(detectIdx).toBeLessThan(claudeIdx);
   });
 
-  test("getDefaultSessionDir honors CODEX_HOME in the Codex pre-detection branch", () => {
+  test("getDefaultSessionDir routes segments through the config-dir contract", () => {
     const fn = serverSrc.match(/function getDefaultSessionDir\(\)[\s\S]*?^}/m);
     expect(fn).not.toBeNull();
     const body = fn![0];
     expect(body).toContain("getSessionDirSegments(signal.platform)");
     expect(body).toContain("configDirEnvForSessionSegments(segments)");
+    // One host, one mapping. The seam stays because the pre-detection window
+    // is where a second host's root would otherwise be guessed.
     expect(serverSrc).toContain(
-      'if (segments.length === 1 && segments[0] === ".codex") return "CODEX_HOME";',
+      'if (segments.length === 1 && segments[0] === ".claude") return "CLAUDE_CONFIG_DIR";',
     );
   });
 });

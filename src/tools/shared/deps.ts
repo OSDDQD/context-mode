@@ -204,7 +204,7 @@ export interface PurgeToolDeps extends ToolDeps {
  */
 export interface UpgradeToolDeps extends ToolDeps {
   /** Plugin root to upgrade into, resolved per host platform. */
-  getRuntimeAwarePackageRoot: (platformId?: PlatformId) => string;
+  getPackageRoot: () => string;
   /** clientInfo from the MCP handshake, or null before/without one. */
   getClientVersion: () => { name: string; version?: string } | undefined | null;
 }
@@ -230,7 +230,7 @@ export interface DoctorToolDeps extends ToolDeps {
   /** Languages those runtimes enable, in the order the report prints them. */
   available: readonly string[];
   /** Plugin root to diagnose, resolved per host platform. */
-  getRuntimeAwarePackageRoot: (platformId?: PlatformId) => string;
+  getPackageRoot: () => string;
   /** Pre-detection sessions directory, passed to the storage-dir resolvers. */
   getDefaultSessionDir: () => string;
   /** Host adapter for hook validation — detected, or resolved on demand. */

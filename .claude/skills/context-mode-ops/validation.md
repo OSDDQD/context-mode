@@ -111,7 +111,6 @@ Step 5: VERDICT
 | Platform | Verified ENV Vars | Source |
 |----------|------------------|--------|
 | Claude Code | `CLAUDE_PROJECT_DIR`, `CLAUDE_SESSION_ID` | src/adapters/detect.ts |
-| Codex | `CODEX_CI`, `CODEX_THREAD_ID` | src/adapters/detect.ts |
 | Override | `CONTEXT_MODE_PLATFORM` | src/adapters/detect.ts |
 
 Any ENV var NOT in this table must go through the full verification protocol.
@@ -126,7 +125,6 @@ npx vitest run tests/adapters/
 
 # Individual adapter (for targeted testing)
 npx vitest run tests/adapters/claude-code.test.ts
-npx vitest run tests/adapters/codex.test.ts
 
 # Detection logic
 npx vitest run tests/adapters/detect.test.ts
@@ -138,7 +136,7 @@ npx vitest run tests/adapters/client-map.test.ts
 ```
 ADAPTER TEST MATRIX
 ═══════════════════
-claude-code     ✓ 5/5    codex           ✓ 3/3
+claude-code     ✓ 5/5
 detect          ✓ 8/8    client-map      ✓ 6/6
 ───────────────────────────────────────────
 TOTAL: {N}/{N} passed | 0 failed

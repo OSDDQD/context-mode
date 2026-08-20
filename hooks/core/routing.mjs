@@ -1195,7 +1195,7 @@ function isExternalMcpTool(toolName) {
  * `cmd` is Codex's spelling on some executor shapes; `command` is everyone
  * else's. A field name this layer does not know about is not a parse error —
  * it is an empty command that quietly matches no rule, so the list stays a
- * superset of what the two hosts actually send.
+ * superset of what the host actually sends.
  */
 function getShellCommand(toolInput) {
   if (!toolInput || typeof toolInput !== "object") return "";
@@ -1289,14 +1289,10 @@ export function isFetchPassthroughUrl(url) {
   return hosts.some(h => hostname === h || hostname.endsWith(`.${h}`));
 }
 
-function getCodexConfigDir(env = process.env) {
-  const codexHome = env.CODEX_HOME;
-  if (codexHome && codexHome.trim() !== "") return resolve(codexHome);
-  return resolve(homedir(), ".codex");
-}
-
-function getPlatformSettingsPath(platform) {
-  if (platform === "codex") return resolve(getCodexConfigDir(), "settings.json");
+function getPlatformSettingsPath(_platform) {
+  // Claude Code's settings live where its own resolver says, not where this
+  // hook guesses; the one host that needed a computed path left with the
+  // fifteen before it. Kept as the seam a second host would fill.
   return undefined;
 }
 
@@ -2267,7 +2263,7 @@ const FLOODY_TOOLS = new Set(["Bash", "Read", "Grep", "Glob", "WebFetch", "Shell
  *
  * Same data line, same visibility in ctx_stats, different type — and the type
  * is what `readMissedRedirectTally` filters on, so these bytes are reported
- * without moving the escalation ladder. Exported so both hosts' PostToolUse
+ * without moving the escalation ladder. Exported so the PostToolUse
  * hooks file them under one name.
  */
 export const SANCTIONED_HEAVY_TYPE = "sanctioned_heavy";
@@ -2488,7 +2484,7 @@ const MISSED_REDIRECT_ALTERNATIVES = {
  *
  * `displayName` is the name the agent used, which is not always the name the
  * telemetry files it under: the Codex hook normalises `Shell` to `Bash` so the
- * two hosts aggregate together, and a line reading "this Bash call" to someone
+ * calls aggregate together, and a line reading "this Bash call" to someone
  * who called Shell is a line about somebody else's session. Lookup stays on
  * the normalised name; only the wording follows the caller.
  *

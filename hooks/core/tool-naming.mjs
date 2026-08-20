@@ -10,12 +10,10 @@
  * | Platform    | Pattern                                       |
  * |-------------|-----------------------------------------------|
  * | Claude Code | mcp__plugin_context-mode_context-mode__<tool>  |
- * | Codex CLI   | bare <tool>                                   |
  */
 
 const TOOL_PREFIXES = {
   "claude-code": (tool) => `mcp__plugin_context-mode_context-mode__${tool}`,
-  "codex":       (tool) => tool,
 };
 
 /**

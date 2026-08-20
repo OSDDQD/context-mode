@@ -37,7 +37,7 @@ The FTS5 content store, its retention, and what gets redacted on the way in.
 
 | Flag | Default | When you would touch it |
 |---|---|---|
-| `CONTEXT_MODE_DIR` | adapter default (`~/.claude/context-mode`, `~/.codex/context-mode`) | Move all plugin storage. Must be absolute; empty is ignored. The one flag most operators ever set. |
+| `CONTEXT_MODE_DIR` | adapter default (`~/.claude/context-mode`) | Move all plugin storage. Must be absolute; empty is ignored. The one flag most operators ever set. |
 | `CONTEXT_MODE_DATA_DIR` | unset | Same idea one level up — overrides the adapter's data root before `CONTEXT_MODE_DIR` splits it into `sessions/` and `content/`. `~` is expanded here. Prefer `CONTEXT_MODE_DIR`. |
 | `CONTEXT_MODE_CONTENT_RETENTION_DAYS` | `14` | Indexed content older than this is reaped. Raise on a long-running investigation you want to keep searchable; `0` disables reaping and lets the store grow. |
 | `CONTEXT_MODE_CONTENT_WAL_REAP` | on | `0` keeps SQLite WAL/SHM siblings when a store directory is reaped. Diagnosing a corrupted store. ⚠ do not touch in normal use. |
@@ -268,7 +268,7 @@ below still works and wins over the JSON key it overlaps.
 
 | Flag | Default | When you would touch it |
 |---|---|---|
-| `CONTEXT_MODE_PLATFORM` | detected | Force `claude-code` or `codex`. Any other value is rejected. Useful when detection is wrong in a container. |
+| `CONTEXT_MODE_PLATFORM` | detected | Force `claude-code`. Any other value is rejected. Useful when detection is wrong in a container. |
 | `CONTEXT_MODE_PROJECT_DIR` | `process.cwd()` | Project root the server and graph daemon assume. Set when the server is started from somewhere other than the project. |
 | `CONTEXT_MODE_UPGRADE_REPO` | derived from the plugin root | Git URL `ctx upgrade` pulls from. Pointing a fork at itself. |
 | `CONTEXT_MODE_UPGRADE_TIMEOUT_MS` | `180000` (3 min) | Clone/fetch timeout for `ctx upgrade`. |

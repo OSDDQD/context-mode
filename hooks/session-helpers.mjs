@@ -135,19 +135,10 @@ const CLAUDE_OPTS = {
   sessionIdEnv: "CLAUDE_SESSION_ID",
 };
 
-/** Codex CLI platform options. */
-export const CODEX_OPTS = {
-  configDir: ".codex",
-  configDirEnv: "CODEX_HOME",
-  projectDirEnv: undefined,   // Codex passes cwd in hook stdin, no env var
-  sessionIdEnv: undefined,    // Uses session_id from hook stdin or ppid fallback
-};
-
 /**
  * Resolve the platform config directory, respecting env var overrides.
- * Both supported hosts let the user move it — Claude Code via
- * CLAUDE_CONFIG_DIR, Codex via CODEX_HOME — and a host that does not (opts
- * with no `configDirEnv`) falls back to ~/<configDir>.
+ * Claude Code lets the user move it via CLAUDE_CONFIG_DIR; a host that does
+ * not (opts with no `configDirEnv`) falls back to ~/<configDir>.
  */
 export function resolveConfigDir(opts = CLAUDE_OPTS) {
   if (opts.configDirEnv) {

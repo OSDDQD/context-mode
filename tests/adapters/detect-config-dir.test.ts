@@ -80,7 +80,6 @@ describe("detectPlatform — config directory branches", () => {
 
   it.each<[string, string]>([
     [".claude", "claude-code"],
-    [".codex", "codex"],
   ])("detects %s → %s at medium confidence", (dir, expected) => {
     forceDir(resolve(home, dir));
     const signal = detectPlatform();
@@ -97,7 +96,7 @@ describe("detectPlatform — config directory branches", () => {
     expect(signal.reason).toContain("No platform detected");
   });
 
-  it("prefers ~/.claude over ~/.codex when both dirs exist", () => {
+  it("a removed host's dir alongside ~/.claude changes nothing", () => {
     existsSyncMock.mockImplementation((
       ((p: unknown) =>
         p === resolve(home, ".claude") || p === resolve(home, ".codex")) as typeof fs.existsSync
@@ -107,17 +106,17 @@ describe("detectPlatform — config directory branches", () => {
 
   it("env var wins over a matching config dir", () => {
     forceDir(resolve(home, ".claude"));
-    process.env.CODEX_CI = "1";
+    process.env.CLAUDE_CODE_ENTRYPOINT = "cli";
     const signal = detectPlatform();
-    expect(signal.platform).toBe("codex");
+    expect(signal.platform).toBe("claude-code");
     expect(signal.confidence).toBe("high");
   });
 
   it("CONTEXT_MODE_PLATFORM override wins over a matching config dir", () => {
     forceDir(resolve(home, ".claude"));
-    process.env.CONTEXT_MODE_PLATFORM = "codex";
+    process.env.CONTEXT_MODE_PLATFORM = "claude-code";
     const signal = detectPlatform();
-    expect(signal.platform).toBe("codex");
+    expect(signal.platform).toBe("claude-code");
     expect(signal.confidence).toBe("high");
   });
 
@@ -171,10 +170,10 @@ describe("detectPlatform — config directory branches", () => {
     it("a removed host's dir never outranks a supported one", () => {
       existsSyncMock.mockImplementation(
         ((p: unknown) =>
-          p === resolve(home, ".cursor") || p === resolve(home, ".codex")) as typeof fs.existsSync,
+          p === resolve(home, ".cursor") || p === resolve(home, ".claude")) as typeof fs.existsSync,
       );
       const signal = detectPlatform();
-      expect(signal.platform).toBe("codex");
+      expect(signal.platform).toBe("claude-code");
       expect(signal.confidence).toBe("medium");
     });
   });
@@ -195,19 +194,16 @@ describe("detectPlatform — env var priority chain", () => {
     existsSyncMock.mockReset();
   });
 
-  it("CLAUDE beats CODEX when both envs are set", () => {
-    // The registry is ordered, and claude-code is first. This is the whole of
-    // what "fork before parent, agent before editor" reduces to at two hosts:
-    // one pair, one documented winner.
+  it("CLAUDE beats a removed host's var when both are set", () => {
+    // The registry is ordered, and claude-code is first. What "fork before
+    // parent, agent before editor" reduces to at one host is the other half
+    // of the same rule: a variable with no row cannot win.
     process.env.CLAUDE_PROJECT_DIR = "/p";
     process.env.CODEX_THREAD_ID = "t";
     expect(detectPlatform().platform).toBe("claude-code");
   });
 
   it("each host's own vars resolve to it at high confidence", () => {
-    process.env.CODEX_THREAD_ID = "t";
-    expect(detectPlatform()).toMatchObject({ platform: "codex", confidence: "high" });
-    delete process.env.CODEX_THREAD_ID;
     process.env.CLAUDE_CODE_ENTRYPOINT = "cli";
     expect(detectPlatform()).toMatchObject({ platform: "claude-code", confidence: "high" });
   });
@@ -228,7 +224,8 @@ describe("detectPlatform — env var priority chain", () => {
   it("a removed host's var does not displace a live one", () => {
     process.env.CURSOR_TRACE_ID = "trace-abc";
     process.env.CODEX_THREAD_ID = "t";
-    expect(detectPlatform()).toMatchObject({ platform: "codex", confidence: "high" });
+    process.env.CLAUDE_CODE_ENTRYPOINT = "cli";
+    expect(detectPlatform()).toMatchObject({ platform: "claude-code", confidence: "high" });
   });
 
   it("VSCODE_PID no longer competes with Claude Code (issue #539, resolved by removal)", () => {

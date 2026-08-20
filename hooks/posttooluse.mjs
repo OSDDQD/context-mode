@@ -163,7 +163,7 @@ await runHook(async () => {
     // allowlist and thresholds have evidence behind them.
     //
     // The classification lives in hooks/core/routing.mjs so the Codex hook
-    // records the same population against the same floor: two hosts, one
+    // records the same population against the same floor: one host, one
     // definition of "this went straight into the context window".
     //
     // Subagent calls are excluded outright. Claude Code sets `agent_id` only

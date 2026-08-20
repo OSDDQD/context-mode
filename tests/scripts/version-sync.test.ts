@@ -35,8 +35,8 @@ const PKG_JSON = JSON.parse(readFileSync(resolve(REPO_ROOT, "package.json"), "ut
 };
 
 describe("scripts/version-sync.mjs targets", () => {
-  it("includes .codex-plugin/plugin.json", () => {
-    expect(SCRIPT_SRC).toContain('".codex-plugin/plugin.json"');
+  it("no longer includes .codex-plugin/plugin.json (the host is gone)", () => {
+    expect(SCRIPT_SRC).not.toContain('".codex-plugin/plugin.json"');
   });
 
   it("does NOT include .codex-plugin/marketplace.json (Codex never reads that path)", () => {
@@ -54,8 +54,8 @@ describe("scripts/version-sync.mjs targets", () => {
 });
 
 describe("package.json `version` script `git add` list", () => {
-  it("includes .codex-plugin/plugin.json", () => {
-    expect(PKG_JSON.scripts.version).toContain(".codex-plugin/plugin.json");
+  it("no longer includes .codex-plugin/plugin.json (the host is gone)", () => {
+    expect(PKG_JSON.scripts.version).not.toContain(".codex-plugin/plugin.json");
   });
 
   it("does NOT include .codex-plugin/marketplace.json (file is removed — Codex never reads it)", () => {
@@ -74,9 +74,9 @@ describe("version-sync TARGETS is the single source of truth (#768)", () => {
   it("exports a non-empty TARGETS array", () => {
     expect(Array.isArray(TARGETS)).toBe(true);
     // Every other assertion in this file iterates TARGETS, so an empty list
-    // would turn the whole suite green by having nothing to check. Three is
-    // the post-15a02cf floor: the two Claude manifests plus the Codex one.
-    expect(TARGETS.length).toBeGreaterThanOrEqual(3);
+    // would turn the whole suite green by having nothing to check. Two is the
+    // floor after the Codex removal: the two Claude manifests.
+    expect(TARGETS.length).toBeGreaterThanOrEqual(2);
   });
 
   it("stages EVERY target in the npm `version` lifecycle `git add` list", () => {

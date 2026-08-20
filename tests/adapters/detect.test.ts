@@ -15,7 +15,6 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { detectPlatform, getAdapter } from "../../src/adapters/detect.js";
 import { ClaudeCodeAdapter } from "../../src/adapters/claude-code/index.js";
-import { CodexAdapter } from "../../src/adapters/codex/index.js";
 
 /**
  * Env vars that steer detection, plus the ones removed hosts used to set.
@@ -31,10 +30,10 @@ const ENV_TO_CLEAR = [
   "CLAUDE_SESSION_ID",
   "CLAUDE_CODE_ENTRYPOINT",
   "CLAUDE_PLUGIN_ROOT",
-  "CODEX_CI",
-  "CODEX_THREAD_ID",
   "CONTEXT_MODE_PLATFORM",
   // Removed hosts
+  "CODEX_CI",
+  "CODEX_THREAD_ID",
   "GEMINI_PROJECT_DIR",
   "GEMINI_CLI",
   "KILO",
@@ -83,8 +82,6 @@ describe("detectPlatform", () => {
     ["CLAUDE_SESSION_ID", "abc-123", "claude-code"],
     ["CLAUDE_CODE_ENTRYPOINT", "cli", "claude-code"],
     ["CLAUDE_PLUGIN_ROOT", "/plugins/context-mode/1.0.0", "claude-code"],
-    ["CODEX_CI", "1", "codex"],
-    ["CODEX_THREAD_ID", "t-1", "codex"],
   ])("%s → %s at high confidence", (name, value, expected) => {
     process.env[name] = value;
     const signal = detectPlatform();
@@ -93,32 +90,32 @@ describe("detectPlatform", () => {
     expect(signal.reason).toContain(name);
   });
 
-  it("claude-code wins when both hosts' env vars are present", () => {
-    // The registry is ordered and claude-code is first. This is the last
-    // surviving instance of the ordering rule that used to run to sixteen
-    // rows, and it is still the rule: order in PLATFORM_ENV_VARS decides.
+  it("a removed host's env var does not claim the session", () => {
+    // The ordering rule that used to run to seventeen rows has one row left
+    // to order, so what is worth pinning is the other half of it: a variable
+    // belonging to a host with no adapter must not produce a high-confidence
+    // signal, or a session's data goes to a root nothing reads.
     process.env.CODEX_THREAD_ID = "t-1";
-    process.env.CLAUDE_PROJECT_DIR = "/p";
-    expect(detectPlatform().platform).toBe("claude-code");
+    const signal = detectPlatform();
+    expect(signal.platform).toBe("claude-code");
+    expect(signal.confidence).not.toBe("high");
   });
 
   it("an empty env var is not a signal", () => {
-    process.env.CODEX_THREAD_ID = "";
+    process.env.CLAUDE_PROJECT_DIR = "";
     const signal = detectPlatform();
     expect(signal.confidence).not.toBe("high");
   });
 
   it("returns a supported platform when nothing is set", () => {
     const signal = detectPlatform();
-    expect(["claude-code", "codex"]).toContain(signal.platform);
+    expect(["claude-code"]).toContain(signal.platform);
   });
 
   // ── clientInfo tier ────────────────────────────────────
 
   it.each([
     ["claude-code", "claude-code"],
-    ["Codex", "codex"],
-    ["codex-mcp-client", "codex"],
   ])("clientInfo.name=%s → %s at high confidence", (name, expected) => {
     const signal = detectPlatform({ name });
     expect(signal.platform).toBe(expected);
@@ -127,28 +124,35 @@ describe("detectPlatform", () => {
   });
 
   it("clientInfo takes priority over env vars", () => {
+    process.env.CONTEXT_MODE_PLATFORM = "";
     process.env.CLAUDE_PROJECT_DIR = "/p";
-    expect(detectPlatform({ name: "Codex" }).platform).toBe("codex");
+    const signal = detectPlatform({ name: "claude-code" });
+    expect(signal.platform).toBe("claude-code");
+    expect(signal.reason).toContain("claude-code");
   });
 
   it("unknown clientInfo falls through to env var detection", () => {
-    process.env.CODEX_CI = "1";
-    expect(detectPlatform({ name: "some-unknown-client" }).platform).toBe("codex");
+    process.env.CLAUDE_PROJECT_DIR = "/p";
+    const signal = detectPlatform({ name: "some-unknown-client" });
+    expect(signal.platform).toBe("claude-code");
+    expect(signal.reason).toContain("CLAUDE_PROJECT_DIR");
   });
 
   it("a removed host's clientInfo falls through rather than naming it", () => {
     // A Cursor or Qwen build still pointed at this server announces itself in
     // the handshake. Resolving that name would produce a PlatformId with no
     // adapter; falling through hands it the claude-code default instead.
-    process.env.CODEX_CI = "1";
-    for (const name of ["cursor-vscode", "qwen-cli-mcp-client-fs", "Kiro CLI", "Pi CLI"]) {
-      expect(detectPlatform({ name }).platform).toBe("codex");
+    process.env.CLAUDE_PROJECT_DIR = "/p";
+    for (const name of ["cursor-vscode", "qwen-cli-mcp-client-fs", "Kiro CLI", "Pi CLI", "Codex"]) {
+      const signal = detectPlatform({ name });
+      expect(signal.platform).toBe("claude-code");
+      expect(signal.reason).not.toContain(name);
     }
   });
 
   // ── CONTEXT_MODE_PLATFORM override ─────────────────────
 
-  it.each([["claude-code"], ["codex"]])("CONTEXT_MODE_PLATFORM=%s is honored", (platform) => {
+  it.each([["claude-code"]])("CONTEXT_MODE_PLATFORM=%s is honored", (platform) => {
     process.env.CONTEXT_MODE_PLATFORM = platform;
     const signal = detectPlatform();
     expect(signal.platform).toBe(platform);
@@ -157,13 +161,17 @@ describe("detectPlatform", () => {
 
   it("CONTEXT_MODE_PLATFORM takes priority over env vars", () => {
     process.env.CLAUDE_PROJECT_DIR = "/p";
-    process.env.CONTEXT_MODE_PLATFORM = "codex";
-    expect(detectPlatform().platform).toBe("codex");
+    process.env.CONTEXT_MODE_PLATFORM = "claude-code";
+    const signal = detectPlatform();
+    expect(signal.platform).toBe("claude-code");
+    expect(signal.reason).toContain("override");
   });
 
   it("clientInfo takes priority over CONTEXT_MODE_PLATFORM", () => {
-    process.env.CONTEXT_MODE_PLATFORM = "codex";
-    expect(detectPlatform({ name: "claude-code" }).platform).toBe("claude-code");
+    process.env.CONTEXT_MODE_PLATFORM = "claude-code";
+    const signal = detectPlatform({ name: "claude-code" });
+    expect(signal.platform).toBe("claude-code");
+    expect(signal.reason).not.toContain("override");
   });
 
   it.each([["not-a-platform"], ["cursor"], ["pi"], ["opencode"]])(
@@ -173,8 +181,10 @@ describe("detectPlatform", () => {
       // fall through to real detection. The second case is the live one: the
       // antigravity-cli plugin bundle shipped CONTEXT_MODE_PLATFORM pinned.
       process.env.CONTEXT_MODE_PLATFORM = value;
-      process.env.CODEX_CI = "1";
-      expect(detectPlatform().platform).toBe("codex");
+      process.env.CLAUDE_PROJECT_DIR = "/p";
+      const signal = detectPlatform();
+      expect(signal.platform).toBe("claude-code");
+      expect(signal.reason).toContain("CLAUDE_PROJECT_DIR");
     },
   );
 });
@@ -186,10 +196,6 @@ describe("detectPlatform", () => {
 describe("getAdapter", () => {
   it("returns ClaudeCodeAdapter for claude-code", async () => {
     expect(await getAdapter("claude-code")).toBeInstanceOf(ClaudeCodeAdapter);
-  });
-
-  it("returns CodexAdapter for codex", async () => {
-    expect(await getAdapter("codex")).toBeInstanceOf(CodexAdapter);
   });
 
   it("returns ClaudeCodeAdapter for unknown platform", async () => {
@@ -228,14 +234,12 @@ describe("PLATFORM_ENV_VARS — typed registry (issue #545 algorithmic design)",
     expect(claudeEntries).toContainEqual({ name: "CLAUDE_PLUGIN_ROOT", role: "identification" });
     expect(claudeEntries).toContainEqual({ name: "CLAUDE_SESSION_ID", role: "identification" });
 
-    const codexEntries = PLATFORM_ENV_VARS.get("codex");
-    expect(codexEntries).toContainEqual({ name: "CODEX_THREAD_ID", role: "identification" });
-    expect(codexEntries).toContainEqual({ name: "CODEX_CI", role: "identification" });
+    expect(PLATFORM_ENV_VARS.get("codex" as never)).toBeUndefined();
   });
 
   it("carries exactly the supported platforms", async () => {
     const { PLATFORM_ENV_VARS } = await import("../../src/adapters/detect.js");
-    expect([...PLATFORM_ENV_VARS.keys()].sort()).toEqual(["claude-code", "codex"]);
+    expect([...PLATFORM_ENV_VARS.keys()].sort()).toEqual(["claude-code"]);
   });
 
   it("every entry has a valid role and a non-empty name", async () => {
@@ -278,24 +282,20 @@ describe("PLATFORM_ENV_VARS — typed registry (issue #545 algorithmic design)",
     expect([...foreignWorkspaceEnv("claude-code")]).toEqual([]);
   });
 
-  it("foreignIdentificationEnv(p) returns identification vars from the OTHER platform", async () => {
+  it("foreignIdentificationEnv(p) excludes the platform's own identification vars", async () => {
     const { foreignIdentificationEnv } = await import("../../src/adapters/detect.js");
-    const banForCodex = foreignIdentificationEnv("codex");
-    // Without this scrub a Codex child inheriting CLAUDE_CODE_ENTRYPOINT
-    // detects as claude-code and writes its session data into ~/.claude/.
-    expect(banForCodex.has("CLAUDE_CODE_ENTRYPOINT")).toBe(true);
-    expect(banForCodex.has("CLAUDE_PLUGIN_ROOT")).toBe(true);
-    expect(banForCodex.has("CLAUDE_SESSION_ID")).toBe(true);
-    // Codex's OWN identification vars must survive its own scrub.
-    expect(banForCodex.has("CODEX_THREAD_ID")).toBe(false);
-    expect(banForCodex.has("CODEX_CI")).toBe(false);
-    // Workspace-role vars are NEVER in the identification ban set.
-    expect(banForCodex.has("CLAUDE_PROJECT_DIR")).toBe(false);
-
+    // One row in the registry, so the ban set is empty — and empty is the
+    // answer being pinned. The scrub exists so a child inheriting another
+    // host's identification var cannot detect as that host and write its
+    // session data into the wrong root; with nothing else registered there is
+    // nothing to scrub, and the moment a second row lands this goes non-empty.
     const banForClaude = foreignIdentificationEnv("claude-code");
-    expect(banForClaude.has("CODEX_THREAD_ID")).toBe(true);
-    expect(banForClaude.has("CODEX_CI")).toBe(true);
     expect(banForClaude.has("CLAUDE_CODE_ENTRYPOINT")).toBe(false);
+    expect(banForClaude.has("CLAUDE_PLUGIN_ROOT")).toBe(false);
+    expect(banForClaude.has("CLAUDE_SESSION_ID")).toBe(false);
+    // Workspace-role vars are NEVER in the identification ban set.
+    expect(banForClaude.has("CLAUDE_PROJECT_DIR")).toBe(false);
+    expect(banForClaude.size).toBe(0);
   });
 
   it("foreignIdentificationEnv is symmetric — every host excludes its own identification vars", async () => {
@@ -316,10 +316,9 @@ describe("PLATFORM_ENV_VARS — typed registry (issue #545 algorithmic design)",
   it("getSessionDirSegments answers for the supported platforms and nothing else", async () => {
     const { getSessionDirSegments } = await import("../../src/adapters/detect.js");
     expect(getSessionDirSegments("claude-code")).toEqual([".claude"]);
-    expect(getSessionDirSegments("codex")).toEqual([".codex"]);
     // A removed platform must return null so the caller picks its own safe
     // fallback rather than being handed a directory nothing writes to.
-    for (const gone of ["cursor", "pi", "opencode", "kilo", "zed", "unknown"]) {
+    for (const gone of ["codex", "cursor", "pi", "opencode", "kilo", "zed", "unknown"]) {
       expect(getSessionDirSegments(gone), `${gone} should not resolve`).toBeNull();
     }
   });

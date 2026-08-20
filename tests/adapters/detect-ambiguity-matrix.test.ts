@@ -80,11 +80,11 @@ describe("detectPlatform — config-dir ambiguity matrix (issue #542)", () => {
 
   // [scenario, dirs present, expected platform, expected confidence]
   const cases: Array<[string, string[][], string, string]> = [
-    // ── The ambiguity that remains ──
-    ["claude + codex → claude-code", [[".claude"], [".codex"]], "claude-code", "medium"],
-    // ── Each alone ──
+    // ── The one live row ──
     ["claude only    → claude-code", [[".claude"]], "claude-code", "medium"],
-    ["codex only     → codex", [[".codex"]], "codex", "medium"],
+    // ── A removed host's root does not resolve to it ──
+    ["codex only     → claude-code (low)", [[".codex"]], "claude-code", "low"],
+    ["claude + codex → claude-code", [[".claude"], [".codex"]], "claude-code", "medium"],
     // ── Neither: the low-confidence default, not a guess ──
     ["neither        → claude-code (low)", [], "claude-code", "low"],
   ];
@@ -96,11 +96,11 @@ describe("detectPlatform — config-dir ambiguity matrix (issue #542)", () => {
     expect(signal.confidence).toBe(expectedConfidence);
   });
 
-  it("resolves claude + codex the same way regardless of probe order", () => {
+  it("resolves the same way regardless of probe order", () => {
     // The old matrix's whole point was that the winner is a property of the
     // documented order, not of which existsSync call happened to run first.
-    // With two rows that is cheap to state directly: the answer must not
-    // depend on the set's iteration order.
+    // With one live row that is cheap to state directly: a leftover root from
+    // a removed host cannot change the answer by being probed first.
     presentDirs([".codex"], [".claude"]);
     expect(detectPlatform().platform).toBe("claude-code");
     presentDirs([".claude"], [".codex"]);
@@ -119,9 +119,9 @@ describe("detectPlatform — config-dir ambiguity matrix (issue #542)", () => {
     });
 
     it("does not let a removed host's dir outrank a supported one", () => {
-      presentDirs([".cursor"], [".codex"]);
+      presentDirs([".cursor"], [".claude"]);
       const signal = detectPlatform();
-      expect(signal.platform).toBe("codex");
+      expect(signal.platform).toBe("claude-code");
       expect(signal.confidence).toBe("medium");
     });
   });

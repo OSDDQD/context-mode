@@ -233,8 +233,9 @@ describe("resolveProjectDir — strictPlatform algorithmic mode (issue #545)", (
     expect(result).toBe("/Users/x/own-claude-project");
   });
 
-  it("strictPlatform=codex ignores every workspace var, including its neighbour's", () => {
-    // Codex declares no workspace var at all — it passes cwd in hook stdin.
+  it("a platform with no workspace var of its own ignores every workspace var", () => {
+    // Such a host passes cwd in hook stdin. Codex was the example until it
+    // left; "unknown" has the same empty row and exercises the same branch.
     // So CLAUDE_PROJECT_DIR must lose even though it is the only live
     // workspace var in the registry, and the cascade falls to pwd.
     const result = resolveProjectDir({
@@ -244,7 +245,7 @@ describe("resolveProjectDir — strictPlatform algorithmic mode (issue #545)", (
       },
       cwd: "/some/cwd",
       pwd: "/Users/x/from-shell",
-      strictPlatform: "codex",
+      strictPlatform: "unknown",
     });
     expect(result).toBe("/Users/x/from-shell");
   });
@@ -265,7 +266,7 @@ describe("resolveProjectDir — strictPlatform algorithmic mode (issue #545)", (
       },
       cwd: "/some/cwd",
       pwd: undefined,
-      strictPlatform: "codex",
+      strictPlatform: "unknown",
     });
     expect(result).toBe("/Users/x/escape");
   });
