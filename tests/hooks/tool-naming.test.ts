@@ -204,7 +204,9 @@ describe("KNOWN_PLATFORMS", () => {
 
 describe("guidance factories name tools the host's way", () => {
   const factories: Array<[string, () => (t: (tool: string) => string) => string]> = [
-    ["createRoutingBlock", () => createRoutingBlock],
+    // createRoutingBlock is checked separately: the compact block writes tool
+    // names bare and declares the host prefix once, so the per-mention rule
+    // below does not apply to it.
     ["createReadGuidance", () => createReadGuidance],
     ["createGrepGuidance", () => createGrepGuidance],
     ["createBashGuidance", () => createBashGuidance],
@@ -219,6 +221,25 @@ describe("guidance factories name tools the host's way", () => {
       });
     }
   }
+
+  it("the routing block declares the host's spelling instead of repeating it", () => {
+    // Spelling all fifteen tools in full costs ~600 bytes of a 3 KB block on
+    // Claude Code, where the prefix is 39 characters. The compact block writes
+    // them bare and names the host's spelling once — so what must hold per
+    // host is that the declaration is present, correct, and alone.
+    for (const platform of PLATFORMS) {
+      const name = EXPECTED_NAMES[platform];
+      const block = createRoutingBlock(createToolNamer(platform));
+      expect(block, `${platform}: no host spelling declared`).toContain(name("ctx_find"));
+      for (const mention of ctxMentions(block)) {
+        const bare = mention.replace(/^mcp__[A-Za-z0-9_-]*__/, "");
+        expect(
+          mention === bare || mention === name(bare),
+          `${platform}: "${mention}" is neither bare nor how ${platform} spells it`,
+        ).toBe(true);
+      }
+    }
+  });
 
   it("createExternalMcpGuidance still states what to do with a large payload", () => {
     for (const platform of PLATFORMS) {
@@ -239,10 +260,15 @@ describe("backward compat static exports", () => {
   ];
 
   for (const [name, get] of statics) {
+    if (name === "ROUTING_BLOCK") continue; // bare names + one declaration, checked above
     it(`${name} defaults to claude-code naming`, () => {
       expectNamedFor("claude-code", get(), name);
     });
   }
+
+  it("ROUTING_BLOCK declares the claude-code spelling", () => {
+    expect(ROUTING_BLOCK).toContain("mcp__plugin_context-mode_context-mode__ctx_find");
+  });
 
   it("each static equals its factory bound to claude-code", () => {
     const t = createToolNamer("claude-code");

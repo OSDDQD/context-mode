@@ -14,12 +14,16 @@
 
 import { describe, test, expect } from "vitest";
 
-import { createRoutingBlock, ROUTING_BLOCK } from "../../hooks/routing-block.mjs";
+import {
+  createRoutingBlock,
+  createSubagentRoutingBlock,
+  ROUTING_BLOCK,
+} from "../../hooks/routing-block.mjs";
 import { createToolNamer, KNOWN_PLATFORMS } from "../../hooks/core/tool-naming.mjs";
 
-/** The FIND entry, whatever number it currently carries. */
+/** The entry that routes locating a file, whatever it is currently labelled. */
 function findLine(block: string): string | undefined {
-  return block.split("\n").find((l) => l.includes("FIND:"));
+  return block.split("\n").find((l) => /Glob\/Grep to locate/.test(l));
 }
 
 describe("the FIND routing line", () => {
@@ -42,23 +46,32 @@ describe("the FIND routing line", () => {
     expect(ROUTING_BLOCK).not.toMatch(/fff/i);
   });
 
-  test("it lives inside the tool hierarchy, so subagents inherit it", () => {
+  test("it lives inside the tool hierarchy, where the choice is made", () => {
     const hierarchy = ROUTING_BLOCK.split("<tool_selection_hierarchy>")[1]
       ?.split("</tool_selection_hierarchy>")[0] ?? "";
-    expect(hierarchy).toContain("FIND:");
+    expect(hierarchy).toContain("ctx_find");
   });
 
   test("every platform gets the tool spelled its own way", () => {
+    // The compact block writes names bare and declares the host prefix once —
+    // spelling all fifteen in full costs a fifth of the byte budget. What has
+    // to hold per platform is that the declaration is there and correct, so a
+    // bare name in the table resolves to something the host can call.
     for (const platform of KNOWN_PLATFORMS) {
       const t = createToolNamer(platform);
-      const line = findLine(createRoutingBlock(t));
-      expect(line, platform).toContain(t("ctx_find"));
+      const block = createRoutingBlock(t);
+      expect(findLine(block), platform).toContain("ctx_find");
+      expect(block, `${platform}: the block never spells ctx_find the host's way`)
+        .toContain(t("ctx_find"));
     }
   });
 
   test("the line survives the subagent variant of the block", () => {
     const t = createToolNamer("claude-code");
-    const block = createRoutingBlock(t, { includeCommands: false, toolSearchBootstrap: true });
-    expect(findLine(block)).toContain(t("ctx_find"));
+    const block = createSubagentRoutingBlock(t, { toolSearchBootstrap: true });
+    expect(findLine(block)).toContain("ctx_find");
+    // On a prefixing host the subagent's spelling comes from the bootstrap,
+    // which is the line it has to copy the names from anyway.
+    expect(block).toContain(t("ctx_find"));
   });
 });

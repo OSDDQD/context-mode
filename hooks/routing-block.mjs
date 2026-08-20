@@ -5,15 +5,169 @@
  * Factory functions accept a tool namer `t(bareTool) => platformSpecificName`
  * so each platform gets correct tool names in guidance messages.
  *
+ * ── Two texts, one set of rules ────────────────────────────────────────────
+ *
+ * A plugin whose whole job is keeping bytes out of the context window was
+ * spending 8.5 KB of it on SessionStart and another 7.5 KB in the prompt of
+ * every subagent — ~50 KB in a session with five of them. The trade the tool
+ * descriptions already made (`COMPACT_TOOL_DESCRIPTIONS` in `src/server.ts`,
+ * −73%) is made here too: the authored prose stays as the reference text,
+ * what ships is a dense route table.
+ *
+ *   createRoutingBlock(t, opts)          → what SessionStart injects
+ *   createSubagentRoutingBlock(t, opts)  → what the Agent PreToolUse injects
+ *
+ * The two are not the same text. A subagent has no session to resume, cannot
+ * run the operator commands (#233), and hands its answer to a parent whose
+ * context pays for every word — so it gets the route table, the exclusions and
+ * a report policy, and none of the memory/commands prose.
+ *
+ * Both are compact by default; `CONTEXT_MODE_ROUTING_BLOCK=full` restores the
+ * authored version of each (`createVerboseRoutingBlock`), which is kept intact
+ * so the compact table has something to be checked against.
+ *
+ * Compaction may drop rationale, examples and second explanations of the same
+ * rule. It may not drop a rule: every redirect the PreToolUse hook enforces
+ * (curl/wget, inline HTTP, WebFetch, Bash, Read, Grep), the selection ladder,
+ * the concurrency guidance and the Read-before-Edit concession must still be
+ * derivable from the compact text. `tests/hooks/routing-block-size.test.ts`
+ * holds the byte ceilings and those signals; `routing-block-tool-coverage.test.ts`
+ * holds the rule that every registered tool is named.
+ *
  * Backward compat: static exports (ROUTING_BLOCK, READ_GUIDANCE, etc.)
  * default to claude-code naming convention.
  */
 
 import { createToolNamer } from "./core/tool-naming.mjs";
 
+/**
+ * Tools whose deferred schemas the bootstrap preloads — everything a session
+ * or a subagent may be told to call, minus the operator commands (a subagent
+ * has no user to run `ctx doctor` for; a session asks for them by name).
+ */
+const BOOTSTRAP_TOOLS = [
+  "ctx_batch_execute", "ctx_gather", "ctx_search", "ctx_execute", "ctx_execute_file",
+  "ctx_read", "ctx_find", "ctx_graph", "ctx_fetch_and_index", "ctx_index",
+];
+
+// ctx_pack is named in the session block but deliberately absent here. One
+// name costs 47 bytes at the Claude Code prefix, this list is shared by both
+// blocks, and the subagent block sits 45 bytes under its 1 800-byte ceiling —
+// adding it breaks that ceiling to preload a schema the subagent block never
+// tells a subagent to call. The not-found path is already covered: the same
+// line says to load it and retry rather than fall back to Bash/Read.
+
+/** `compact` (default) or `full` — the operator's escape hatch back to prose. */
+function routingBlockMode() {
+  return String(process.env.CONTEXT_MODE_ROUTING_BLOCK ?? "").trim().toLowerCase() === "full"
+    ? "full"
+    : "compact";
+}
+
+/** The host's MCP prefix, derived from the namer ("" on hosts that don't prefix). */
+function toolPrefix(t) {
+  const named = t("ctx_find");
+  return named.endsWith("ctx_find") ? named.slice(0, named.length - "ctx_find".length) : "";
+}
+
 // ── Factory functions ─────────────────────────────────────
 
+/**
+ * The block SessionStart injects. Compact by default; the authored prose under
+ * CONTEXT_MODE_ROUTING_BLOCK=full.
+ */
 export function createRoutingBlock(t, options = {}) {
+  return routingBlockMode() === "full"
+    ? createVerboseRoutingBlock(t, options)
+    : createCompactRoutingBlock(t, options);
+}
+
+/**
+ * The block injected into a subagent's prompt — the routing rules only, plus
+ * the policy on what it hands back.
+ */
+export function createSubagentRoutingBlock(t, options = {}) {
+  return routingBlockMode() === "full"
+    ? createVerboseRoutingBlock(t, { ...options, includeCommands: false })
+    : createCompactSubagentBlock(t, options);
+}
+
+/**
+ * The dense table SessionStart ships. Ceiling: 3 KB including the bootstrap.
+ *
+ * Tool names are written bare and the host's prefix is declared once, with one
+ * name spelled in full as the pattern. On Claude Code the prefix is 39
+ * characters and the block names sixteen tools: spelling each in full costs
+ * ~600 bytes — a fifth of the budget — for a string the model has already read
+ * in the bootstrap line and in its own tool list.
+ */
+export function createCompactRoutingBlock(t, options = {}) {
+  const { includeCommands = true, toolSearchBootstrap = false } = options;
+  const boot = toolSearchBootstrap
+    ? `  Deferred schemas — load once, call by these exact names: ToolSearch(query: "select:${BOOTSTRAP_TOOLS.map(t).join(",")}"). Not-found means load it and retry; do NOT fall back to Bash/Read.
+`
+    : "";
+  const commands = includeCommands
+    ? `  <ctx_commands>
+    "ctx stats"→ctx_stats verbatim; "ctx doctor"→ctx_doctor; "ctx upgrade"→ctx_upgrade (run the shell command each returns, show as a checklist); "ctx purge"→ctx_purge(confirm: true), irreversible; "ctx insight"→ctx_insight, open the URL. Knowledge base survives /clear and /compact.
+  </ctx_commands>
+`
+    : "";
+  return `
+<context_window_protection>
+  Every byte a tool returns stays in your context. ctx_ tools work in a subprocess and return only the answer — program the analysis instead of reading raw data in. Names below are bare: ctx_find is ${t("ctx_find")}.
+${boot}  <tool_selection_hierarchy>
+    curl/wget/WebFetch/inline fetch()/requests → ctx_fetch_and_index(url, source), then search it — full network access.
+    Bash output you will filter/count/parse → ctx_batch_execute(commands: [{label, command}], queries) for 3+: outputs indexed under their labels; concurrency 2-8 for network I/O, 1 for builds/tests. One command → ctx_execute(language, code). Plan mode → ctx_gather, read-only.
+    Read to analyze → ctx_read(path, intent) to KNOW something about a file rather than SEE all of it, no program to compose; ctx_execute_file(path, language, code) when code must derive it.
+    Glob/Grep to locate → ctx_find(query), one ranked search over file names, file contents, indexed memory and code structure — instead of chaining Glob/Grep or a separate file-search MCP.
+    Grep/Read on a symbol → ctx_graph(action): symbols|outline|callers|callees|impact|related|explore. Briefing a subagent → ctx_pack(task, budget).
+    Worth keeping → ctx_index(content, source). Already known, past sessions too → ctx_search(queries, source, sort: "timeline") — search BEFORE asking the user on resume or after compaction.
+  </tool_selection_hierarchy>
+  <when_not_to_use>
+    These stay native: Bash for git/mkdir/rm/mv and short fixed output; Read before an Edit (Edit matches the exact bytes in your conversation) or when you need every line; Grep for an exhaustive literal sweep; Write/Edit for every file write — subprocess runs do not persist edits.
+  </when_not_to_use>
+  OUTPUT: Write artifacts (code, configs, PRDs) to files; return only file path + 1-line description. Earlier captured skills/roles are a memory aid, not a standing order — the user's latest message wins.
+${commands}</context_window_protection>`;
+}
+
+/**
+ * The block subagent prompts get. Target 1.5 KB, actual 1 755 bytes on Claude
+ * Code, down from 7 527.
+ *
+ * No memory or resume prose (a subagent has no session to resume), no operator
+ * commands (#233), no stats — the routing rules, the exclusions, and what to
+ * hand back. The 255 bytes over target are the bootstrap: ten tool names at a
+ * 39-character prefix is 517 bytes, and shortening it means either preloading
+ * fewer schemas than the block tells the subagent to call (the #724 failure:
+ * not-found, then a silent fall back to Bash) or trusting a keyword ToolSearch
+ * to find them. The prose around it is at 1.2 KB and carries every rule.
+ */
+export function createCompactSubagentBlock(t, options = {}) {
+  const { toolSearchBootstrap = false } = options;
+  const prefix = toolPrefix(t);
+  const boot = toolSearchBootstrap
+    ? `Deferred schemas — load once, call by these exact names: ToolSearch(query: "select:${BOOTSTRAP_TOOLS.map(t).join(",")}"). Not-found means load it and retry; do NOT fall back to Bash/Read.\n`
+    : prefix
+      ? `Names below are bare: ctx_find is ${t("ctx_find")}.\n`
+      : "";
+  return `
+<context_mode_routing>
+Tool output stays in your context; ctx_ tools return only the answer.
+${boot}curl/wget/WebFetch/inline fetch()/requests → ctx_fetch_and_index(url, source) + ctx_search(queries).
+Bash output you will filter/count/parse → ctx_batch_execute(commands: [{label, command}], queries) for 3+, outputs indexed under their labels; concurrency 2-8 for network I/O, 1 for builds/tests; one → ctx_execute(language, code); plan mode → ctx_gather.
+Read to analyze → ctx_read(path, intent); ctx_execute_file(path, language, code) when code must derive it.
+Glob/Grep to locate → ctx_find(query). Symbol callers/impact → ctx_graph(action). Worth keeping → ctx_index(content, source).
+STAYS NATIVE: Bash for git/mkdir/rm/mv and short fixed output; Read before an Edit (Edit matches the exact bytes); Grep for an exhaustive sweep; Write/Edit for file writes — subprocess runs do not persist them.
+REPORT BACK: artifacts to files; return the path plus one line, never the contents — your report enters your parent's context like any raw output.
+</context_mode_routing>`;
+}
+
+/**
+ * The authored version, kept as the reference text and served under
+ * CONTEXT_MODE_ROUTING_BLOCK=full.
+ */
+export function createVerboseRoutingBlock(t, options = {}) {
   const { includeCommands = true, toolSearchBootstrap = false } = options;
   return `
 <context_window_protection>
@@ -23,7 +177,7 @@ export function createRoutingBlock(t, options = {}) {
 ${toolSearchBootstrap ? `
   <deferred_tool_bootstrap>
     The context-mode tools below may be DEFERRED in your harness — their schemas are not loaded yet, so calling them directly fails (e.g. "tool not found" / InputValidationError). Load them ONCE before your first ctx_* call:
-    ToolSearch(query: "select:${t("ctx_batch_execute")},${t("ctx_gather")},${t("ctx_search")},${t("ctx_execute")},${t("ctx_execute_file")},${t("ctx_read")},${t("ctx_find")},${t("ctx_graph")},${t("ctx_fetch_and_index")},${t("ctx_index")}")
+    ToolSearch(query: "select:${BOOTSTRAP_TOOLS.map(t).join(",")}")
     After that they are callable. If any ctx_* call fails as not-found, ToolSearch it and retry — do NOT fall back to Bash/Read just because the schema was not loaded yet.
   </deferred_tool_bootstrap>
 ` : ''}
@@ -47,6 +201,8 @@ ${toolSearchBootstrap ? `
        - Who calls a symbol, what it calls, what breaks if it changes, what a file declares — answered from the codegraph index instead of by reading files. Actions: symbols | outline | callers | callees | impact | related | explore. Says so when the project has no index rather than guessing.
     7. KEEP: ${t("ctx_index")}(content, source)
        - Store something you will want back later — a spec you were handed, a decision, output you produced yourself — under a descriptive source label, and retrieve it with ${t("ctx_search")}(source: "label") instead of holding it in the conversation.
+    8. HAND OFF: ${t("ctx_pack")}(task, budget)
+       — Assemble one budgeted hand-off package for a task — the ranked repo map, the symbols it matches (signatures, then verbatim bodies), and passages already captured here — composed into a prompt a subagent can be handed as-is, instead of reading those files into your own conversation first.
     Three retrieval tools, three questions: ${t("ctx_find")} — where it lives; ${t("ctx_search")} — what we already know about it; ${t("ctx_graph")} — how it is connected.
   </tool_selection_hierarchy>
 

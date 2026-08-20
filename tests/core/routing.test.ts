@@ -4,15 +4,16 @@ import {
   resetGuidanceThrottle,
   isStructurallyBounded,
 } from "../../hooks/core/routing.mjs";
-import { createRoutingBlock } from "../../hooks/routing-block.mjs";
+import { createRoutingBlock, createSubagentRoutingBlock } from "../../hooks/routing-block.mjs";
 import { createToolNamer } from "../../hooks/core/tool-naming.mjs";
 
-// Subagent routing uses createRoutingBlock(t, { includeCommands: false }).
-// For claude-code (incl. the default when platform is unset) it also enables the
-// ToolSearch bootstrap so deferred ctx_* tools are loadable by the subagent (#724).
+// Subagent routing uses createSubagentRoutingBlock — a smaller, separate text:
+// the routing rules and the report policy, without the memory, stats and
+// operator-command prose a subagent has no use for. For claude-code (incl. the
+// default when platform is unset) it also enables the ToolSearch bootstrap so
+// deferred ctx_* tools are loadable by the subagent (#724).
 const _t = createToolNamer("claude-code");
-const SUBAGENT_BLOCK = createRoutingBlock(_t, {
-  includeCommands: false,
+const SUBAGENT_BLOCK = createSubagentRoutingBlock(_t, {
   toolSearchBootstrap: true,
 });
 
@@ -64,17 +65,20 @@ describe("Routing: Subagents (Agent only — Task removed per #241)", () => {
   });
 
   it("Agent routing block contains label guidance for batch_execute (#256)", () => {
+    // Compaction dropped the sentence explaining that the label becomes the
+    // FTS5 chunk title; what a subagent has to know is that the parameter
+    // exists and that what it writes there is what the output is indexed
+    // under — both still in the block, in the call shape and beside it.
     const decision = routePreToolUse("Agent", { prompt: "test" }, "/test");
     const prompt = decision.updatedInput.prompt;
-    expect(prompt).toContain("label");
-    expect(prompt).toContain("descriptive");
-    expect(prompt).toContain("FTS5 chunk title");
+    expect(prompt).toContain("commands: [{label, command}]");
+    expect(prompt).toMatch(/indexed under their labels/);
   });
 
   it("Agent block includes the ToolSearch bootstrap for deferred ctx_* tools on claude-code (#724)", () => {
     const decision = routePreToolUse("Agent", { prompt: "test" }, "/test", "claude-code");
     const prompt = decision.updatedInput.prompt;
-    expect(prompt).toContain("deferred_tool_bootstrap");
+    expect(prompt).toContain("Deferred schemas");
     expect(prompt).toContain("ToolSearch");
     expect(prompt).toContain("select:mcp__plugin_context-mode_context-mode__ctx_batch_execute");
   });
@@ -82,7 +86,7 @@ describe("Routing: Subagents (Agent only — Task removed per #241)", () => {
   it("Agent block omits the ToolSearch bootstrap on platforms without deferred tools (#724)", () => {
     const decision = routePreToolUse("Agent", { prompt: "test" }, "/test", "codex");
     const prompt = decision.updatedInput.prompt;
-    expect(prompt).not.toContain("deferred_tool_bootstrap");
+    expect(prompt).not.toContain("Deferred schemas");
     expect(prompt).not.toContain("ToolSearch");
   });
 
@@ -534,17 +538,27 @@ describe("Bash nudge size threshold (#817)", () => {
 // ════════════════════════════════════════════════════════════════════════════
 
 describe("Issue #856: session_continuity framing is a soft hint, not a standing order", () => {
-  const BLOCK = createRoutingBlock(_t, { includeCommands: false });
+  const SESSION = createRoutingBlock(_t);
+  const SUBAGENT = createSubagentRoutingBlock(_t);
 
-  it("does not assert directives remain active 'until the user revokes them'", () => {
-    expect(BLOCK).not.toContain("remain active until the user revokes them");
+  for (const [name, block] of [["session", SESSION], ["subagent", SUBAGENT]] as const) {
+    it(`${name} block does not assert directives remain active 'until the user revokes them'`, () => {
+      expect(block).not.toContain("remain active until the user revokes them");
+    });
+
+    it(`${name} block does not command the model to never drop behavioral directives`, () => {
+      expect(block).not.toContain("Do not drop behavioral directives as context grows");
+    });
+  }
+
+  it("the session block still carries the continuity hint, softened", () => {
+    // The `<session_continuity>` container went with the compaction; the hint
+    // it held is one line now, and it is the framing that mattered, not the tag.
+    expect(SESSION).toMatch(/memory aid, not a standing order/);
+    expect(SESSION).toMatch(/latest message wins/);
   });
 
-  it("does not command the model to never drop behavioral directives", () => {
-    expect(BLOCK).not.toContain("Do not drop behavioral directives as context grows");
-  });
-
-  it("still mentions session continuity (the hint is softened, not removed)", () => {
-    expect(BLOCK).toContain("session_continuity");
+  it("the subagent block drops it — a subagent has no earlier session to carry", () => {
+    expect(SUBAGENT).not.toMatch(/memory aid/);
   });
 });

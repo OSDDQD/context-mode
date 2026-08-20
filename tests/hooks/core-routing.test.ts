@@ -39,6 +39,7 @@ let resetGuidanceThrottle: (sessionId?: string) => void;
 let initSecurity: (buildDir: string) => Promise<boolean>;
 let ROUTING_BLOCK: string;
 let createRoutingBlock: (t: any, options?: { includeCommands?: boolean; toolSearchBootstrap?: boolean }) => string;
+let createSubagentRoutingBlock: (t: any, options?: { toolSearchBootstrap?: boolean }) => string;
 let READ_GUIDANCE: string;
 let GREP_GUIDANCE: string;
 
@@ -51,6 +52,7 @@ beforeAll(async () => {
   const constants = await import("../../hooks/routing-block.mjs");
   ROUTING_BLOCK = constants.ROUTING_BLOCK;
   createRoutingBlock = constants.createRoutingBlock;
+  createSubagentRoutingBlock = constants.createSubagentRoutingBlock;
   READ_GUIDANCE = constants.READ_GUIDANCE;
   GREP_GUIDANCE = constants.GREP_GUIDANCE;
 });
@@ -534,7 +536,7 @@ describe("routePreToolUse", () => {
   // ─── Subagent ctx_commands omission (#233) ──────────────
 
   describe("Subagent ctx_commands omission (#233)", () => {
-    it("Agent subagent prompt omits ctx_commands", () => {
+    it("Agent subagent prompt omits ctx_commands but keeps the routing rules", () => {
       const result = routePreToolUse("Agent", {
         prompt: "Search the codebase",
         subagent_type: "general-purpose",
@@ -543,7 +545,10 @@ describe("routePreToolUse", () => {
       expect(result!.action).toBe("modify");
       const prompt = (result!.updatedInput as Record<string, string>).prompt;
       expect(prompt).not.toContain("<ctx_commands>");
-      expect(prompt).toContain("<tool_selection_hierarchy>");
+      // The subagent gets its own, smaller block — the rules, not the session
+      // scaffolding — so what has to be there is the routing itself.
+      expect(prompt).toContain("ctx_batch_execute");
+      expect(prompt).toContain("ctx_find");
     });
 
     it("injects Claude Code Agent routing and ToolSearch bootstrap by default", () => {
@@ -554,7 +559,7 @@ describe("routePreToolUse", () => {
       expect(result).not.toBeNull();
       expect(result!.action).toBe("modify");
       const prompt = (result!.updatedInput as Record<string, string>).prompt;
-      expect(prompt).toContain("<context_window_protection>");
+      expect(prompt).toContain("<context_mode_routing>");
       expect(prompt).toContain("ToolSearch");
       expect(prompt).not.toContain("<ctx_commands>");
     });
@@ -569,6 +574,14 @@ describe("routePreToolUse", () => {
       const block = createRoutingBlock(t, { includeCommands: false });
       expect(block).not.toContain("<ctx_commands>");
       expect(block).toContain("<tool_selection_hierarchy>");
+    });
+
+    it("the subagent block is a different, smaller text — not the session one minus a section", () => {
+      const t = (name: string) => `mcp__test__${name}`;
+      const session = createRoutingBlock(t, { includeCommands: false });
+      const subagent = createSubagentRoutingBlock(t);
+      expect(subagent).not.toBe(session);
+      expect(subagent.length).toBeLessThan(session.length);
     });
 
     it("createRoutingBlock default includes ctx_commands", () => {
@@ -779,21 +792,26 @@ describe("routePreToolUse", () => {
     //   - file writes go through the native Write/Edit tool
     //   - ctx_execute / ctx_execute_file / Bash subprocesses do not persist edits
     //   - artifacts get written to files (path + 1-line description returned)
-    it("file_writing_policy points file writes at native Write/Edit tools", () => {
-      expect(ROUTING_BLOCK).toContain("<file_writing_policy>");
-      expect(ROUTING_BLOCK).toContain("File writes use the native Write or Edit tool");
-      // semantic intent: ctx_execute family must not be used for file writes —
-      // expressed positively as "do not persist edits to the host filesystem"
+    it("file writes are pointed at the native Write/Edit tools", () => {
+      // The `<file_writing_policy>` container went with the compaction (#1042);
+      // the rule it held is one clause inside <when_not_to_use> now, and the
+      // rule is what the model acts on.
+      expect(ROUTING_BLOCK).toMatch(/Write\/Edit for every file write/);
+      // semantic intent: the ctx_execute family must not be used for file
+      // writes — expressed positively as "do not persist edits"
       expect(ROUTING_BLOCK).toContain("ctx_execute");
       expect(ROUTING_BLOCK).toContain("do not persist edits");
     });
 
-    it("when_not_to_use redirects ctx_execute away from file creation", () => {
+    it("when_not_to_use keeps the cases where the native tool is the right one", () => {
       // Replaces the old `<forbidden_actions>` container; same semantic intent
       // (do not pick ctx_execute for file creation) expressed via WHEN NOT.
       expect(ROUTING_BLOCK).toContain("<when_not_to_use>");
-      expect(ROUTING_BLOCK).toContain("for file writes");
-      expect(ROUTING_BLOCK).toContain("analysis, processing, and computation only");
+      const section = ROUTING_BLOCK.split("<when_not_to_use>")[1]?.split("</when_not_to_use>")[0] ?? "";
+      expect(section).toMatch(/Write\/Edit for every file write/);
+      expect(section).toMatch(/do not persist edits/);
+      expect(section, "Read-before-Edit is the concession that keeps the rest credible")
+        .toMatch(/Edit matches the exact bytes/);
     });
 
     it("artifact_policy points artifacts at files with file-path return shape", () => {

@@ -11,8 +11,8 @@
  */
 
 import {
-  ROUTING_BLOCK, READ_GUIDANCE, GREP_GUIDANCE, BASH_GUIDANCE, EXTERNAL_MCP_GUIDANCE,
-  createRoutingBlock, createReadGuidance, createGrepGuidance, createBashGuidance,
+  READ_GUIDANCE, GREP_GUIDANCE, BASH_GUIDANCE, EXTERNAL_MCP_GUIDANCE,
+  createSubagentRoutingBlock, createReadGuidance, createGrepGuidance, createBashGuidance,
   createExternalMcpGuidance,
 } from "../routing-block.mjs";
 import { createToolNamer } from "./tool-naming.mjs";
@@ -1322,8 +1322,9 @@ export function routePreToolUse(toolName, toolInput, projectDir, platform, sessi
   // Build platform-specific tool namer (defaults to claude-code for backward compat)
   const t = createToolNamer(platform || "claude-code");
 
-  // Build platform-specific guidance/routing content
-  const routingBlock = platform ? createRoutingBlock(t) : ROUTING_BLOCK;
+  // Build platform-specific guidance content. The routing block itself is
+  // built only on the Agent branch below — it is the only consumer here, and
+  // building it on every PreToolUse event was pure waste.
   const readGuidance = platform ? createReadGuidance(t) : READ_GUIDANCE;
   const grepGuidance = platform ? createGrepGuidance(t) : GREP_GUIDANCE;
   const bashGuidance = platform ? createBashGuidance(t) : BASH_GUIDANCE;
@@ -1796,8 +1797,7 @@ export function routePreToolUse(toolName, toolInput, projectDir, platform, sessi
     // invoke and stalls (see #724). Prepend the ToolSearch bootstrap for claude-code
     // (the default when platform is unset). Other platforms don't defer, so skip it.
     const isClaudeCode = !platform || platform === "claude-code";
-    const subagentBlock = createRoutingBlock(t, {
-      includeCommands: false,
+    const subagentBlock = createSubagentRoutingBlock(t, {
       toolSearchBootstrap: isClaudeCode,
     });
 
