@@ -38,6 +38,7 @@ as the reasoning of its moment.
 | [0022](0022-honest-savings-accounting.md) | Honest accounting for what routing saves — fitted tokens, returns subtracted, adherence measured |
 | [0023](0023-two-supported-hosts.md) | Two supported hosts — fifteen removed in one deletion-only commit, because the multiplier was the cost |
 | [0024](0024-boundary-with-native-tools.md) | The boundary with the host's own tools — a read-only twin, artifact passthrough, and an opt-in with its trade written down |
+| [0025](0025-the-rung-that-asked.md) | The rung that asked — a prompt whose two answers were both losses becomes a redirect on Bash, and stays a prompt where a human is genuinely being asked something |
 
 ## Writing a new one
 

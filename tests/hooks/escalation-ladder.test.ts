@@ -230,8 +230,9 @@ describe("the ladder, step by step", () => {
   const steps: Array<[string, Tally, string, string, string]> = [
     // tally,                       Read,      Bash,      Grep
     ["advise", { count: 3, bytes: 40_000 }, "context", "context", "context"],
-    ["ask", { count: 6, bytes: 80_000 }, "ask", "ask", "ask"],
-    // Grep stops at ask on purpose — see below.
+    // Bash redirects from this rung up rather than prompting — see below.
+    // Grep stops at ask on purpose, also below.
+    ["ask", { count: 6, bytes: 80_000 }, "ask", "deny", "ask"],
     ["deny", { count: 9, bytes: 120_000 }, "deny", "deny", "ask"],
   ];
 
@@ -293,6 +294,39 @@ describe("the ladder, step by step", () => {
     const decision = route("Read", { file_path: bigFile, offset: 10, limit: 40 }, sid);
     expect(decision?.action ?? "null").not.toBe("ask");
     expect(decision?.action ?? "null").not.toBe("deny");
+  });
+
+  it("never prompts on a Bash command — it redirects instead", () => {
+    // The prompt was the one step whose two answers were both losses: "No"
+    // reached the model as a refusal with no replacement attached and ended
+    // the turn, "Yes" put the whole output in the window and booked the call
+    // as sanctioned, so the ladder stopped counting the bytes that had just
+    // arrived. The refusal costs the same reason text, needs nobody, and the
+    // replacement runs the same command.
+    for (const tally of [{ count: 6, bytes: 80_000 }, { count: 9, bytes: 400_000 }]) {
+      const decision = route("Bash", { command: "ps aux" }, session(tally));
+      expect(decision?.action, JSON.stringify(tally)).toBe("deny");
+      expect(decision?.reason).toContain("ctx_batch_execute");
+      expect(decision?.reason).toContain(JSON.stringify("ps aux"));
+    }
+  });
+
+  it("claims no saving for the bytes a Bash refusal prevented", () => {
+    // Unmeasurable before the run: PostToolUse takes the real size from the
+    // replacement. An invented figure here would be the defect ADR-0022 named.
+    const decision = route("Bash", { command: "ps aux" }, session({ count: 6, bytes: 80_000 }));
+    expect(decision?.redirectMeta?.bytesAvoided).toBe(0);
+  });
+
+  it("gives the prompt back to an operator who asks for it by name", () => {
+    process.env.CONTEXT_MODE_BASH_ESCALATION_ASK = "1";
+    try {
+      const decision = route("Bash", { command: "ps aux" }, session({ count: 6, bytes: 80_000 }));
+      expect(decision?.action).toBe("ask");
+      expect(decision?.reason).toContain("CONTEXT_MODE_BASH_ESCALATION_ASK");
+    } finally {
+      delete process.env.CONTEXT_MODE_BASH_ESCALATION_ASK;
+    }
   });
 
   it("never refuses a Grep, however high the tally", () => {
@@ -454,7 +488,12 @@ describe("no tally, no escalation", () => {
     unlinkSync(SENTINEL);
     const sid = session({ count: 40, bytes: 2_000_000 });
     expect(route("Read", { file_path: midFile }, sid)?.action).not.toBe("deny");
-    expect(route("Bash", { command: "ps aux" }, sid)?.action).not.toBe("deny");
+    // Bash's rung is a redirect now, so "no replacement running" has to fall
+    // back to the advisory — not to a prompt, which would be asking the caller
+    // to confirm a call against an alternative that does not exist.
+    const bash = route("Bash", { command: "ps aux" }, sid);
+    expect(bash?.action).not.toBe("deny");
+    expect(bash?.action).not.toBe("ask");
   });
 });
 

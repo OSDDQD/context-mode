@@ -150,6 +150,17 @@ const BASH_DENY_COMMANDS_ENV = "CONTEXT_MODE_BASH_DENY_COMMANDS";
 const GREP_ASK_ENV = "CONTEXT_MODE_GREP_ASK";
 
 /**
+ * Opt back into the confirmation prompt on Bash's escalation rung.
+ *
+ * Off by default since the rung became a redirect (ADR-0025): for Bash the
+ * replacement runs the same command, so there is nothing for a human to
+ * decide, and both answers to the prompt cost more than the refusal does.
+ * The knob exists for the operator who wants the old gear back on a session
+ * where they are reading command output themselves.
+ */
+const BASH_ASK_ENV = "CONTEXT_MODE_BASH_ESCALATION_ASK";
+
+/**
  * Size at or above which reading a whole file is refused.
  *
  * Defaults to the 50 000 bytes the large-read byte accounting has always used,
@@ -282,6 +293,11 @@ function matchedHeavyBash(strippedCommand, env = process.env) {
 /** @param {Record<string, string | undefined>} [env] */
 function grepAskEnabled(env = process.env) {
   return env[GREP_ASK_ENV] !== "0";
+}
+
+/** Opt-in: `1` restores the confirmation prompt on the Bash rung. */
+function bashEscalationAskEnabled(env = process.env) {
+  return env[BASH_ASK_ENV] === "1";
 }
 
 /**
@@ -1502,7 +1518,31 @@ export function routePreToolUse(toolName, toolInput, projectDir, platform, sessi
     if (!tally) return guidanceOnce("bash", bashGuidance, sessionId);
     const level = escalationLevel(tally);
 
-    if (level >= ESCALATION_DENY) {
+    // From the `ask` rung upward the answer is one answer: redirect, with the
+    // replacement call already written out. Bash therefore climbs
+    // silence → advisory → redirect, and the DENY rung has nothing left to add.
+    //
+    // This rung used to be a confirmation prompt, and a prompt is the one step
+    // on the ladder whose two answers are both losses. "No" reaches the model
+    // as a bare refusal with no replacement attached and ends the turn. "Yes"
+    // puts the whole output in the window AND books the call as
+    // `sanctioned_heavy` — the bytes arrive and the ladder is told not to count
+    // them, which is strictly worse than the leak it was pricing.
+    //
+    // A refusal costs the same kilobyte of reason text, needs nobody, and the
+    // caller reissues through ctx_batch_execute, which runs *the same command*.
+    // Nothing is traded away by not asking. Grep keeps its prompt because there
+    // the replacement answers a different question (ctx_find ranks, it does not
+    // enumerate); on Bash there is no such gap for a human to rule on.
+    if (level >= ESCALATION_ASK) {
+      if (bashEscalationAskEnabled()) {
+        return {
+          action: "ask",
+          reason:
+            `context-mode: ${tallyLine(tally)} ${t("ctx_batch_execute")}(commands, queries) indexes this command's output and returns only the sections that answer your questions.\n` +
+            `Confirm it when you mean to read the output yourself. ${escalationNote(tally, process.env, sessionId)} ${BASH_ASK_ENV}=0 turns this prompt back into a redirect.`,
+        };
+      }
       const denial = mcpRedirect({
         action: "deny",
         reason:
@@ -1516,14 +1556,8 @@ export function routePreToolUse(toolName, toolInput, projectDir, platform, sessi
         },
       }, mcpToolsAvailable);
       if (denial) return denial;
-    }
-    if (level >= ESCALATION_ASK) {
-      return {
-        action: "ask",
-        reason:
-          `context-mode: ${tallyLine(tally)} ${t("ctx_batch_execute")}(commands, queries) indexes this command's output and returns only the sections that answer your questions.\n` +
-          `Confirm it when you mean to read the output yourself. ${escalationNote(tally, process.env, sessionId)}`,
-      };
+      // MCP unavailable — the replacement does not exist right now, so the
+      // command has to stay runnable. Fall through to the advisory.
     }
     if (level >= ESCALATION_ADVISE) {
       return { action: "context", additionalContext: `context-mode: ${escalationNote(tally, process.env, sessionId)}\n${bashGuidance}` };

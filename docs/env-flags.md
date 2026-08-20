@@ -197,7 +197,7 @@ back.
 | `CONTEXT_MODE_ALLOW_PROXY` | off (`1` enables) | Lets `ctx_fetch_and_index` honour `HTTPS_PROXY`/`HTTP_PROXY`. Off by default because a proxy is an exfiltration path the plugin did not choose. |
 | `CONTEXT_MODE_FETCH_PASSTHROUGH` | built-in list only | Extra URLs only the host's native fetch can read. Entries separated by `\|\|\|`; each is a host suffix, or a regex over the whole URL when it starts with `^`. Malformed regexes are skipped. |
 
-## Layer: hooks & routing (22)
+## Layer: hooks & routing (23)
 
 The PreToolUse/SessionStart enforcement layer. These change what the model is
 allowed to do, so they are the flags most worth understanding before setting.
@@ -212,7 +212,8 @@ repeated here for completeness.
 | `CONTEXT_MODE_BASH_DENY_COMMANDS` | `npm test,docker logs,git log -p,find /(\s\|$)` | Comma-separated regexes for Bash commands whose output floods context. An entry that is not valid regex falls back to a case-insensitive substring test. Empty turns the list off. |
 | `CONTEXT_MODE_BASH_NUDGE_MIN_COMMAND_BYTES` | `0` (off, bounded `[0, 100000]`) | When `N > 0`, an unbounded Bash command shorter than N bytes skips the generic nudge. Gates only the generic nudge — `curl`/`wget` and inline HTTP redirects fire earlier and are never relaxed. |
 | `CONTEXT_MODE_GREP_ASK` | on | `0` stops `Grep`/`Glob` asking for confirmation. Only unbounded searches ask, and it is `ask`, never `deny`. |
-| `CONTEXT_MODE_NUDGE_AFTER_CALLS` | `3` | Unrouted heavy calls per step of the escalation ladder: three buys the advisory, six a confirmation, nine a refusal. |
+| `CONTEXT_MODE_BASH_ESCALATION_ASK` | off (`1` enables) | `1` restores the confirmation prompt on Bash's escalation rung. Off since ADR-0025: on Bash the replacement runs the same command, so the rung redirects instead of asking — a prompt whose "yes" lets the whole output in and books the call as sanctioned costs more than the refusal it replaced. |
+| `CONTEXT_MODE_NUDGE_AFTER_CALLS` | `3` | Unrouted heavy calls per step of the escalation ladder: three buys the advisory, six the redirect, nine the refusal. `Bash` redirects from the second step up; `Read` confirms there and refuses at the third; `Grep` tops out at a confirmation. |
 | `CONTEXT_MODE_NUDGE_AFTER_BYTES` | `102400` (100 KB) | The same ladder measured in leaked bytes. Whichever threshold is further along sets the step. |
 | `CONTEXT_MODE_ESCALATION_WINDOW_MS` | `900000` (15 min) | How far back the ladder counts. A window with no heavy call returns the session to silence. |
 | `CONTEXT_MODE_ESCALATION_DENY_MIN_BYTES` | `16384` (16 KB), floor — can only be raised | Size below which the ladder's DENY step refuses nothing. The `ask` step derives half this number, so the two steps cannot end up in the wrong order. |

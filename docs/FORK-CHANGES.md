@@ -2,7 +2,7 @@
 
 Fork of [mksglu/context-mode](https://github.com/mksglu/context-mode) at v1.0.169.
 
-Thirty-eight changes, each addressing a gap observed while running the plugin daily in
+Thirty-nine changes, each addressing a gap observed while running the plugin daily in
 Claude Code. Every one is backwards compatible, and every behavioural default
 carries an env switch back. Two defaults differ from upstream on purpose: the
 compact tool descriptions (what ships on every request) and the semantic layer,
@@ -2153,6 +2153,49 @@ escalation note now fire once per session each; after that, one line carrying
 only what the caller has to act on. ADR-0003's CASE A rubric holds for the short
 form and its contract test still passes.
 
+## 39. The rung that asked
+
+`hooks/core/routing.mjs`, `docs/adr/0025-the-rung-that-asked.md`
+
+**[ADR-0025](adr/0025-the-rung-that-asked.md)**
+
+Six unrouted calls into a live session, an ordinary `sed` came back as a
+permission prompt: *"6 unrouted heavy calls so far this session, 121.8 KB of it
+straight into your context window… Confirm it when you mean to read the output
+yourself."* The user asked what the good answer was, and there wasn't one.
+
+**"No"** reaches the model as a bare permission refusal — the hook's reason text
+is shown to the user, not attached to the tool result — so the model is told the
+call was declined, with no replacement in hand, and the turn ends. **"Yes"** puts
+the whole output in the window and then, by ADR-0008 §3, books the call as
+`sanctioned_heavy`: consent means "record it, do not hold it against the
+session". The bytes arrive *and* the ladder is told to forget them. The likelier
+of the two answers costs a kilobyte of reason text, a round trip, the output,
+and the evidence — strictly worse than the leak it was pricing.
+
+The step below (advisory) and the step above (refusal) each cost a fraction of
+that, and neither needs a human.
+
+**On Bash the ladder now climbs silence → advisory → redirect.** From the `ask`
+rung up, the decision is the refusal that already carries the ready
+`ctx_batch_execute(...)` call — reason text is a channel the model reads, so the
+turn continues and the caller has something to run. `bytesAvoided` stays `0`:
+the size is unmeasurable before the run, and PostToolUse takes the real number
+from the replacement. With the MCP server not running the rung falls through to
+the advisory, never to a prompt — confirming a call against an alternative that
+does not exist is a question with one legal answer.
+
+`Read` and `Grep` keep their prompts, because there the question is real: a
+`Read` may be the prelude to an `Edit`, and an exhaustive literal sweep is
+something `ctx_find` cannot reproduce — it ranks where Grep enumerates. On Bash
+the replacement runs *the same command* in the same shell and differs only in
+where the output lands, so there was never anything to ask about.
+`CONTEXT_MODE_BASH_ESCALATION_ASK=1` restores the old prompt.
+
+Side effect worth naming: Claude Code and Codex now agree at every rung of the
+Bash ladder, so the parity suite compares kind *and* text the whole way up
+instead of special-casing the one step where only Claude Code had a gear.
+
 ## Merged ahead of upstream: the fetch extraction ladder
 
 `src/fetch/blocks.ts`, `src/fetch/extract.ts`, `src/fetch/page-store.ts`, `src/server.ts`
@@ -2199,6 +2242,7 @@ memory and the code index.
 | `CONTEXT_MODE_SAFE_COMMANDS` | — | Extra bounded-command regexes, `\|\|\|`-separated |
 | `CONTEXT_MODE_SAFE_COMMANDS_FILE` | `<config>/context-mode/safe-commands.txt` | Same, one per line |
 | `CONTEXT_MODE_MISSED_REDIRECT_MIN_BYTES` | `2000` | Threshold for recording an unrouted payload |
+| `CONTEXT_MODE_BASH_ESCALATION_ASK` | off | `1` restores the confirmation prompt on Bash's escalation rung, which redirects instead since ADR-0025 |
 | `CONTEXT_MODE_TOOL_DESCRIPTIONS` | auto | `full` restores the verbose descriptions everywhere; `compact` pins compact even for schema-deferring hosts; unset/`auto` registers compact and upgrades to full for Claude Code ≥2.1 |
 | `CONTEXT_MODE_TOOLSEARCH_HINT` | on | `0` drops the deferred-tool ToolSearch bootstrap from the SessionStart block |
 | `CONTEXT_MODE_SUBAGENT_CAPTURE` | on | `0` disables SubagentStop transcript capture and its drain |

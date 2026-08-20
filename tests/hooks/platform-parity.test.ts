@@ -343,7 +343,7 @@ describe("the ladder climbs identically on both hosts", () => {
   const steps: Array<[string, { count: number; bytes: number }, Meaning["kind"]]> = [
     ["silent", { count: 1, bytes: 5_000 }, "silent"],
     ["advise", { count: 3, bytes: 40_000 }, "guidance"],
-    ["ask", { count: 6, bytes: 80_000 }, "guidance"], // confirm on claude-code
+    ["redirect", { count: 6, bytes: 80_000 }, "deny"],
     ["deny", { count: 9, bytes: 120_000 }, "deny"],
   ];
 
@@ -352,11 +352,11 @@ describe("the ladder climbs identically on both hosts", () => {
       seedTally(tally);
       const m = both("Bash", { command: "ps aux" });
 
-      // Claude Code has one more gear than Codex — the confirmation prompt —
-      // so the kinds are compared per host and the TEXT is compared across.
+      // Claude Code's extra gear — the confirmation prompt — belongs to Grep
+      // now, not to Bash: since ADR-0025 the Bash rung redirects on both
+      // hosts, so kind and text agree the whole way up.
       expect(m.codex.kind, `codex at step ${label}`).toBe(codexKind);
-      if (label === "ask") expect(m["claude-code"].kind).toBe("confirm");
-      else expect(m["claude-code"].kind, `claude-code at step ${label}`).toBe(codexKind);
+      expect(m["claude-code"].kind, `claude-code at step ${label}`).toBe(codexKind);
 
       expect(m.codex.text, `step ${label} says different things on the two hosts`)
         .toBe(m["claude-code"].text);
