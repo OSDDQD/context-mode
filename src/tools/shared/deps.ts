@@ -17,9 +17,10 @@
 
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { ContentStore } from "../../store.js";
-import type { HookAdapter } from "../../adapters/types.js";
+import type { HookAdapter, PlatformId } from "../../adapters/types.js";
 import type { PolyglotExecutor } from "../../executor.js";
 import type { FloodGuard } from "../../search/flood-guard.js";
+import type { RuntimeMap } from "../../runtime.js";
 
 /**
  * The response shape every ctx_* handler returns.
@@ -159,10 +160,14 @@ export interface FetchToolDeps extends ToolDeps {
 }
 
 /**
- * What `ctx_stats` needs on top of {@link ToolDeps} — the four values it
+ * What `ctx_stats` needs on top of {@link ToolDeps} — the three values it
  * reports that `src/server.ts` owns: the running version, the newer version
- * the background npm check may have found, the semantic-index footer, and the
- * sweep that retires stale per-session stats files.
+ * the background npm check may have found, and the semantic-index footer.
+ *
+ * `rollUpStaleStatsFiles` used to be a fourth. It arrived with the Pi
+ * byte-accounting patch and left with the Pi adapter; `src/server.ts` still
+ * calls the function directly at boot, so the sweep is unchanged — only the
+ * injection nothing read any more is gone.
  */
 export interface OpsToolDeps extends ToolDeps {
   /** The version of context-mode this process is running. */
@@ -171,6 +176,117 @@ export interface OpsToolDeps extends ToolDeps {
   latestVersion: () => string | null;
   /** The semantic-coverage block appended to the report. */
   semanticIndexReport: () => string;
-  /** Retire per-session stats files nothing has written to in weeks. */
-  rollUpStaleStatsFiles: (sessionsDir: string, maxAgeDays?: number) => number;
+}
+
+/**
+ * What `ctx_purge` needs on top of {@link ToolDeps} — one field.
+ *
+ * The stats file is project-scoped and `src/server.ts` reads its path from two
+ * other places (the boot-time rollup and the per-call persist), so the resolver
+ * stayed there and the handler receives it. Everything else `ctx_purge` touches
+ * it imports sideways: the store handle from `./state.js`, the wipe itself from
+ * the session layer.
+ */
+export interface PurgeToolDeps extends ToolDeps {
+  /** Path of this project's persisted stats file, reset by a project-wide purge. */
+  getStatsFilePath: () => string;
+}
+
+/**
+ * What `ctx_upgrade` needs on top of {@link ToolDeps} — two getters.
+ *
+ * `getRuntimeAwarePackageRoot` resolves the directory the upgrade writes into,
+ * and the rule it encodes (only Codex may swap in the plugin-manager runtime
+ * root; other adapters coexist on one machine) is boot-time knowledge that
+ * `src/server.ts` owns. `getClientVersion` is the MCP handshake's clientInfo,
+ * which only the live server object can answer — passing the value instead of
+ * the getter would freeze it at registration, before the handshake completes.
+ */
+export interface UpgradeToolDeps extends ToolDeps {
+  /** Plugin root to upgrade into, resolved per host platform. */
+  getRuntimeAwarePackageRoot: (platformId?: PlatformId) => string;
+  /** clientInfo from the MCP handshake, or null before/without one. */
+  getClientVersion: () => { name: string; version?: string } | undefined | null;
+}
+
+/**
+ * What `ctx_doctor` needs on top of {@link ToolDeps} — eight facts about the
+ * install, which is what a tool whose entire job is inspecting the install
+ * legitimately needs.
+ *
+ * Every one of them is computed once at boot in `src/server.ts`. Recomputing
+ * `detectRuntimes()` or re-running adapter detection inside the handler would
+ * make the report describe a fresh detection pass rather than the process the
+ * user is running — which is precisely the failure the tool is supposed to
+ * catch. `REGISTERED_CTX_TOOLS` is passed as the live array rather than a
+ * snapshot because it is the authoritative answer to "what does THIS session
+ * have", and the delivery check compares it against what is on disk.
+ */
+export interface DoctorToolDeps extends ToolDeps {
+  /** The version of context-mode this process is running. */
+  VERSION: string;
+  /** Runtimes detected once at boot; the report describes these, not a re-probe. */
+  runtimes: RuntimeMap;
+  /** Languages those runtimes enable, in the order the report prints them. */
+  available: readonly string[];
+  /** Plugin root to diagnose, resolved per host platform. */
+  getRuntimeAwarePackageRoot: (platformId?: PlatformId) => string;
+  /** Pre-detection sessions directory, passed to the storage-dir resolvers. */
+  getDefaultSessionDir: () => string;
+  /** Host adapter for hook validation — detected, or resolved on demand. */
+  getDiagnosticAdapter: () => Promise<HookAdapter | null>;
+  /** The live registry: what this session actually registered. */
+  REGISTERED_CTX_TOOLS: ReadonlyArray<{ name: string }>;
+  /** clientInfo from the MCP handshake, or null before/without one. */
+  getClientVersion: () => { name: string; version?: string } | undefined | null;
+}
+
+/**
+ * What `ctx_index` needs on top of {@link ToolDeps} — two security-relevant
+ * resolvers, both of which `ctx_execute_file` uses the same way.
+ *
+ * `checkFilePathDenyPolicy` reads the host's own Read deny policy; a second
+ * implementation here would be a second opinion on which files are off limits,
+ * which is how the gate of #442 gets bypassed. `resolveProjectPath` resolves
+ * against the project root the env cascade picked, and that cascade is boot
+ * state `src/server.ts` owns.
+ */
+export interface IndexToolDeps extends ToolDeps {
+  /** Read deny-policy gate for a file path. Returns an error result, or null. */
+  checkFilePathDenyPolicy: (filePath: string, toolName: string) => ToolResult | null;
+  /** Resolve a caller-supplied path against the resolved project root. */
+  resolveProjectPath: (filePath: string) => string;
+}
+
+/**
+ * What `ctx_execute` and `ctx_execute_file` need on top of {@link ToolDeps}.
+ *
+ * The executor is the process-wide one, for the reason {@link FetchToolDeps}
+ * gives: a second instance would not share the backgrounded-process registry
+ * that shutdown drains.
+ *
+ * The other six stayed in `src/server.ts` on the rule wave 1 set — a region
+ * travels only if the fork has actually rewritten it. `buildExecuteEcho` is the
+ * echo family shared with the batch tools, untouched upstream (see
+ * {@link BatchToolDeps}); the three `check*` guards read the host's own deny
+ * policy and the resolved project root, so re-deriving any of them inside a
+ * tool module would be a second opinion on what is off limits; and `langList` /
+ * `bunNote` are rendered from the boot-time runtime detection, so recomputing
+ * them here would describe a second probe rather than this process.
+ */
+export interface ExecuteToolDeps extends ToolDeps {
+  /** The one polyglot executor this process owns. */
+  executor: PolyglotExecutor;
+  /** Deny firewall for non-shell source code (Python/Ruby/... equivalents). */
+  checkNonShellDenyPolicy: (code: string, language: string, toolName: string) => ToolResult | null;
+  /** Refuse a path outside the project root, before the deny globs run (#852). */
+  checkProjectBoundary: (path: string, toolName: string) => ToolResult | null;
+  /** Read deny-policy gate for a file path. Returns an error result, or null. */
+  checkFilePathDenyPolicy: (filePath: string, toolName: string) => ToolResult | null;
+  /** The fenced source-code preamble prepended to every execution response. */
+  buildExecuteEcho: (language: string, code: string, path?: string) => string;
+  /** Detected languages, rendered into the tool description at registration. */
+  langList: string;
+  /** The "(Bun detected — 3-5x faster)" clause, or "" when Bun is absent. */
+  bunNote: string;
 }

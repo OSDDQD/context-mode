@@ -15,7 +15,7 @@ import { tmpdir } from "node:os";
 import { execSync, spawnSync } from "node:child_process";
 import { toUnixPath } from "../../src/cli.js";
 import { findMissingLaunchFiles } from "../../src/util/plugin-cache-integrity.js";
-import { serverSource } from "../shared/server-source.js";
+import { serverSource, toolRegistrationBlock } from "../shared/server-source.js";
 
 const ROOT = resolve(import.meta.dirname, "../..");
 
@@ -1035,9 +1035,19 @@ describe("Bin entry uses cli.bundle.mjs", () => {
     expect(helperSrc).toContain("getCommandsFromHookEntry(entry)");
     expect(helperSrc).not.toContain("entry.hooks");
 
-    for (const rel of ["src/cli.ts", "src/server.ts"]) {
+    // Both doctors — the CLI one and the MCP one — must call the shared helper.
+    // The MCP doctor moved to src/tools/doctor.ts, so the import specifier
+    // differs by one directory level; what is asserted is the same thing.
+    const importers: Array<[string, string]> = [
+      ["src/cli.ts", './util/hook-config.js'],
+      ["src/tools/doctor.ts", '../util/hook-config.js'],
+    ];
+    for (const [rel, spec] of importers) {
       const src = readFileSync(resolve(ROOT, rel), "utf-8");
-      expect(src).toContain('import { getHookScriptPaths } from "./util/hook-config.js";');
+      expect(src).toContain(`import { getHookScriptPaths } from "${spec}";`);
+    }
+    // And nowhere in the server may a private copy reappear.
+    for (const src of [readFileSync(resolve(ROOT, "src/cli.ts"), "utf-8"), serverSource()]) {
       expect(src).not.toContain("function getCommandsFromHookEntry");
       expect(src).not.toContain("function getHookScriptPaths");
     }
@@ -1101,11 +1111,9 @@ describe("Bin entry uses cli.bundle.mjs", () => {
   });
 
   it("server.ts ctx_upgrade uses cli.bundle.mjs with fallback", () => {
-    const src = serverSource();
-    // ctx_upgrade handler must prefer cli.bundle.mjs
-    const upgradeStart = src.indexOf('server.registerTool(\n  "ctx_upgrade"');
-    const upgradeEnd = src.indexOf("// ── ctx-purge", upgradeStart);
-    const upgradeSection = src.slice(upgradeStart, upgradeEnd);
+    // ctx_upgrade handler must prefer cli.bundle.mjs. Located by name so the
+    // assertion survives the handler moving into src/tools/upgrade.ts.
+    const upgradeSection = toolRegistrationBlock("ctx_upgrade");
     expect(upgradeSection).toContain("cli.bundle.mjs");
   });
 

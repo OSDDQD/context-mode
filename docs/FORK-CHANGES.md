@@ -2,12 +2,20 @@
 
 Fork of [mksglu/context-mode](https://github.com/mksglu/context-mode) at v1.0.169.
 
-Thirty-five changes, each addressing a gap observed while running the plugin daily in
+Thirty-eight changes, each addressing a gap observed while running the plugin daily in
 Claude Code. Every one is backwards compatible, and every behavioural default
 carries an env switch back. Two defaults differ from upstream on purpose: the
 compact tool descriptions (what ships on every request) and the semantic layer,
 which now adopts a local embedding runtime if one is already running instead of
 waiting to be configured.
+
+**The reasoning lives in [`docs/adr/`](adr/).** This file stays the
+chronological record — what changed, when, and with which measurements. The
+decisions those changes encode, together with the alternatives that were
+rejected, are written up as ADRs, and a section that carries one links to it
+directly under its heading. Nothing here has been removed: an entry with an ADR
+keeps its full text, because the measurement that produced a decision is part of
+the record too.
 
 ---
 
@@ -46,6 +54,8 @@ without their per-file verbose flags, `kill`, `pkill`, `sleep`, `mktemp`.
 
 ## 2. Missed-redirect telemetry
 
+> **Decision recorded in** [ADR-0022 — Honest savings accounting](adr/0022-honest-savings-accounting.md).
+
 `hooks/posttooluse.mjs`, `src/session/analytics.ts`
 
 `ctx_stats` could show what routing saved, never what it missed — so the
@@ -65,6 +75,8 @@ marker now records a `missed-redirect` event, and `ctx_stats` prints:
 Nothing is printed when the session recorded none.
 
 ## 3. `ctx_gather` — read-only gather path (upstream #1048)
+
+> **Decision recorded in** [ADR-0024 — The boundary with the host’s own tools](adr/0024-boundary-with-native-tools.md).
 
 `src/read-only.ts`, `src/server.ts`
 
@@ -86,6 +98,8 @@ first, as it always did.
 
 ## 4. Compact tool descriptions (upstream #1031)
 
+> **Decision recorded in** [ADR-0014 — The standing context budget](adr/0014-standing-context-budget.md).
+
 `src/server.ts`
 
 The authored descriptions are steering prose shipped in the tool definitions of
@@ -106,6 +120,8 @@ Measured over a live `tools/list` (12 tools, this fork):
 | **saved per request** | **13 768** | **≈3 442 (73%)** |
 
 ## 5. Incremental code indexing
+
+> **Decisions recorded in** [ADR-0009 — Capture queues](adr/0009-capture-queues.md) and [ADR-0019 — Credential screening at index time](adr/0019-index-time-credential-screening.md).
 
 `src/session/code-index.ts`, `hooks/posttooluse.mjs`, `src/server.ts`
 
@@ -154,6 +170,8 @@ and `password_reset.py` are ordinary code, and excluding them would blind
 search to the exact modules people ask about.
 
 ## 6. Optional hybrid (semantic) search
+
+> **Decision recorded in** [ADR-0010 — The semantic layer is adopted, not bundled](adr/0010-semantic-layer-adopted-not-bundled.md).
 
 `src/search/embeddings.ts`, `src/search/hybrid.ts`, `src/store.ts`
 
@@ -267,6 +285,8 @@ unreachable.
 
 ## 7. Opt-in proxy for `ctx_fetch_and_index` (upstream #1039)
 
+> **Decision recorded in** [ADR-0024 — The boundary with the host’s own tools](adr/0024-boundary-with-native-tools.md).
+
 `src/server.ts`, `src/executor.ts`
 
 The fetch subprocess unconditionally stripped `HTTP_PROXY`/`HTTPS_PROXY`/
@@ -284,6 +304,8 @@ so the in-subprocess rebinding guard can only see what this process resolves
 itself. The operator who sets the flag is accepting that.
 
 ## 8. Artifact URLs reach the tool that can actually read them (upstream #938, #984, #1006)
+
+> **Decision recorded in** [ADR-0024 — The boundary with the host’s own tools](adr/0024-boundary-with-native-tools.md).
 
 `hooks/core/routing.mjs`, `src/fetch-passthrough.ts`, `src/server.ts`
 
@@ -312,6 +334,8 @@ regex when it starts with `^`. A shared test asserts the hook and server
 implementations agree on the same URL set, so the two halves cannot drift.
 
 ## 9. The host's own memory becomes searchable
+
+> **Decision recorded in** [ADR-0011 — Host memory is indexed, never injected](adr/0011-host-memory-indexed-never-injected.md).
 
 `src/session/host-memory.ts`, `src/search/auto-memory.ts`, `src/server.ts`
 
@@ -364,6 +388,8 @@ verified here, so they are left untouched.
 
 ## 10. `ctx upgrade` stops overwriting the fork with upstream
 
+> **Decision recorded in** [ADR-0012 — Fork identity and the upgrade source](adr/0012-fork-identity-and-upgrade-source.md).
+
 `src/util/fork-info.ts`, `src/cli.ts`, `package.json`
 
 `ctx upgrade` cloned `https://github.com/mksglu/context-mode.git`
@@ -414,6 +440,8 @@ old version on disk on every run. The ceiling is now 180 s, overridable with
 
 ## 11. Merging upstream without drowning in bundle conflicts
 
+> **Decision recorded in** [ADR-0013 — Tracked bundles are the running code](adr/0013-tracked-bundles-are-the-running-code.md).
+
 `.gitattributes`, `scripts/sync-upstream.mjs`
 
 Eight `*.bundle.mjs` files are tracked because the plugin loader reads them
@@ -451,6 +479,8 @@ like the restrictions they are.
 
 ## 13. Deferred-tool awareness (Claude Code tool search)
 
+> **Decision recorded in** [ADR-0014 — The standing context budget](adr/0014-standing-context-budget.md).
+
 `hooks/sessionstart.mjs`, `hooks/routing-block.mjs`, `src/server.ts`
 
 Claude Code's tool-search releases (≥2.1, `ENABLE_TOOL_SEARCH` unset or on)
@@ -483,6 +513,8 @@ Two halves:
 
 ## 14. Subagent transcript capture
 
+> **Decision recorded in** [ADR-0009 — Capture queues](adr/0009-capture-queues.md).
+
 `hooks/subagentstop.mjs`, `src/session/subagent-capture.ts`, `src/server.ts`
 
 A subagent's context dies with the subagent: every tool output it saw is
@@ -503,6 +535,8 @@ find")` now has somewhere to look. Disable with
 `CONTEXT_MODE_SUBAGENT_CAPTURE=0`.
 
 ## 15. SessionEnd hook + `context-mode drain`
+
+> **Decisions recorded in** [ADR-0009 — Capture queues](adr/0009-capture-queues.md) and [ADR-0014 — The standing context budget](adr/0014-standing-context-budget.md).
 
 `hooks/sessionend.mjs`, `src/cli.ts`
 
@@ -529,6 +563,8 @@ system prompt bakes in the routing rules — heavy exploration in a disposable
 context that reports conclusions, not file dumps.
 
 ## 16. Cross-query deduplication in search results
+
+> **Decision recorded in** [ADR-0016 — Search responses declare what they omit](adr/0016-response-declares-what-it-omits.md).
 
 `src/server.ts`, `src/search/hybrid.ts`
 
@@ -564,6 +600,8 @@ carries `Untitled (1)`, `Untitled (2)`.
 
 ## 17. The hourly WAL reaper no longer deletes fresh knowledge bases
 
+> **Decision recorded in** [ADR-0015 — Content-store lifecycle](adr/0015-content-store-lifecycle.md).
+
 `src/store.ts`
 
 `cleanupStaleContentDBs` set its delete flag from a WAL check that ran
@@ -582,6 +620,8 @@ mode the `.db` mtime only moves on checkpoint), so the store is kept.
 | `CONTEXT_MODE_CONTENT_WAL_REAP` | on | `0` drops the WAL guard and goes by `.db` mtime alone |
 
 ## 18. Semantic coverage: honest status, and a drain that can fix it
+
+> **Decision recorded in** [ADR-0010 — The semantic layer is adopted, not bundled](adr/0010-semantic-layer-adopted-not-bundled.md).
 
 `src/server.ts`, `src/search/hybrid.ts`, `src/cli.ts`
 
@@ -602,6 +642,8 @@ per-search batch is not a plan: a 1,320-chunk index needs roughly 83 searches.
   (`ctx_search`, global-scope batch queries).
 
 ## 19. Disk accounting, budget and compaction
+
+> **Decision recorded in** [ADR-0015 — Content-store lifecycle](adr/0015-content-store-lifecycle.md).
 
 `src/store.ts`, `src/cli.ts`
 
@@ -624,6 +666,8 @@ the WAL — measured across 328 stores: **216.5 MB total, 14.3 MB of it WAL**.
   Measured on this repository's store: **10.7 MB reclaimed**.
 
 ## 20. One project's files stop landing in another project's index
+
+> **Decision recorded in** [ADR-0009 — Capture queues](adr/0009-capture-queues.md).
 
 `src/session/code-index.ts`, `src/session/subagent-capture.ts`, `hooks/subagentstop.mjs`
 
@@ -673,6 +717,8 @@ for it. And the wide number counted less: `scanOneAdapter` still reports
 
 ## 22. Storage hygiene
 
+> **Decision recorded in** [ADR-0015 — Content-store lifecycle](adr/0015-content-store-lifecycle.md).
+
 `src/server.ts`, `vitest.config.ts`, `tests/setup-storage.ts`
 
 Every session wrote its own `stats-<id>.json` and nothing ever removed them —
@@ -694,6 +740,8 @@ into spawned hooks whose tests then look under their own HOME. Measured per run:
 children with a HOME of their own, which already isolate their own writes.
 
 ## 23. The execution watchdog watches for silence, not for elapsed time
+
+> **Decision recorded in** [ADR-0006 — Execution isolation posture](adr/0006-execution-isolation-posture.md).
 
 `src/executor.ts`, `src/types.ts`
 
@@ -775,6 +823,8 @@ the old behaviour. A skipped call returns `IndexResult.skipped` with
 
 ## 25. Search says how much of the match set the caller is seeing
 
+> **Decision recorded in** [ADR-0016 — Search responses declare what they omit](adr/0016-response-declares-what-it-omits.md).
+
 `src/search/completeness.ts`, `src/store.ts`, `src/server.ts`
 
 Three results say nothing about whether three was all there was or the first
@@ -841,6 +891,8 @@ the host if they want an OS sandbox, instead of implying this already did.
 
 ## 27. Splitting `src/server.ts`
 
+> **Decision recorded in** [ADR-0020 — The ToolDeps seam](adr/0020-tooldeps-seam.md).
+
 `tests/shared/server-source.ts`, `tests/core/tool-registration.test.ts`,
 `src/tools/shared/deps.ts`, `src/tools/search.ts`, `src/search/dedup.ts`
 
@@ -905,6 +957,8 @@ pre-split 740,908), and `madge --circular` still reports the same 5 cycles, none
 of them through `server.ts`.
 
 ## 28. Retrieval quality is a number now, and the number is gated
+
+> **Decision recorded in** [ADR-0017 — Retrieval quality gate](adr/0017-retrieval-quality-gate.md).
 
 `tests/fixtures/relevance-corpus.json`, `tests/fixtures/retrieval-baseline.json`,
 `scripts/measure-retrieval.mjs`, `scripts/lib/retrieval-metrics.mjs`,
@@ -992,6 +1046,8 @@ the real script with `--lexical-only`, which is exactly the configuration that
 caused the loss.
 
 ## 29. Source files chunk at declaration boundaries
+
+> **Decision recorded in** [ADR-0018 — Code-aware chunking](adr/0018-code-aware-chunking.md).
 
 `src/store.ts`, `scripts/measure-code-chunking.mjs`,
 `scripts/lib/code-chunk-boundary.mjs`, `tests/store-code-chunking.test.ts`
@@ -1108,6 +1164,8 @@ store and the report should show the store's answer.
 
 ## 31. Credentials are screened on the way into the index
 
+> **Decision recorded in** [ADR-0019 — Credential screening at index time](adr/0019-index-time-credential-screening.md).
+
 `src/session/redact.ts`, `src/store.ts`, `src/types.ts`
 
 The index is a durable, searchable copy of whatever passed through a tool. A
@@ -1167,6 +1225,8 @@ handling credentials.
 
 ## 32. `ctx_purge` can delete one source instead of everything
 
+> **Decision recorded in** [ADR-0015 — Content-store lifecycle](adr/0015-content-store-lifecycle.md).
+
 `src/server.ts`, `src/store.ts`
 
 `ctx_purge` had two settings: one session, or the whole project. Between them
@@ -1208,6 +1268,8 @@ what to do next. Removing one row of three and calling it done is the same
 silent success as removing none.
 
 ## 33. The hook bundle that the build never built
+
+> **Decision recorded in** [ADR-0013 — Tracked bundles are the running code](adr/0013-tracked-bundles-are-the-running-code.md).
 
 `package.json`, `.gitignore`, `.github/workflows/bundle.yml`,
 `scripts/plugin-cache-integrity.mjs`, `hooks/session-attribution.bundle.mjs`,
@@ -1285,6 +1347,8 @@ target project after it and to the session's startup cwd before it. Aggregates
 that span the boundary mix both conventions.
 
 ## 34. Three searches become one plugin
+
+> **Decisions recorded in** [ADR-0021 — Retrieval consolidation](adr/0021-retrieval-consolidation.md) and [ADR-0022 — Honest savings accounting](adr/0022-honest-savings-accounting.md).
 
 Until this wave the agent's context was served by three independent MCP
 servers — fff for lexical file search, codegraph for structure, context-mode
@@ -1431,6 +1495,8 @@ daemon is running under plugin supervision on that machine.
 
 ## 35. The plugin as the host sees it
 
+> **Decisions recorded in** [ADR-0014 — The standing context budget](adr/0014-standing-context-budget.md) and [ADR-0013 — Tracked bundles are the running code](adr/0013-tracked-bundles-are-the-running-code.md).
+
 `agents/context-gather.md`, `skills/context-mode/SKILL.md`, `commands/ctx-{find,graph}.md`,
 `platform-skills/ctx-{find,graph}/`, `hooks/hooks.json`,
 `src/adapters/claude-code/{hooks,index}.ts`, `.claude-plugin/*.json`,
@@ -1504,6 +1570,8 @@ contains a file among the directories, and the test now says so out loud
 (CONTRIBUTING.md → *Plugin layout contract*).
 
 ## 36. Two tools that never arrived
+
+> **Decisions recorded in** [ADR-0013 — Tracked bundles are the running code](adr/0013-tracked-bundles-are-the-running-code.md), [ADR-0014 — The standing context budget](adr/0014-standing-context-budget.md) and [ADR-0022 — Honest savings accounting](adr/0022-honest-savings-accounting.md).
 
 `package.json` and the eleven manifests `scripts/version-sync.mjs` syncs,
 `src/util/delivery-health.ts`, `src/cli.ts`, `src/server.ts`,
@@ -1865,6 +1933,8 @@ it rebuilds the bundles when `src/**` changes, which is a defence against the ex
 failure this entry opens with.
 
 ## 37. Seventeen hosts become two
+
+> **Decisions recorded in** [ADR-0023 — Two supported hosts](adr/0023-two-supported-hosts.md) and [ADR-0012 — Fork identity and the upgrade source](adr/0012-fork-identity-and-upgrade-source.md).
 
 `src/adapters/**`, `configs/**`, `.cursor-plugin/`, `.openclaw-plugin/`, `.pi/`,
 `openclaw.plugin.json`, `scripts/version-sync.mjs`, `package.json`,

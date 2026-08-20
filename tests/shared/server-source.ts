@@ -31,17 +31,27 @@ const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..");
 export const SERVER_SOURCE_FILES: readonly string[] = [
   "src/server.ts",
   // Extracted from src/server.ts — see docs/adr and the split commits.
+  // ctx_execute + ctx_execute_file register first, so they lead the list.
+  "src/tools/execute.ts",
+  "src/tools/index-content.ts",
   "src/tools/search.ts",
   // Registered next to ctx_search in src/server.ts; listed here so the
   // "the source registers exactly these names" guard can see them.
   "src/tools/find.ts",
   "src/tools/graph.ts",
+  "src/tools/pack.ts",
   "src/tools/read.ts",
   // fetch before batch: assertions that slice "from the ctx_fetch_and_index
   // registration to the ctx_batch_execute one" rely on that order.
   "src/tools/fetch.ts",
   "src/tools/batch.ts",
   "src/tools/ops.ts",
+  "src/tools/doctor.ts",
+  "src/tools/upgrade.ts",
+  "src/tools/purge.ts",
+  // ctx_insight + the cross-platform process helpers (browserOpenArgv,
+  // openBrowserSync, killProcessOnPort) that moved out with it.
+  "src/tools/insight.ts",
   "src/tools/shared/state.ts",
   "src/search/dedup.ts",
 ];
@@ -79,4 +89,33 @@ export function serverSourceOf(relPath: string): string {
     throw new Error(`${relPath} is not one of SERVER_SOURCE_FILES`);
   }
   return readFileSync(resolve(REPO_ROOT, relPath), "utf-8");
+}
+
+/**
+ * The source text of one tool's `registerTool(...)` call, wherever it now lives.
+ *
+ * Assertions about a handler used to slice the combined source between two
+ * literal anchors — `server.registerTool(\n  "ctx_upgrade"` up to the comment
+ * that started the next tool. Both anchors are accidents of `src/server.ts`
+ * layout: an extracted module writes `deps.server.registerTool(` one indent
+ * level in, and the comment that used to follow the block stayed behind. So the
+ * anchors are computed here instead, once: the registration line is matched with
+ * the optional `deps.` prefix and any indentation, and the block ends at the
+ * first line that closes a call at column 0-2, which is the `);` of the
+ * registration itself in both layouts.
+ *
+ * Throws rather than returning "" — a slice that silently goes empty turns
+ * every `toContain` over it into a false pass, which is the exact failure mode
+ * SERVER_SOURCE_FILES exists to prevent.
+ */
+export function toolRegistrationBlock(toolName: string): string {
+  const src = serverSource();
+  const start = src.search(
+    new RegExp(`(?:deps\\.)?server\\.registerTool\\(\\s*\\n?\\s*"${toolName}"`),
+  );
+  if (start < 0) throw new Error(`no registerTool call found for ${toolName}`);
+  const rest = src.slice(start);
+  const end = rest.search(/\n {0,2}\);\s*(\n|$)/);
+  if (end < 0) throw new Error(`unterminated registerTool block for ${toolName}`);
+  return rest.slice(0, end);
 }

@@ -50,9 +50,18 @@ const DISPLACES: Record<string, string[]> = {
  * that. The diagnostics (stats, doctor, upgrade, purge, insight) are
  * affordances a user reaches for by name, not choices made against a native
  * tool — the same set ADR-0002 exempts from the WHEN: requirement.
+ *
+ * ctx_pack assembles a token-budgeted hand-off package — repo map, matching
+ * symbols, knowledge-base excerpts — for an agent that has not read the code
+ * yet. Nothing native produces that: the alternative is not one tool call but
+ * a sequence (Read a handful of files, Grep for the symbols, paste the result
+ * into a prompt), and a sequence is not a competitor a description can name.
+ * Its WHEN NOT does concede Read for the edit case, which is the Read-adjacent
+ * claim it actually makes; that is a concession, not a displacement.
  */
 const NO_NATIVE_COUNTERPART = new Set([
   "ctx_index",
+  "ctx_pack",
   "ctx_stats",
   "ctx_doctor",
   "ctx_upgrade",

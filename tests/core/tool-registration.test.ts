@@ -1,5 +1,5 @@
 /**
- * The fifteen tools, in the order they register.
+ * The sixteen tools, in the order they register.
  *
  * This is the acceptance harness for splitting `src/server.ts` apart. Moving a
  * handler into its own module is only safe if the same tools still register,
@@ -26,6 +26,10 @@ const EXPECTED_ORDER = [
   // shipped default rather than an invariant of the process.
   "ctx_find",
   "ctx_graph",
+  // ctx_pack: the composition of the three retrieval answers above it — repo
+  // map, symbols, knowledge-base excerpts — packed to one token budget. Same
+  // env-switch shape as its neighbours (CONTEXT_MODE_PACK=0).
+  "ctx_pack",
   // ctx_read: ctx_execute_file with the default program supplied, registered
   // beside the retrieval tools because that is the question it answers.
   "ctx_read",
@@ -44,8 +48,8 @@ describe("tool registration", () => {
     expect(REGISTERED_CTX_TOOLS.map(t => t.name)).toEqual([...EXPECTED_ORDER]);
   });
 
-  test("fifteen tools — no more, no fewer", () => {
-    expect(REGISTERED_CTX_TOOLS).toHaveLength(15);
+  test("sixteen tools — no more, no fewer", () => {
+    expect(REGISTERED_CTX_TOOLS).toHaveLength(16);
   });
 
   test("each one carries a handler and a description", () => {

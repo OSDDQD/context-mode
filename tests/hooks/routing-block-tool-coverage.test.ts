@@ -20,47 +20,41 @@
  * ships fine, and the rule about it is silent.
  *
  * Both variants of the block are checked, because they are two different
- * prompts: the session one and the one injected into subagents, which drops
- * the operator commands on purpose (a subagent cannot run them — #233).
+ * prompts now, not one text with a section switched off: the session block and
+ * the smaller subagent block, which drops the operator commands on purpose (a
+ * subagent cannot run them — #233) along with the memory and stats prose.
  */
 
 import { describe, it, expect } from "vitest";
-import { readFileSync } from "node:fs";
-import { resolve } from "node:path";
-import { createRoutingBlock } from "../../hooks/routing-block.mjs";
+import { createRoutingBlock, createSubagentRoutingBlock } from "../../hooks/routing-block.mjs";
 import { createToolNamer } from "../../hooks/core/tool-naming.mjs";
-
-const REPO_ROOT = resolve(__dirname, "..", "..");
+import { serverSource } from "../shared/server-source.js";
 
 /**
- * Files the server registers tools from, read as text.
+ * The tools the server registers, read out of the source as text.
  *
- * Text, not an import: the assertion is about which names are registered, and
- * reading them directly keeps this test independent of the server's module
- * graph — which pulls in the store, the adapters and the session layer, any of
- * which can be mid-refactor while this invariant still needs checking.
+ * Text, not an import of the server: the assertion is about which names are
+ * registered, and reading them directly keeps this test independent of the
+ * server's module graph — which pulls in the store, the adapters and the
+ * session layer, any of which can be mid-refactor while this invariant still
+ * needs checking. `serverSource()` is a test helper that reads text too, so
+ * that independence is unchanged.
+ *
+ * This file used to keep its OWN list of registration files, and it drifted:
+ * `src/tools/pack.ts` was extracted, `ctx_pack` shipped, and this suite could
+ * not see it — the one thing the suite exists to catch went uncaught by the
+ * suite itself. Two lists of the same thing will always drift, so there is now
+ * one: `SERVER_SOURCE_FILES` in `tests/shared/server-source.ts`, which eight
+ * other suites already depend on. A new tool file omitted from it now fails
+ * loudly across all of them instead of quietly narrowing this check.
+ *
+ * The helper's extra entries (`shared/state.ts`, `search/dedup.ts`) hold no
+ * `registerTool` call, so widening the corpus cannot add a false name.
  */
-const REGISTRATION_SOURCES = [
-  "src/server.ts",
-  "src/tools/search.ts",
-  "src/tools/find.ts",
-  "src/tools/graph.ts",
-  "src/tools/read.ts",
-  "src/tools/fetch.ts",
-  "src/tools/batch.ts",
-  "src/tools/ops.ts",
-];
-
 function registeredTools(): string[] {
   const names = new Set<string>();
-  for (const rel of REGISTRATION_SOURCES) {
-    let source: string;
-    try {
-      source = readFileSync(resolve(REPO_ROOT, rel), "utf-8");
-    } catch {
-      continue; // a file that moved is caught by the sanity check below
-    }
-    for (const m of source.matchAll(/registerTool\(\s*\n?\s*"(ctx_[a-z_]+)"/g)) names.add(m[1]);
+  for (const m of serverSource().matchAll(/registerTool\(\s*\n?\s*"(ctx_[a-z_]+)"/g)) {
+    names.add(m[1]!);
   }
   return [...names].sort();
 }
@@ -68,10 +62,20 @@ function registeredTools(): string[] {
 /**
  * Tools the SUBAGENT block is allowed to stay silent about.
  *
- * Only the operator commands, and only in the subagent variant: a subagent has
- * no user to run `ctx doctor` for and no business upgrading or purging
- * anything, which is why `includeCommands: false` exists (#233). Everything
- * else — every tool a subagent might actually choose between — must be named.
+ * Mostly the operator commands, and only in the subagent variant: a subagent
+ * has no user to run `ctx doctor` for and no business upgrading or purging
+ * anything, which is why `createSubagentRoutingBlock` is a separate text
+ * (#233). Everything else — every tool a subagent might actually choose
+ * between — must be named.
+ *
+ * `ctx_pack` is the one non-operator entry, and it is here for the same reason
+ * rather than a new one: a subagent's job is to hand its answer back to its
+ * parent, not to assemble briefs for further subagents, so it is not a tool a
+ * subagent chooses between. The cost is not rhetorical either — this list also
+ * gates the ToolSearch bootstrap below, one name there costs 47 bytes at the
+ * Claude Code prefix, and the subagent block has 45 bytes under its ceiling.
+ * The SESSION block names ctx_pack with no exemption, which is where the
+ * delegating agent actually reads it.
  *
  * The session block has no exemptions at all. If one is ever needed, it goes
  * here with the reason written out; a tool dropped from the block without a
@@ -83,12 +87,13 @@ const SUBAGENT_EXEMPT: Record<string, string> = {
   ctx_upgrade: "operator command — a subagent must not upgrade the plugin under itself",
   ctx_purge: "operator command — destructive, and never a subagent's call to make",
   ctx_insight: "operator command — opens a dashboard in the person's browser",
+  ctx_pack: "briefs a subagent — a subagent reports to its parent, it does not brief further ones",
 };
 
 const TOOLS = registeredTools();
 const t = createToolNamer("claude-code");
 const SESSION_BLOCK = createRoutingBlock(t, { includeCommands: true });
-const SUBAGENT_BLOCK = createRoutingBlock(t, { includeCommands: false, toolSearchBootstrap: true });
+const SUBAGENT_BLOCK = createSubagentRoutingBlock(t, { toolSearchBootstrap: true });
 
 describe("routing block names every registered tool", () => {
   it("finds the registrations at all", () => {
@@ -133,20 +138,34 @@ describe("routing block names every registered tool", () => {
     }
   });
 
-  it("spells every mention the running host's way", () => {
-    // A bare `ctx_read` in the block is a name the agent cannot call on Claude
-    // Code, where the wire name is prefixed. Everything must go through the
-    // namer — the `<ctx_commands>` XML tag is markup, not a tool.
+  it("gives the running host's spelling, once, for the bare names it then uses", () => {
+    // A bare `ctx_read` is a name the agent cannot call on Claude Code, where
+    // the wire name carries a 39-character prefix. Spelling all fifteen in
+    // full costs ~600 bytes of a 3 KB block, so the compact text declares the
+    // prefix instead — which only works while the declaration is present, is
+    // the host's own, and no OTHER host's spelling has leaked in beside it.
     for (const [platform, block] of [
       ["claude-code", SESSION_BLOCK],
+      ["claude-code", SUBAGENT_BLOCK],
       ["codex", createRoutingBlock(createToolNamer("codex"), { includeCommands: true })],
+      ["codex", createSubagentRoutingBlock(createToolNamer("codex"))],
     ] as const) {
       const namer = createToolNamer(platform);
+      expect(
+        block,
+        `${platform}: the block uses bare names and never spells one the host's way`,
+      ).toContain(namer("ctx_find"));
+
       const mentions = [...block.matchAll(/(?<![<\/])(?:mcp__[A-Za-z0-9_-]*__)?ctx_[a-z_]+/g)].map((m) => m[0]);
       for (const mention of mentions) {
         const bare = mention.replace(/^mcp__[A-Za-z0-9_-]*__/, "");
         if (!TOOLS.includes(bare)) continue; // prose like "ctx purge" is not a call
-        expect(mention, `${platform}: "${mention}" is not how ${platform} spells it`).toBe(namer(bare));
+        // Either bare — covered by the declaration above — or this host's
+        // full spelling. Anything else is another host's wire name.
+        expect(
+          mention === bare || mention === namer(bare),
+          `${platform}: "${mention}" is neither bare nor how ${platform} spells it`,
+        ).toBe(true);
       }
     }
   });

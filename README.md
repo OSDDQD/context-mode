@@ -285,6 +285,7 @@ npm install -g context-mode
 | `ctx_search` | Query indexed content with multiple queries in one call. | On-demand retrieval |
 | `ctx_find` | **Where does this live?** One fused search: fuzzy file names (frecency-ranked), literal grep, the FTS5 knowledge base, chunk vectors, and the codegraph neighbourhood — five signals reciprocal-rank-fused into a single list, each row tagged with the signals that found it and blind signals reported. Confine with `scope` (directory prefix) or `type` (`all` \| `files` \| `code` \| `memory`). Replaces the Glob + Grep + `ctx_search` triad. | 3 calls → 1 |
 | `ctx_graph` | **How is this connected?** Structural questions answered from the codegraph SQLite index instead of by reading files: `symbols` (where a name is defined), `outline` (a file's declarations in source order), `callers` / `callees` (transitive call-graph walk), `impact` (what breaks if a symbol changes), `related` (the graph neighbourhood of a file), `explore` (source bodies plus the call paths reaching them). Every answer states whether the index lags the working tree. Requires `codegraph init` once per project. | 15 × `Read` → a few rows |
+| `ctx_pack` | **What does the next agent need to know?** One hand-off package for a task under a token budget: the personalized-PageRank repo map, the symbols the task matches (signatures, then verbatim bodies at stated line ranges), and passages already captured in this project's knowledge base. Every block is labelled SIGNATURE, BODY or EXCERPT, and a closing NOTES block states what was included, what was trimmed and what is absent. | Read-per-file briefing → 1 call |
 | `ctx_fetch_and_index` | Fetch URL, chunk and index. Cache reuses content within TTL (default 24h, override per-call with `ttl: <ms>`). `ttl: 0` or `force: true` to bypass. Pass `requests: [{url, source}, ...]` + `concurrency: 1-8` for parallel multi-URL. | 60 KB → 40 B |
 | `ctx_stats` | Show context savings, call counts, and session statistics. | — |
 | `ctx_doctor` | Diagnose installation: runtimes, hooks, FTS5, versions. | — |
@@ -658,6 +659,8 @@ export CTX_FETCH_STRICT=1
 That blocks loopback + RFC1918 + ULA in addition to the always-blocked ranges. Useful when context-mode runs as a shared service, not on a developer's own machine.
 
 `tool_input` for any `mcp__*` tool call is also redacted before persistence — the regex matcher in `hooks/posttooluse.mjs` masks `authorization`, `auth_token`, `access_token`, `refresh_token`, `bearer`, `token`, `secret`, `password`, `passwd`, `pwd`, `api_key` / `apikey` / `x_api_key`, `cookie` / `set-cookie`, `signature`, `private_key`, and `client_secret` (case-insensitive, hyphen/underscore-insensitive) to `[REDACTED]` so credentials in MCP arguments don't end up in the session DB.
+
+> The two tables below cover the flags most people touch. **[docs/env-flags.md](docs/env-flags.md)** is the complete reference — every `CONTEXT_MODE_*` flag with its default, its layer, and whether you should set it.
 
 ### Storage environment variables
 

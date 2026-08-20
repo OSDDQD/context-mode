@@ -56,7 +56,7 @@ import { ROUTING_BLOCK } from "../../hooks/routing-block.mjs";
 import { sanitizeSchemaForStrictClients, REGISTERED_CTX_TOOLS } from "../../src/server.js";
 import { stripJsonComments, parseJsonc } from "../../src/util/jsonc.js";
 import { PLATFORM_ENV_VARS, workspaceEnvVarsFor } from "../../src/adapters/detect.js";
-import { serverSource } from "../shared/server-source.js";
+import { serverSource, toolRegistrationBlock } from "../shared/server-source.js";
 
 // ─── Shared setup ───────────────────────────────────────────────────────────
 const runtimes = detectRuntimes();
@@ -1957,7 +1957,12 @@ describe("Hook Injection", () => {
     });
     const parsed = JSON.parse(output);
     const prompt = parsed.hookSpecificOutput.updatedInput.prompt;
-    assert.ok(prompt.includes("<output_constraints>"), "Should inject output_constraints");
+    // The <output_constraints> container went with the compaction (#1042);
+    // the artifact rule it held is one OUTPUT line now.
+    assert.ok(
+      /OUTPUT: Write artifacts .* to files/.test(prompt),
+      "Should inject the artifact rule (write to files, return the path)",
+    );
     // Pillar 4 (caveman/Output Compression) retired in #482. Routing block
     // must NOT push a prose-style directive — assert the negative.
     assert.ok(
@@ -2245,14 +2250,11 @@ describe("ctx_upgrade tool: inline fallback for missing CLI", () => {
     expect(helperBody).toContain('platformId === "codex"');
     expect(helperBody).toContain("resolveCodexRuntimePluginRoot(packageRoot)");
 
-    const doctorBody = serverSrc.slice(
-      serverSrc.indexOf('server.registerTool(\n  "ctx_doctor"'),
-      serverSrc.indexOf('server.registerTool(\n  "ctx_upgrade"'),
-    );
-    const upgradeBody = serverSrc.slice(
-      serverSrc.indexOf('server.registerTool(\n  "ctx_upgrade"'),
-      serverSrc.indexOf("// ── ctx-purge"),
-    );
+    // Both blocks are located by name rather than by literal anchors: the
+    // registration line and the comment that used to follow it are layout
+    // facts of src/server.ts, and either tool may now live in its own module.
+    const doctorBody = toolRegistrationBlock("ctx_doctor");
+    const upgradeBody = toolRegistrationBlock("ctx_upgrade");
 
     expect(doctorBody).toContain("getRuntimeAwarePackageRoot(currentPlatform)");
     expect(upgradeBody).toContain("platformId = signal.platform");
@@ -2303,7 +2305,7 @@ describe("ctx_upgrade tool: inline fallback for missing CLI", () => {
     // accidentally match the shared killProcessOnPort helper definition or
     // its tests below in the same file.
     const upgradeMatch = serverSrc.match(
-      /server\.registerTool\(\s*"ctx_upgrade"[\s\S]*?^\);/m,
+      /server\.registerTool\(\s*"ctx_upgrade"[\s\S]*?^ {0,2}\);/m,
     );
     const upgradeBody = upgradeMatch ? upgradeMatch[0] : "";
 
@@ -2386,7 +2388,7 @@ describe("ctx_purge is the sole reset/wipe mechanism", () => {
 
   test("ctx_purge wipes KB, session DB, events, and stats", () => {
     const purgeMatch = serverSrc.match(
-      /server\.registerTool\(\s*"ctx_purge"[\s\S]*?^\);/m,
+      /server\.registerTool\(\s*"ctx_purge"[\s\S]*?^ {0,2}\);/m,
     );
     expect(purgeMatch).not.toBeNull();
     const purgeBody = purgeMatch![0];
@@ -2426,7 +2428,7 @@ describe("Platform-aware session paths via adapter", () => {
   // ── No hardcoded .claude in tool handlers ──
   test("ctx_purge has no hardcoded .claude path", () => {
     const purgeMatch = serverSrc.match(
-      /server\.registerTool\(\s*"ctx_purge"[\s\S]*?^\);/m,
+      /server\.registerTool\(\s*"ctx_purge"[\s\S]*?^ {0,2}\);/m,
     );
     expect(purgeMatch).not.toBeNull();
     expect(purgeMatch![0]).not.toMatch(/["']\.claude["']/);
@@ -2566,7 +2568,7 @@ describe("Project dir hash consistency", () => {
 
   test("ctx_purge uses hashProjectDir, not inline hashing", () => {
     const purgeMatch = serverSrc.match(
-      /server\.registerTool\(\s*"ctx_purge"[\s\S]*?^\);/m,
+      /server\.registerTool\(\s*"ctx_purge"[\s\S]*?^ {0,2}\);/m,
     );
     expect(purgeMatch).not.toBeNull();
     expect(purgeMatch![0]).toContain("hashProjectDir");
@@ -2620,7 +2622,7 @@ describe("ctx_purge deleted array is honest", () => {
     // is independently covered by tests/session/purge-session.test.ts which
     // proves each label appears only when at least one file was unlinked.
     const purgeBody = serverSrc.match(
-      /server\.registerTool\(\s*"ctx_purge"[\s\S]*?^\);/m,
+      /server\.registerTool\(\s*"ctx_purge"[\s\S]*?^ {0,2}\);/m,
     )![0];
     const pushes = [...purgeBody.matchAll(/deleted\.push\("([^"]+)"\)/g)];
     for (const push of pushes) {
@@ -2662,7 +2664,7 @@ describe("ctx_purge deleted array is honest", () => {
 describe("ctx_purge scoped handler (issue #520)", () => {
   const serverSrc = serverSource();
   const purgeBody = serverSrc.match(
-    /server\.registerTool\(\s*"ctx_purge"[\s\S]*?^\);/m,
+    /server\.registerTool\(\s*"ctx_purge"[\s\S]*?^ {0,2}\);/m,
   )![0];
 
   // Slice 4 — stats file & in-memory reset gated on scope === "project".
@@ -2766,7 +2768,7 @@ describe("ctx_purge scoped handler (issue #520)", () => {
     // terminator = the body of one registerTool call.
     const blocks = [
       ...serverSrc.matchAll(
-        /server\.registerTool\(\s*"([^"]+)"[\s\S]*?^\);/gm,
+        /server\.registerTool\(\s*"([^"]+)"[\s\S]*?^ {0,2}\);/gm,
       ),
     ];
     expect(blocks.length).toBeGreaterThan(5);
@@ -2860,7 +2862,7 @@ describe("ctx_purge targeted source delete (P2.3c)", () => {
   describe("source branch contract (static)", () => {
     const serverSrc = serverSource();
     const purgeBody = serverSrc.match(
-      /server\.registerTool\(\s*"ctx_purge"[\s\S]*?^\);/m,
+      /server\.registerTool\(\s*"ctx_purge"[\s\S]*?^ {0,2}\);/m,
     )![0];
     const branchIdx = purgeBody.indexOf('effectiveScope === "source"');
     const branch = purgeBody.slice(branchIdx, purgeBody.indexOf("Close the persistent FTS5"));
@@ -2979,7 +2981,7 @@ describe("ContentStore purge behavior", () => {
     // Behavioral coverage: tests/session/purge-session.test.ts slice 5.
     const serverSrc = serverSource();
     const purgeBody = serverSrc.match(
-      /server\.registerTool\(\s*"ctx_purge"[\s\S]*?^\);/m,
+      /server\.registerTool\(\s*"ctx_purge"[\s\S]*?^ {0,2}\);/m,
     )![0];
 
     // Handler resolves storePath BEFORE the optional store cleanup so
@@ -6264,6 +6266,9 @@ describe("ctx_* MCP tool annotations (#846)", () => {
     // feedback loop, which is process-local bookkeeping, not a world effect.
     ctx_find:            { readOnlyHint: true,  destructiveHint: false, idempotentHint: true,  openWorldHint: false },
     ctx_graph:           { readOnlyHint: true,  destructiveHint: false, idempotentHint: true,  openWorldHint: false },
+    // ctx_pack composes the codegraph index, the FTS5 store and the files the
+    // index points at, all read-only, and writes nothing of its own.
+    ctx_pack:            { readOnlyHint: true,  destructiveHint: false, idempotentHint: true,  openWorldHint: false },
     // ctx_read runs a fixed program of ours over one file — no caller-supplied
     // code, so unlike ctx_execute_file it is provably read-only and plan mode
     // can call it. Same reasoning as ctx_gather.
